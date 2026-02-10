@@ -1,0 +1,85 @@
+#+TITLE: mysql.el — Pure Elisp MySQL Client
+#+AUTHOR: Lucius Chen
+
+* Overview
+
+A pure Emacs Lisp MySQL client that implements the MySQL wire protocol
+directly, without depending on the external =mysql= CLI tool.
+
+Inspired by [[https://github.com/cbbrowne/pg.el][pg.el]] which proved that implementing a database wire protocol
+in pure Elisp is entirely feasible.
+
+* Features
+
+- Pure Elisp — no external dependencies
+- MySQL wire protocol (HandshakeV10 + HandshakeResponse41)
+- =mysql_native_password= and =caching_sha2_password= authentication
+- =COM_QUERY= (text protocol) for executing SQL
+- Automatic type conversion (integers, floats, JSON, etc.)
+- Proper error signaling with structured error types
+
+* Requirements
+
+- Emacs 28.1+
+- A MySQL 5.7+ or 8.x server
+
+* Installation
+
+Clone this repository and add it to your =load-path=:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "~/repos/mysql.el")
+(require 'mysql)
+#+end_src
+
+* Usage
+
+#+begin_src emacs-lisp
+;; Connect
+(setq conn (mysql-connect :host "127.0.0.1"
+                           :port 3306
+                           :user "root"
+                           :password "secret"
+                           :database "mydb"))
+
+;; Query
+(let ((result (mysql-query conn "SELECT * FROM users LIMIT 10")))
+  (mysql-result-columns result)  ;; column metadata
+  (mysql-result-rows result))    ;; list of rows (list of values)
+
+;; DML
+(let ((result (mysql-query conn "INSERT INTO users (name) VALUES ('alice')")))
+  (mysql-result-affected-rows result)  ;; => 1
+  (mysql-result-last-insert-id result)) ;; => auto-increment id
+
+;; Disconnect
+(mysql-disconnect conn)
+#+end_src
+
+* Testing
+
+** Unit tests (no server needed)
+
+#+begin_src sh
+emacs -batch -L . -l ert -l test/mysql-test.el -f ert-run-tests-batch-and-exit
+#+end_src
+
+** Integration tests (require a running MySQL)
+
+Start a MySQL instance:
+
+#+begin_src sh
+docker run --rm -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql:8
+#+end_src
+
+Run tests:
+
+#+begin_src sh
+emacs -batch -L . -l ert -l test/mysql-test.el \
+  --eval '(setq mysql-test-password "test")' \
+  -f ert-run-tests-batch-and-exit
+#+end_src
+
+* License
+
+GPL-3.0-or-later. See [[file:LICENSE][LICENSE]].
