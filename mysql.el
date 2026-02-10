@@ -94,7 +94,7 @@
 (cl-defstruct mysql-conn
   "A MySQL connection object."
   process
-  (buf (generate-new-buffer " *mysql-input*"))
+  (buf nil)
   host port user database
   server-version
   connection-id
@@ -130,10 +130,13 @@ Waits for data from the process, signaling `mysql-timeout' if
             (signal 'mysql-timeout
                     (list (format "Timed out waiting for %d bytes" n))))
           (unless (accept-process-output proc remaining nil t)
-            ;; Check if process died
-            (unless (process-live-p proc)
-              (signal 'mysql-connection-error
-                      (list "Connection closed by server")))))))))
+            ;; No new output from proc.  If the process exited, flush
+            ;; any remaining queued output from the OS before giving up.
+            (when (not (process-live-p proc))
+              (accept-process-output nil 0.05 nil t)
+              (when (< (- (point-max) (point-min)) n)
+                (signal 'mysql-connection-error
+                        (list "Connection closed by server"))))))))))
 
 (defun mysql--read-bytes (conn n)
   "Read N bytes from CONN's input buffer as a unibyte string."
@@ -643,49 +646,55 @@ HOST defaults to \"127.0.0.1\", PORT defaults to 3306.
 USER, PASSWORD, and DATABASE are strings (DATABASE is optional)."
   (unless user
     (signal 'mysql-connection-error (list "USER is required")))
-  (let* ((buf (generate-new-buffer " *mysql-input*"))
-         (proc (open-network-stream "mysql" buf host port
-                                    :type 'plain
-                                    :coding 'binary))
-         (conn (make-mysql-conn :process proc
-                                :buf buf
-                                :host host
-                                :port port
-                                :user user
-                                :database database)))
-    (set-process-coding-system proc 'binary 'binary)
-    (set-process-filter proc
-                        (lambda (_proc data)
-                          (with-current-buffer buf
-                            (goto-char (point-max))
-                            (insert data))))
-    (condition-case err
-        (progn
-          ;; Read server handshake
-          (let* ((handshake-packet (mysql--read-packet conn))
-                 (handshake-info (mysql--parse-handshake conn handshake-packet))
-                 (salt (plist-get handshake-info :salt))
-                 (auth-plugin (plist-get handshake-info :auth-plugin)))
-            ;; Send handshake response
-            (setf (mysql-conn-sequence-id conn) 1)
-            (let ((response (mysql--build-handshake-response conn password salt auth-plugin)))
-              (mysql--send-packet conn response))
-            ;; Read auth result
-            (mysql--handle-auth-response conn password salt auth-plugin))
-          conn)
-      (error
-       ;; Clean up on failure
-       (when (process-live-p proc)
-         (delete-process proc))
-       (when (buffer-live-p buf)
-         (kill-buffer buf))
-       (signal (car err) (cdr err))))))
+  (let* ((buf (generate-new-buffer " *mysql-input*")))
+    (with-current-buffer buf
+      (set-buffer-multibyte nil))
+    (let* ((proc (open-network-stream "mysql" buf host port
+                                      :type 'plain
+                                      :coding 'binary))
+           (conn (make-mysql-conn :process proc
+                                  :buf buf
+                                  :host host
+                                  :port port
+                                  :user user
+                                  :database database)))
+      (set-process-coding-system proc 'binary 'binary)
+      (set-process-filter proc
+                          (lambda (_proc data)
+                            (with-current-buffer buf
+                              (goto-char (point-max))
+                              (insert data))))
+      (condition-case err
+          (progn
+            ;; Read server handshake
+            (let* ((handshake-packet (mysql--read-packet conn))
+                   (handshake-info (mysql--parse-handshake conn handshake-packet))
+                   (salt (plist-get handshake-info :salt))
+                   (auth-plugin (plist-get handshake-info :auth-plugin)))
+              ;; Send handshake response
+              (setf (mysql-conn-sequence-id conn) 1)
+              (let ((response (mysql--build-handshake-response conn password salt auth-plugin)))
+                (mysql--send-packet conn response))
+              ;; Read auth result
+              (mysql--handle-auth-response conn password salt auth-plugin))
+            conn)
+        (error
+         ;; Clean up on failure
+         (when (process-live-p proc)
+           (delete-process proc))
+         (when (buffer-live-p buf)
+           (kill-buffer buf))
+         (signal (car err) (cdr err)))))))
 
 (defun mysql--handle-auth-response (conn password salt auth-plugin)
   "Handle the authentication response from the server.
 CONN is the connection, PASSWORD is the plaintext password,
 SALT is the nonce, AUTH-PLUGIN is the current auth plugin name."
-  (let ((packet (mysql--read-packet conn)))
+  (let ((packet (condition-case _err
+                    (mysql--read-packet conn)
+                  (mysql-connection-error
+                   (signal 'mysql-auth-error
+                           (list "Connection closed during authentication"))))))
     (pcase (mysql--packet-type packet)
       ('ok
        ;; Authentication successful
