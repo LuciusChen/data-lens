@@ -529,32 +529,33 @@ POSITION is `top', `middle', or `bottom' (default `middle')."
     (let ((line (concat (mapconcat #'identity (nreverse parts) "") right)))
       (concat left (substring line 1)))))
 
+(defun data-lens--header-label (name cidx)
+  "Build the display label for column NAME at index CIDX.
+Appends sort indicator (▲/▼) and pin marker (⊡) as appropriate."
+  (let ((sort (when (and data-lens--sort-column
+                         (string= name data-lens--sort-column))
+                (if data-lens--sort-descending "▼" "▲")))
+        (pin (when (memq cidx data-lens--pinned-columns) "⊡")))
+    (if (or sort pin)
+        (concat name (or sort "") (when pin (concat " " pin)))
+      name)))
+
 (defun data-lens--render-header (visible-cols widths)
   "Render the header row string for VISIBLE-COLS with WIDTHS.
 Each column name carries a `data-lens-header-col' text property
-so the active-column overlay can find it.
-Pinned columns show a pin indicator, sorted column shows ▲/▼."
+so the active-column overlay can find it."
   (let ((padding data-lens-column-padding)
         (parts nil))
     (dolist (cidx visible-cols)
       (let* ((name (nth cidx data-lens--result-columns))
              (w (aref widths cidx))
-             (pinned-p (memq cidx data-lens--pinned-columns))
-             (sort-indicator
-              (when (and data-lens--sort-column
-                         (string= name data-lens--sort-column))
-                (if data-lens--sort-descending "▼" "▲")))
-             (suffix (concat (or sort-indicator "")
-                             (if pinned-p " ⊡" "")))
-             (label (if (string-empty-p suffix)
-                        name
-                      (concat name suffix)))
+             (label (data-lens--header-label name cidx))
              (padded (string-pad
                       (if (> (string-width label) w)
                           (concat (truncate-string-to-width label (1- w)) "…")
                         label)
                       w))
-             (face (if pinned-p
+             (face (if (memq cidx data-lens--pinned-columns)
                        'data-lens-pinned-header-face
                      'data-lens-header-face))
              (pad-str (make-string padding ?\s)))
@@ -1232,24 +1233,27 @@ Key bindings:
     map)
   "Keymap for `data-lens-result-mode'.")
 
+(defun data-lens--update-position-indicator ()
+  "Update mode-line with current cursor position in the result grid."
+  (let ((cidx (data-lens--col-idx-at-point))
+        (ridx (get-text-property (point) 'data-lens-row-idx)))
+    (setq mode-line-position
+          (when ridx
+            (let ((total (length data-lens--result-rows))
+                  (ncols (length data-lens--result-columns))
+                  (col-name (when cidx
+                              (nth cidx data-lens--result-columns))))
+              (format " R%d/%d C%d/%d%s"
+                      (1+ ridx) total
+                      (if cidx (1+ cidx) 0) ncols
+                      (if col-name (format " [%s]" col-name) "")))))))
+
 (defun data-lens--update-header-highlight ()
   "Highlight the header cell for the column under the cursor.
-Also updates the mode-line position indicator.
 Uses an overlay so the buffer text is not modified."
   (when data-lens--column-widths
-    (let ((cidx (data-lens--col-idx-at-point))
-          (ridx (get-text-property (point) 'data-lens-row-idx)))
-      ;; Position indicator
-      (setq mode-line-position
-            (when ridx
-              (let* ((total (length data-lens--result-rows))
-                     (ncols (length data-lens--result-columns))
-                     (col-name (when cidx (nth cidx data-lens--result-columns))))
-                (format " R%d/%d C%d/%d%s"
-                        (1+ ridx) total
-                        (if cidx (1+ cidx) 0) ncols
-                        (if col-name (format " [%s]" col-name) "")))))
-      ;; Header highlight
+    (data-lens--update-position-indicator)
+    (let ((cidx (data-lens--col-idx-at-point)))
       (unless (eql cidx data-lens--header-active-col)
         (setq data-lens--header-active-col cidx)
         (when data-lens--header-overlay
