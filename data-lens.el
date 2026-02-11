@@ -37,7 +37,6 @@
 (require 'mysql)
 (require 'sql)
 (require 'comint)
-(require 'org-table)
 (require 'cl-lib)
 (require 'ring)
 
@@ -453,47 +452,27 @@ Pinned columns come first, followed by the current page's columns."
               (or (mysql-conn-database data-lens-connection) "results"))
     "*mysql: results*"))
 
-(defun data-lens--insert-simple-table (col-names rows &optional row-offset)
-  "Insert an org-table with COL-NAMES and ROWS.
-ROW-OFFSET is the starting row index for text properties (default 0).
-Each cell carries text properties `data-lens-row-idx', `data-lens-col-idx',
-and `data-lens-full-value' for edit support.
-This function is used by schema browser and REPL only."
-  (let ((max-w data-lens-column-width-max)
-        (ridx (or row-offset 0))
-        (table-start (point)))
-    ;; header
-    (insert "| "
-            (mapconcat #'identity col-names " | ")
-            " |\n")
-    (insert "|-\n")
-    ;; rows
-    (dolist (row rows)
-      (insert "| ")
-      (cl-loop for val in row
-               for cidx from 0
-               for formatted = (data-lens--format-value val)
-               for display = (data-lens--truncate-cell formatted max-w)
-               do (insert (propertize
-                           display
-                           'data-lens-row-idx ridx
-                           'data-lens-col-idx cidx
-                           'data-lens-full-value val))
-               do (insert " | "))
-      ;; fix trailing: replace last " | " with " |"
-      (delete-char -2)
-      (insert "|\n")
-      (cl-incf ridx))
-    (org-table-align)
-    ;; Extract aligned header into header-line-format
-    (goto-char table-start)
-    (let ((header-text (buffer-substring (line-beginning-position)
-                                         (line-end-position))))
-      ;; Delete header row and separator from buffer
-      (delete-region (line-beginning-position)
-                     (progn (forward-line 2) (point)))
-      (setq header-line-format
-            (propertize (concat " " header-text) 'face 'data-lens-header-face)))))
+(defun data-lens--render-static-table (col-names rows &optional column-defs)
+  "Render a table string from COL-NAMES and ROWS.
+Uses the same visual style as the column-paged result renderer.
+COLUMN-DEFS, if provided, is used for long-field detection.
+Returns a string (with text properties)."
+  (let* ((ncols (length col-names))
+         (all-cols (number-sequence 0 (1- ncols)))
+         (widths (data-lens--compute-column-widths col-names rows column-defs))
+         (sep (propertize (data-lens--render-separator all-cols widths)
+                          'face 'data-lens-border-face))
+         (header (data-lens--render-header all-cols widths))
+         (lines nil))
+    (push sep lines)
+    (push header lines)
+    (push sep lines)
+    (let ((ridx 0))
+      (dolist (row rows)
+        (push (data-lens--render-row row ridx all-cols widths) lines)
+        (cl-incf ridx)))
+    (push sep lines)
+    (mapconcat #'identity (nreverse lines) "\n")))
 
 ;;;; Column-paged renderer
 
@@ -973,8 +952,8 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
   (let* ((conn data-lens-connection)
          (result (mysql-query conn (format "DESCRIBE %s"
                                            (mysql-escape-identifier table))))
-         (col-names (data-lens--column-names
-                     (mysql-result-columns result)))
+         (columns (mysql-result-columns result))
+         (col-names (data-lens--column-names columns))
          (rows (mysql-result-rows result))
          (buf (get-buffer-create (format "*mysql: %s*" table))))
     (with-current-buffer buf
@@ -984,7 +963,8 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
         (erase-buffer)
         (insert (propertize (format "-- Structure of %s\n\n" table)
                             'face 'font-lock-comment-face))
-        (data-lens--insert-simple-table col-names rows)
+        (insert (data-lens--render-static-table col-names rows columns))
+        (insert "\n")
         (goto-char (point-min))))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
 
@@ -1959,11 +1939,10 @@ Accumulates input until a semicolon is found, then executes."
                (rows (mysql-result-rows result)))
           (if columns
               (let* ((col-names (data-lens--column-names columns))
-                     (table-str (with-temp-buffer
-                                  (data-lens--insert-simple-table col-names rows)
-                                  (buffer-string))))
+                     (table-str (data-lens--render-static-table
+                                 col-names rows columns)))
                 (data-lens-repl--output
-                 (format "\n%s%d row%s in %.3fs\n\nmysql> "
+                 (format "\n%s\n%d row%s in %.3fs\n\nmysql> "
                          table-str (length rows)
                          (if (= (length rows) 1) "" "s")
                          elapsed)))
