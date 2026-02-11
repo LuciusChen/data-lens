@@ -44,7 +44,16 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'mysql-error)
+
+;;;; Error types
+
+(define-error 'mysql-error "MySQL error")
+(define-error 'mysql-connection-error "MySQL connection error" 'mysql-error)
+(define-error 'mysql-protocol-error "MySQL protocol error" 'mysql-error)
+(define-error 'mysql-auth-error "MySQL authentication error" 'mysql-error)
+(define-error 'mysql-query-error "MySQL query error" 'mysql-error)
+(define-error 'mysql-timeout "MySQL timeout" 'mysql-error)
+(define-error 'mysql-stmt-error "MySQL prepared statement error" 'mysql-error)
 
 ;;;; Capability flags (MySQL protocol)
 

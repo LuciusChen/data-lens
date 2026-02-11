@@ -41,6 +41,9 @@
 (require 'cl-lib)
 (require 'ring)
 
+(declare-function mysql-dispatch "mysql-transient")
+(declare-function mysql-result-dispatch "mysql-transient")
+
 ;;;; Customization
 
 (defgroup mysql-interactive nil
@@ -667,6 +670,7 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
     (define-key map (kbd "C-c C-t") #'mysql-list-tables)
     (define-key map (kbd "C-c C-d") #'mysql-describe-table-at-point)
     (define-key map (kbd "C-c C-l") #'mysql-interactive-show-history)
+    (define-key map (kbd "C-c C-o") #'mysql-dispatch)
     map)
   "Keymap for `mysql-mode'.")
 
@@ -706,6 +710,7 @@ Key bindings:
     (define-key map "S" #'mysql-result-sort-by-column-desc)
     (define-key map "y" #'mysql-result-yank-cell)
     (define-key map "w" #'mysql-result-copy-row-as-insert)
+    (define-key map "?" #'mysql-result-dispatch)
     map)
   "Keymap for `mysql-result-mode'.")
 
