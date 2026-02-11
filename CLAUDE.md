@@ -1,19 +1,19 @@
-# mysql.el Development Guide
+# data-lens Development Guide
 
 Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/marginalia.
 
 ## Architecture
 
-- **Interface / Implementation separation**: `mysql.el` (protocol layer) is pure library with no UI; `mysql-interactive.el` (UI layer) depends on `mysql.el` but never the reverse. `mysql-transient.el` depends on `mysql-interactive.el` for transient menus. Keep the dependency flow strictly one-directional.
+- **Interface / Implementation separation**: `mysql.el` (protocol layer) is pure library with no UI; `data-lens.el` (UI layer) depends on `mysql.el` but never the reverse. `data-lens-transient.el` depends on `data-lens.el` for transient menus. Keep the dependency flow strictly one-directional.
 - **Single responsibility per file**: Each file has one job. Don't mix protocol code with rendering code.
 - **No side effects on load**: Loading a file should not alter Emacs behavior. All behavior activation must be explicit (user calls a command or enables a mode).
 - **Reuse Emacs infrastructure**: Use `completing-read` (not framework-specific APIs), `special-mode` for read-only buffers, `text-property-search-forward` for navigation, standard hooks, etc.
 
 ## Naming
 
-- **Public API**: `mysql-` prefix, no double dash. These are user-facing or meant for external use.
-- **Internal/private**: `mysql--` or `mysql-interactive--` double-dash prefix. Never call from outside the defining file.
-- **Predicates**: multi-word names end in `-p` (e.g., `mysql-interactive--connection-alive-p`).
+- **Public API**: `data-lens-` prefix for UI layer, `mysql-` prefix for protocol layer. No double dash for public symbols.
+- **Internal/private**: `data-lens--` or `mysql--` double-dash prefix. Never call from outside the defining file.
+- **Predicates**: multi-word names end in `-p` (e.g., `data-lens--connection-alive-p`).
 - **Unused args**: prefix with `_` (e.g., `(_ridx)`).
 
 ## Control Flow
@@ -38,14 +38,14 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Mode Definitions
 
-- Derive read-only UI buffers from `special-mode` (`mysql-result-mode`, `mysql-record-mode`, `mysql-schema-mode`).
-- Derive editing modes from appropriate parents (`sql-mode` for `mysql-mode`, `comint-mode` for `mysql-repl-mode`).
+- Derive read-only UI buffers from `special-mode` (`data-lens-result-mode`, `data-lens-record-mode`, `data-lens-schema-mode`).
+- Derive editing modes from appropriate parents (`sql-mode` for `data-lens-mode`, `comint-mode` for `data-lens-repl-mode`).
 - `define-derived-mode` auto-creates `-map`, `-hook`, and `-syntax-table`. Use them.
 - Register buffer-local hooks in the mode body (e.g., `post-command-hook`, `completion-at-point-functions`) with the LOCAL arg `t`.
 
 ## Rendering
 
-- **Text properties** for data-bearing annotations (`mysql-row-idx`, `mysql-col-idx`, `mysql-full-value`, `mysql-header-col`). They are fast (interval tree) and travel with the text.
+- **Text properties** for data-bearing annotations (`data-lens-row-idx`, `data-lens-col-idx`, `data-lens-full-value`, `data-lens-header-col`). They are fast (interval tree) and travel with the text.
 - **Overlays** only for ephemeral visual effects that should not be part of the text (e.g., header active-column highlight). Keep overlay count minimal (O(n) lookup).
 - Build buffer content from scratch via `erase-buffer` + `insert` (magit-section pattern). Never parse buffer text to extract data — always read from the cached data structures (`--result-rows`, `--result-columns`).
 
@@ -64,13 +64,13 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Autoloads
 
-- `;;;###autoload` only on: interactive commands (`mysql-mode`, `mysql-repl`, `mysql-execute`, `mysql-dispatch`), `auto-mode-alist` entries.
+- `;;;###autoload` only on: interactive commands (`data-lens-mode`, `data-lens-repl`, `data-lens-execute`, `data-lens-dispatch`), `auto-mode-alist` entries.
 - Never autoload internal functions, defcustom, or defvar.
 - Use `declare-function` for functions from optional dependencies to silence byte-compiler.
 
 ## Quality Checks
 
 Before releasing, ensure:
-- `(byte-compile-file "mysql-interactive.el")` produces no warnings.
+- `(byte-compile-file "data-lens.el")` produces no warnings.
 - All public functions have docstrings.
 - Every file starts with `;;; -*- lexical-binding: t; -*-` and ends with `(provide 'pkg)` / `;;; pkg.el ends here`.

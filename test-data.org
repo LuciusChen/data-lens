@@ -1,0 +1,57 @@
+#+TITLE: MySQL.el Test Data
+
+* Customers (18 columns)
+
+| id | first_name | last_name | email                    | phone       | address              | city      | state     | zip_code | country | birth_date | gender | credit_limit | notes                          | metadata                              | avatar | created_at          | updated_at          |
+|----+------------+-----------+--------------------------+-------------+----------------------+-----------+-----------+----------+---------+------------+--------+--------------+--------------------------------+---------------------------------------+--------+---------------------+---------------------|
+|  1 | Wei        | Zhang     | wei.zhang@example.com    | 13800001111 | 88 Nanjing Road      | Shanghai  | Shanghai  |   200001 | China   | 1990-03-15 | M      |     50000.00 | VIP customer since 2020        | {"tier":"gold","points":12800}        | NULL   | 2025-01-01 10:00:00 | 2025-01-15 14:20:00 |
+|  2 | Mei        | Li        | mei.li@example.com       | 13900002222 | 66 Wangfujing Street | Beijing   | Beijing   |   100006 | China   | 1985-07-22 | F      |     30000.00 | NULL                           | {"tier":"silver","points":5400}       | NULL   | 2025-01-02 11:00:00 | 2025-01-02 11:00:00 |
+|  3 | Jun        | Wang      | jun.wang@example.com     | 13700003333 | 12 Tianhe Road       | Guangzhou | Guangdong |   510620 | China   | 1992-11-08 | M      |     20000.00 | Frequent buyer                 | {"tier":"silver","points":7200}       | NULL   | 2025-01-03 09:30:00 | 2025-01-20 16:45:00 |
+|  4 | Xia        | Chen      | xia.chen@example.com     | 13600004444 | 99 Jiefang Road      | Wuhan     | Hubei     |   430000 | China   | 1988-01-30 | F      |     80000.00 | Corporate account manager      | {"tier":"platinum","points":34500}    | NULL   | 2025-01-04 08:00:00 | 2025-01-25 11:00:00 |
+|  5 | Hao        | Liu       | hao.liu@example.com      | 13500005555 | 45 Chunxi Road       | Chengdu   | Sichuan   |   610000 | China   | 1995-06-12 | M      |     15000.00 | NULL                           | {"tier":"bronze","points":1200}       | NULL   | 2025-01-05 12:00:00 | 2025-01-05 12:00:00 |
+|  6 | Yan        | Yang      | yan.yang@example.com     | 13400006666 | 7 Zhongshan Road     | Nanjing   | Jiangsu   |   210000 | China   | 1991-09-25 | F      |     25000.00 | Prefers local pickup           | {"tier":"silver","points":6100}       | NULL   | 2025-01-06 15:00:00 | 2025-01-06 15:00:00 |
+|  7 | Tao        | Huang     | tao.huang@example.com    | 13300007777 | 33 Hubin Road        | Hangzhou  | Zhejiang  |   310000 | China   | 1987-04-18 | M      |     60000.00 | Long-time customer             | {"tier":"gold","points":18900}        | NULL   | 2025-01-07 10:30:00 | 2025-01-25 08:15:00 |
+|  8 | Ling       | Wu        | ling.wu@example.com      | 13200008888 | 21 Binjiang Ave      | Shenzhen  | Guangdong |   518000 | China   | 1993-12-03 | F      |     10000.00 | NULL                           | NULL                                  | NULL   | 2025-01-08 14:00:00 | 2025-01-08 14:00:00 |
+|  9 | Feng       | Zhao      | feng.zhao@example.com    | 13100009999 | 8 Heping Road        | Tianjin   | Tianjin   |   300000 | China   | 1989-08-07 | M      |     35000.00 | Interested in home appliances  | {"tier":"gold","points":11000}        | NULL   | 2025-01-09 09:00:00 | 2025-01-09 09:00:00 |
+| 10 | Qing       | Sun       | qing.sun@example.com     | 13000000000 | 55 Zhonghua Road     | Chongqing | Chongqing |   400000 | China   | 1994-02-28 | O      |     45000.00 | New VIP upgrade pending review | {"tier":"silver","points":9800}       | NULL   | 2025-01-10 16:00:00 | 2025-01-28 20:00:00 |
+
+* Products (14 columns)
+
+| id | sku             | name                    | category    | sub_category | brand      | description                                 | specs                                       | price   | cost    | stock_qty | weight_kg | is_active | created_at          |
+|----+-----------------+-------------------------+-------------+--------------+------------+---------------------------------------------+---------------------------------------------+---------+---------+-----------+-----------+-----------+---------------------|
+|  1 | ELEC-PHONE-001  | ProMax Ultra 15         | Electronics | Smartphones  | TechBrand  | Flagship smartphone with 6.7" OLED display  | {"screen":"6.7in","storage":"256GB"}         | 6999.00 | 3500.00 |       150 |      0.22 |         1 | 2025-01-01 00:00:00 |
+|  2 | ELEC-LAPTOP-001 | AirBook Pro 14          | Electronics | Laptops      | TechBrand  | Ultra-thin laptop, M3 chip, 16GB RAM        | {"screen":"14in","cpu":"M3","ram":"16GB"}    | 9999.00 | 6000.00 |        80 |      1.55 |         1 | 2025-01-01 00:00:00 |
+|  3 | ELEC-EAR-001    | SoundPods Pro           | Electronics | Audio        | SoundTech  | Noise-cancelling wireless earbuds            | {"anc":true,"battery":"30h"}                | 1299.00 |  400.00 |       300 |      0.05 |         1 | 2025-01-01 00:00:00 |
+|  4 | HOME-CHAIR-001  | ErgoComfort Office Chair | Home        | Furniture    | ComfortPlus | Ergonomic mesh office chair                  | {"material":"mesh","max_weight":"150kg"}     | 2499.00 |  800.00 |        45 |     15.00 |         1 | 2025-01-01 00:00:00 |
+|  5 | BOOK-TECH-001   | Modern Database Systems | Books       | Technology   | TechPress  | Comprehensive guide to modern databases      | {"pages":856,"isbn":"978-7-111-12345-6"}     |  128.00 |   40.00 |       500 |      1.20 |         1 | 2025-01-01 00:00:00 |
+|  6 | CLOTH-JACK-001  | Urban Windbreaker       | Clothing    | Outerwear    | UrbanWear  | Waterproof windbreaker jacket               | {"material":"nylon","waterproof":true}       |  599.00 |  150.00 |       200 |      0.35 |         1 | 2025-01-01 00:00:00 |
+|  7 | FOOD-TEA-001    | Dragon Well Green Tea   | Food        | Tea          | TeaMaster  | Premium Longjing green tea from Hangzhou     | {"origin":"Hangzhou","grade":"AAA"}          |  388.00 |   80.00 |      1000 |      0.28 |         1 | 2025-01-01 00:00:00 |
+|  8 | ELEC-WATCH-001  | SmartFit Band 7         | Electronics | Wearables    | FitTech    | Fitness tracker with heart rate and GPS      | {"sensors":["hr","spo2","gps"],"battery":"14d"} |  699.00 |  200.00 |       250 |      0.03 |         1 | 2025-01-01 00:00:00 |
+
+* Orders (16 columns)
+
+| id | customer_id | order_date          | status     | shipping_addr                  | shipping_city | shipping_zip | payment_method | subtotal  | tax     | shipping_fee | discount | total     | tracking_no    | notes                     | created_at          |
+|----+-------------+---------------------+------------+--------------------------------+---------------+--------------+----------------+-----------+---------+--------------+----------+-----------+----------------+---------------------------+---------------------|
+|  1 |           1 | 2024-12-01 10:30:00 | delivered  | 88 Nanjing Road, Shanghai      | Shanghai      |       200001 | Alipay         |   8298.00 |  829.80 |         0.00 |   500.00 |   8627.80 | SF1234567890   | Gift wrapped              | 2024-12-01 10:30:00 |
+|  2 |           1 | 2025-01-15 14:20:00 | shipped    | 88 Nanjing Road, Shanghai      | Shanghai      |       200001 | WeChat Pay     |   1299.00 |  129.90 |        10.00 |     0.00 |   1438.90 | YT9876543210   | NULL                      | 2025-01-15 14:20:00 |
+|  3 |           2 | 2025-01-20 09:00:00 | processing | 66 Wangfujing Street, Beijing  | Beijing       |       100006 | Credit Card    |   9999.00 |  999.90 |         0.00 |  1000.00 |   9998.90 | NULL           | Urgent - needed by Friday | 2025-01-20 09:00:00 |
+|  4 |           3 | 2025-01-22 16:45:00 | pending    | 12 Tianhe Road, Guangzhou       | Guangzhou     |       510620 | Alipay         |    727.00 |   72.70 |        15.00 |     0.00 |    814.70 | NULL           | NULL                      | 2025-01-22 16:45:00 |
+|  5 |           4 | 2025-01-10 11:00:00 | delivered  | 99 Jiefang Road, Wuhan          | Wuhan         |       430000 | Bank Transfer  |  16497.00 | 1649.70 |         0.00 |  2000.00 |  16146.70 | SF2468013579   | Corporate PO #TC-2025     | 2025-01-10 11:00:00 |
+|  6 |           7 | 2025-01-25 08:15:00 | shipped    | 33 Hubin Road, Hangzhou          | Hangzhou      |       310000 | Alipay         |    388.00 |   38.80 |         8.00 |     0.00 |    434.80 | ZT1357924680   | NULL                      | 2025-01-25 08:15:00 |
+|  7 |           5 | 2025-01-28 20:00:00 | pending    | 45 Chunxi Road, Chengdu          | Chengdu       |       610000 | WeChat Pay     |   7698.00 |  769.80 |         0.00 |   300.00 |   8167.80 | NULL           | Birthday gift for wife    | 2025-01-28 20:00:00 |
+
+* Order Items (6 columns)
+
+| id | order_id | product_id | quantity | unit_price | line_total |
+|----+----------+------------+----------+------------+------------|
+|  1 |        1 |          1 |        1 |    6999.00 |    6999.00 |
+|  2 |        1 |          3 |        1 |    1299.00 |    1299.00 |
+|  3 |        2 |          3 |        1 |    1299.00 |    1299.00 |
+|  4 |        3 |          2 |        1 |    9999.00 |    9999.00 |
+|  5 |        4 |          6 |        1 |     599.00 |     599.00 |
+|  6 |        4 |          5 |        1 |     128.00 |     128.00 |
+|  7 |        5 |          1 |        2 |    6999.00 |   13998.00 |
+|  8 |        5 |          4 |        1 |    2499.00 |    2499.00 |
+|  9 |        6 |          7 |        1 |     388.00 |     388.00 |
+| 10 |        7 |          1 |        1 |    6999.00 |    6999.00 |
+| 11 |        7 |          8 |        1 |     699.00 |     699.00 |
