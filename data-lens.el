@@ -460,48 +460,59 @@ Returns a string (with text properties)."
   (let* ((ncols (length col-names))
          (all-cols (number-sequence 0 (1- ncols)))
          (widths (data-lens--compute-column-widths col-names rows column-defs))
-         (sep (propertize (data-lens--render-separator all-cols widths)
-                          'face 'data-lens-border-face))
+         (bface 'data-lens-border-face)
+         (sep-top (propertize (data-lens--render-separator all-cols widths 'top)
+                              'face bface))
+         (sep-mid (propertize (data-lens--render-separator all-cols widths 'middle)
+                              'face bface))
+         (sep-bot (propertize (data-lens--render-separator all-cols widths 'bottom)
+                              'face bface))
          (header (data-lens--render-header all-cols widths))
          (lines nil))
-    (push sep lines)
+    (push sep-top lines)
     (push header lines)
-    (push sep lines)
+    (push sep-mid lines)
     (let ((ridx 0))
       (dolist (row rows)
         (push (data-lens--render-row row ridx all-cols widths) lines)
         (cl-incf ridx)))
-    (push sep lines)
+    (push sep-bot lines)
     (mapconcat #'identity (nreverse lines) "\n")))
 
 ;;;; Column-paged renderer
 
 (defun data-lens--replace-edge-borders (str has-prev has-next)
   "Replace edge border characters in STR with page indicators.
-When HAS-PREV is non-nil, replace the first `|' or `+' with `◂'.
-When HAS-NEXT is non-nil, replace the last `|' or `+' with `▸'.
-Preserves existing text properties."
+When HAS-PREV is non-nil, replace the first border char with `◂'.
+When HAS-NEXT is non-nil, replace the last border char with `▸'."
   (when has-prev
     (let ((c (aref str 0)))
-      (when (or (= c ?|) (= c ?+))
+      (when (memq c '(?│ ?┌ ?├ ?└))
         (setq str (concat (propertize "◂" 'face 'data-lens-border-face)
                           (substring str 1))))))
   (when has-next
     (let* ((len (length str))
            (c (aref str (1- len))))
-      (when (or (= c ?|) (= c ?+))
+      (when (memq c '(?│ ?┐ ?┤ ?┘))
         (setq str (concat (substring str 0 (1- len))
                            (propertize "▸" 'face 'data-lens-border-face))))))
   str)
 
-(defun data-lens--render-separator (visible-cols widths)
-  "Render a separator line for VISIBLE-COLS with WIDTHS."
-  (let ((padding data-lens-column-padding)
-        (parts nil))
+(defun data-lens--render-separator (visible-cols widths &optional position)
+  "Render a separator line for VISIBLE-COLS with WIDTHS.
+POSITION is `top', `middle', or `bottom' (default `middle')."
+  (let* ((padding data-lens-column-padding)
+         (pos (or position 'middle))
+         (left  (pcase pos ('top "┌") ('bottom "└") (_ "├")))
+         (cross (pcase pos ('top "┬") ('bottom "┴") (_ "┼")))
+         (right (pcase pos ('top "┐") ('bottom "┘") (_ "┤")))
+         (parts nil))
     (dolist (cidx visible-cols)
-      (push (concat "+" (make-string (+ (aref widths cidx) (* 2 padding)) ?-))
+      (push (concat cross (make-string (+ (aref widths cidx) (* 2 padding)) ?─))
             parts))
-    (concat (mapconcat #'identity (nreverse parts) "") "+")))
+    ;; Replace the leading cross of the first column with the left edge
+    (let ((line (concat (mapconcat #'identity (nreverse parts) "") right)))
+      (concat left (substring line 1)))))
 
 (defun data-lens--render-header (visible-cols widths)
   "Render the header row string for VISIBLE-COLS with WIDTHS.
@@ -518,7 +529,7 @@ so the active-column overlay can find it."
                         name)
                       w))
              (pad-str (make-string padding ?\s)))
-        (push (concat (propertize "|" 'face 'data-lens-border-face)
+        (push (concat (propertize "│" 'face 'data-lens-border-face)
                       pad-str
                       (propertize padded
                                   'face 'data-lens-header-face
@@ -526,7 +537,7 @@ so the active-column overlay can find it."
                       pad-str)
               parts)))
     (concat (mapconcat #'identity (nreverse parts) "")
-            (propertize "|" 'face 'data-lens-border-face))))
+            (propertize "│" 'face 'data-lens-border-face))))
 
 (defun data-lens--render-row (row ridx visible-cols widths)
   "Render a single data ROW at row index RIDX.
@@ -560,11 +571,11 @@ Returns a propertized string."
                                'data-lens-full-value (if edited (cdr edited) val)
                                'face face))
              (pad-str (make-string padding ?\s)))
-        (push (concat (propertize "|" 'face 'data-lens-border-face)
+        (push (concat (propertize "│" 'face 'data-lens-border-face)
                       pad-str cell pad-str)
               parts)))
     (concat (mapconcat #'identity (nreverse parts) "")
-            (propertize "|" 'face 'data-lens-border-face))))
+            (propertize "│" 'face 'data-lens-border-face))))
 
 (defun data-lens--render-footer (total offset num-pages cur-page)
   "Return the footer string for TOTAL rows, OFFSET shown, page CUR-PAGE/NUM-PAGES."
@@ -612,9 +623,16 @@ Returns a propertized string."
          (has-next (< cur-page (1- num-pages)))
          (edge (lambda (s) (data-lens--replace-edge-borders
                             s has-prev has-next)))
-         (sep (funcall edge
-                       (propertize (data-lens--render-separator visible-cols widths)
-                                   'face 'data-lens-border-face))))
+         (bface 'data-lens-border-face)
+         (sep-top (funcall edge (propertize (data-lens--render-separator
+                                             visible-cols widths 'top)
+                                            'face bface)))
+         (sep-mid (funcall edge (propertize (data-lens--render-separator
+                                             visible-cols widths 'middle)
+                                            'face bface)))
+         (sep-bot (funcall edge (propertize (data-lens--render-separator
+                                             visible-cols widths 'bottom)
+                                            'face bface))))
     (erase-buffer)
     (setq header-line-format nil)
     (when data-lens--pending-edits
@@ -623,16 +641,16 @@ Returns a propertized string."
                        (length data-lens--pending-edits)
                        (if (= (length data-lens--pending-edits) 1) "" "s"))
                'face 'data-lens-modified-face)))
-    (insert sep "\n")
+    (insert sep-top "\n")
     (insert (funcall edge (data-lens--render-header visible-cols widths)) "\n")
-    (insert sep "\n")
+    (insert sep-mid "\n")
     (let ((ridx 0))
       (dolist (row page)
         (insert (funcall edge
                          (data-lens--render-row row ridx visible-cols widths))
                 "\n")
         (cl-incf ridx)))
-    (insert sep "\n")
+    (insert sep-bot "\n")
     (insert (data-lens--render-footer
              total data-lens--display-offset
              num-pages (1+ cur-page))
