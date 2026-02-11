@@ -1,15 +1,21 @@
-#+TITLE: mysql.el — Pure Elisp MySQL Client
+#+TITLE: data-lens — Interactive Database Client for Emacs
 #+AUTHOR: Lucius Chen
 
 * Overview
 
-A pure Emacs Lisp MySQL client that implements the MySQL wire protocol
-directly, without depending on the external =mysql= CLI tool.
+A pure Emacs Lisp MySQL client with an interactive data browsing UI.
+
+- =mysql.el= — pure Elisp MySQL wire protocol implementation (no external CLI needed)
+- =data-lens.el= — interactive UI layer: column-paged result browser, record view, FK navigation, editing, REPL
+- =data-lens-transient.el= — Magit-style transient menus
+- =ob-mysql.el= — Org-Babel integration
 
 Inspired by [[https://github.com/cbbrowne/pg.el][pg.el]] which proved that implementing a database wire protocol
 in pure Elisp is entirely feasible.
 
 * Features
+
+** Protocol Layer (mysql.el)
 
 - Pure Elisp — no external dependencies
 - MySQL wire protocol (HandshakeV10 + HandshakeResponse41)
@@ -23,6 +29,18 @@ in pure Elisp is entirely feasible.
 - Extensible type parsing via =mysql-type-parsers=
 - Proper error signaling with structured error types
 
+** Interactive UI (data-lens.el)
+
+- Column-paged result display (no horizontal scrolling)
+- Record buffer for single-row detail view
+- Foreign key detection and navigation
+- Inline cell editing with UPDATE generation
+- WHERE filtering and column sorting
+- Pin/unpin columns, adjust column widths
+- CSV/Org export, copy as INSERT
+- Schema browser, SQL completion, query history
+- REPL mode (comint-based)
+
 * Requirements
 
 - Emacs 28.1+
@@ -33,13 +51,15 @@ in pure Elisp is entirely feasible.
 Clone this repository and add it to your =load-path=:
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "~/repos/mysql.el")
-(require 'mysql)
+(add-to-list 'load-path "~/repos/data-lens")
+(require 'data-lens)
 #+end_src
 
-* Usage
+* Protocol Layer Usage
 
 #+begin_src emacs-lisp
+(require 'mysql)
+
 ;; Connect
 (setq conn (mysql-connect :host "127.0.0.1"
                            :port 3306
@@ -109,19 +129,17 @@ Clone this repository and add it to your =load-path=:
 (mysql-escape-literal "it's a \"test\"")   ;; => "'it\\'s a \\\"test\\\"'"
 #+end_src
 
-* Interactive Client (mysql-interactive.el)
-
-交互式 SQL 客户端，提供 SQL 编辑、结果浏览、Schema 浏览、REPL 等功能。
+* Interactive Client
 
 ** 快速开始
 
 *** 1. 配置连接
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "~/repos/mysql.el")
-(require 'mysql-interactive)
+(add-to-list 'load-path "~/repos/data-lens")
+(require 'data-lens)
 
-(setq mysql-connection-alist
+(setq data-lens-connection-alist
       '(("dev" . (:host "127.0.0.1" :port 3306
                   :user "root" :password "test"
                   :database "mydb"))))
@@ -130,8 +148,7 @@ Clone this repository and add it to your =load-path=:
 *** 2. 打开 SQL 编辑 buffer
 
 #+begin_src
-M-x mysql-mode            ;; 新建一个 SQL 编辑 buffer
-;; 或者打开 .mysql 文件    ;; 自动激活 mysql-mode
+M-x data-lens-mode        ;; 新建一个 SQL 编辑 buffer
 #+end_src
 
 *** 3. 连接数据库
@@ -149,7 +166,7 @@ SELECT * FROM users LIMIT 10;
 
 光标放在 SQL 语句上，按 =C-c C-c= 执行。结果显示在底部分屏的 result buffer 中。
 
-** SQL 编辑 (mysql-mode) 快捷键
+** SQL 编辑 (data-lens-mode) 快捷键
 
 | 键位        | 功能             |
 |-------------+------------------|
@@ -163,24 +180,41 @@ SELECT * FROM users LIMIT 10;
 | =C-c C-o=   | Transient 菜单   |
 | =TAB=       | 补全表名/列名    |
 
-** 结果浏览 (mysql-result-mode) 快捷键
+** 结果浏览 (data-lens-result-mode) 快捷键
 
-| 键位        | 功能                         |
-|-------------+------------------------------|
-| =RET=       | 跟随外键 / 显示完整 cell 值  |
-| =W=         | WHERE 过滤（再按清除）       |
-| =s= / =S=  | 按列排序 ASC / DESC          |
-| =c=         | 跳转到某列                   |
-| =v=         | 切换纵向视图                 |
-| =n=         | 加载更多行                   |
-| =g=         | 重新执行查询                 |
-| =C-c '=    | 编辑 cell 值                 |
-| =C-c C-c=  | 提交编辑（生成 UPDATE）      |
-| =y=         | 复制 cell 值                 |
-| =w=         | 复制行为 INSERT 语句（支持选区多行） |
-| =Y=         | 复制行为 CSV（支持选区多行） |
-| =e=         | 导出（org / csv）            |
-| =?=         | Transient 菜单               |
+| 键位        | 功能                             |
+|-------------+----------------------------------|
+| =RET=       | 打开 Record 视图                 |
+| =]=         | 下一列页                         |
+| =[=         | 上一列页                         |
+| =+=         | 加宽当前列                       |
+| =-=         | 缩窄当前列                       |
+| =p=         | 固定当前列                       |
+| =P=         | 取消固定                         |
+| =W=         | WHERE 过滤（再按清除）           |
+| =s= / =S=  | 按列排序 ASC / DESC              |
+| =c=         | 跳转到某列                       |
+| =n=         | 加载更多行                       |
+| =g=         | 重新执行查询                     |
+| =e=         | 编辑 cell 值                     |
+| =C-c C-c=  | 提交编辑（生成 UPDATE）          |
+| =y=         | 复制 cell 值                     |
+| =w=         | 复制行为 INSERT 语句（支持选区） |
+| =Y=         | 复制行为 CSV（支持选区）         |
+| =E=         | 导出（org / csv）                |
+| =?=         | Transient 菜单                   |
+
+** Record 视图 (data-lens-record-mode) 快捷键
+
+| 键位        | 功能                             |
+|-------------+----------------------------------|
+| =RET=       | 展开长字段 / 跟随外键           |
+| =n= / =p=  | 下一行 / 上一行                  |
+| =C-c '=    | 编辑字段                         |
+| =y=         | 复制字段值                       |
+| =w=         | 复制行为 INSERT                  |
+| =g=         | 刷新                             |
+| =q=         | 关闭                             |
 
 ** 典型工作流示例
 
@@ -200,7 +234,8 @@ SELECT * FROM users LIMIT 10;
 #+begin_src
 1. SELECT * FROM orders;     → C-c C-c 执行
 2. 光标移到 user_id 列的某个值上（外键列会有下划线高亮）
-3. RET                       → 自动执行 SELECT * FROM users WHERE id = <value>
+3. RET → 打开 Record 视图
+4. 在 FK 字段上按 RET → 自动执行 SELECT * FROM users WHERE id = <value>
 #+end_src
 
 *** 编辑数据
@@ -208,7 +243,7 @@ SELECT * FROM users LIMIT 10;
 #+begin_src
 1. SELECT * FROM users;      → C-c C-c 执行
 2. 光标移到要修改的 cell
-3. C-c '                     → 打开编辑 buffer
+3. e                          → 打开编辑 buffer
 4. 修改内容，C-c C-c 确认   （C-c C-k 取消）
 5. 可以编辑多个 cell，修改过的 cell 会高亮显示
 6. C-c C-c                   → 弹出确认，显示将执行的 UPDATE 语句
@@ -217,7 +252,7 @@ SELECT * FROM users LIMIT 10;
 ** REPL 模式
 
 #+begin_src
-M-x mysql-repl              ;; 打开 REPL buffer
+M-x data-lens-repl          ;; 打开 REPL buffer
 C-c C-e                     ;; 连接数据库
 mysql> SELECT * FROM users;  ;; 输入 SQL，以 ; 结尾后自动执行
                              ;; 支持多行输入（续行提示 ->）
@@ -237,10 +272,10 @@ g                            ;; 刷新
 需要安装 =transient= 包（Magit 自带）。
 
 #+begin_src emacs-lisp
-(require 'mysql-transient)
+(require 'data-lens-transient)
 #+end_src
 
-在 mysql-mode 中按 =C-c C-o= 或在 result buffer 中按 =?= 打开菜单。
+在 data-lens-mode 中按 =C-c C-o= 或在 result buffer 中按 =?= 打开菜单。
 
 ** Org-Babel 集成
 
@@ -270,26 +305,20 @@ g                            ;; 刷新
 
 * Testing
 
-** Unit tests (no server needed)
-
-#+begin_src sh
-emacs -batch -L . -l ert -l test/mysql-test.el -f ert-run-tests-batch-and-exit
-#+end_src
-
 ** Integration tests (require a running MySQL)
 
 Start a MySQL instance:
 
 #+begin_src sh
-docker run --rm -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql:8
+docker run --rm -e MYSQL_ROOT_PASSWORD=testpass -e MYSQL_USER=testuser \
+  -e MYSQL_PASSWORD=testpass -e MYSQL_DATABASE=testdb -p 3307:3306 mysql:8
 #+end_src
 
-Run tests:
+Load test data and run tests:
 
 #+begin_src sh
-emacs -batch -L . -l ert -l test/mysql-test.el \
-  --eval '(setq mysql-test-password "test")' \
-  -f ert-run-tests-batch-and-exit
+mysql -h 127.0.0.1 -P 3307 -u testuser -ptestpass testdb < test-wide-table.sql
+emacs --batch -L . -l test-run.el
 #+end_src
 
 * License
