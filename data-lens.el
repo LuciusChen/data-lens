@@ -457,7 +457,11 @@ Pinned columns come first, followed by the current page's columns."
 Uses the same visual style as the column-paged result renderer.
 COLUMN-DEFS, if provided, is used for long-field detection.
 Returns a string (with text properties)."
-  (let* ((ncols (length col-names))
+  (let* ((data-lens--result-columns col-names)
+         (data-lens--result-column-defs column-defs)
+         (data-lens--pending-edits nil)
+         (data-lens--fk-info nil)
+         (ncols (length col-names))
          (all-cols (number-sequence 0 (1- ncols)))
          (widths (data-lens--compute-column-widths col-names rows column-defs))
          (bface 'data-lens-border-face)
