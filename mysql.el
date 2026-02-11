@@ -505,7 +505,7 @@ Returns a plist with :code, :state, :message."
       (cl-incf pos 1)
       (setq state (substring packet pos (min (+ pos 5) (length packet))))
       (cl-incf pos 5))
-    (setq message (substring packet pos))
+    (setq message (decode-coding-string (substring packet pos) 'utf-8))
     (list :code code :state state :message message)))
 
 (defun mysql--parse-eof-packet (_packet)
@@ -597,8 +597,13 @@ Returns a plist with column metadata."
     (cl-incf pos 2)
     ;; decimals: 1 byte
     (setq decimals (aref packet pos))
-    (list :catalog catalog :schema schema :table table :org-table org-table
-          :name name :org-name org-name :character-set character-set
+    (list :catalog (decode-coding-string catalog 'utf-8)
+          :schema (decode-coding-string schema 'utf-8)
+          :table (decode-coding-string table 'utf-8)
+          :org-table (decode-coding-string org-table 'utf-8)
+          :name (decode-coding-string name 'utf-8)
+          :org-name (decode-coding-string org-name 'utf-8)
+          :character-set character-set
           :column-length column-length :type column-type :flags flags
           :decimals decimals)))
 
@@ -708,11 +713,12 @@ Returns the converted Elisp value."
         (16 (mysql--parse-bit value))
         ;; JSON
         (245
-         (if (fboundp 'json-parse-string)
-             (json-parse-string value)
-           value))
-        ;; Everything else: return as string
-        (_ value)))))
+         (let ((s (decode-coding-string value 'utf-8)))
+           (if (fboundp 'json-parse-string)
+               (json-parse-string s)
+             s)))
+        ;; Everything else: decode as UTF-8 string
+        (_ (decode-coding-string value 'utf-8))))))
 
 (defun mysql--convert-row (row columns)
   "Convert ROW values according to COLUMNS type information."
