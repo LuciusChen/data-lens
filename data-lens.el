@@ -39,9 +39,8 @@
 (require 'comint)
 (require 'cl-lib)
 (require 'ring)
+(require 'transient)
 
-(declare-function data-lens-dispatch "data-lens-transient")
-(declare-function data-lens-result-dispatch "data-lens-transient")
 (declare-function nerd-icons-mdicon "nerd-icons")
 (declare-function nerd-icons-codicon "nerd-icons")
 
@@ -2236,8 +2235,6 @@ previous window layout."
     map)
   "Keymap for `data-lens-record-mode'.")
 
-(declare-function data-lens-record-dispatch "data-lens-transient")
-
 (define-derived-mode data-lens-record-mode special-mode "DB-Record"
   "Mode for displaying a single database row in detail.
 
@@ -2542,6 +2539,76 @@ Accumulates input until a semicolon is found, then executes."
           (data-lens-repl-mode)
           (data-lens-repl--output "db> "))))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
+
+;;;; Transient dispatch menus
+
+;;;###autoload
+(transient-define-prefix data-lens-dispatch ()
+  "Main dispatch menu for data-lens."
+  [["Connection"
+    ("c" "Connect"    data-lens-connect)
+    ("d" "Disconnect" data-lens-disconnect)
+    ("R" "REPL"       data-lens-repl)]
+   ["Execute"
+    ("x" "Query at point" data-lens-execute-query-at-point)
+    ("r" "Region"         data-lens-execute-region)
+    ("b" "Buffer"         data-lens-execute-buffer)]
+   ["Edit / History"
+    ("'" "Indirect edit"  data-lens-edit-indirect)
+    ("l" "History"        data-lens-show-history)]
+   ["Schema"
+    ("t" "List tables"    data-lens-list-tables)
+    ("D" "Describe table" data-lens-describe-table-at-point)]])
+
+;;;###autoload
+(transient-define-prefix data-lens-result-dispatch ()
+  "Dispatch menu for data-lens result buffer."
+  [["Navigate"
+    ("RET" "Open record"  data-lens-result-open-record)
+    ("c" "Go to column"   data-lens-result-goto-column)
+    ("n" "Next page"      data-lens-result-next-page)
+    ("p" "Prev page"      data-lens-result-prev-page)
+    ("M-<" "First page"   data-lens-result-first-page)
+    ("M->" "Last page"    data-lens-result-last-page)
+    ("#" "Count total"    data-lens-result-count-total)]
+   ["Column Pages"
+    ("]" "Next col page"  data-lens-result-next-col-page)
+    ("[" "Prev col page"  data-lens-result-prev-col-page)
+    ("=" "Widen column"   data-lens-result-widen-column)
+    ("-" "Narrow column"  data-lens-result-narrow-column)
+    ("C-c p" "Pin column"   data-lens-result-pin-column)
+    ("C-c P" "Unpin column" data-lens-result-unpin-column)]
+   ["Filter / Sort"
+    ("W" "WHERE filter" data-lens-result-apply-filter)
+    ("s" "Sort ASC"  data-lens-result-sort-by-column)
+    ("S" "Sort DESC" data-lens-result-sort-by-column-desc)]]
+  [["Edit"
+    ("e" "Edit cell"  data-lens-result-edit-cell)
+    ("C" "Commit"     data-lens-result-commit)]
+   ["Copy / Export"
+    ("y" "Yank cell"       data-lens-result-yank-cell)
+    ("w" "Row(s) as INSERT" data-lens-result-copy-row-as-insert)
+    ("Y" "Row(s) as CSV"   data-lens-result-copy-as-csv)
+    ("E" "Export"           data-lens-result-export)]
+   ["Other"
+    ("g" "Re-execute" data-lens-result-rerun)
+    ("F" "Fullscreen"  data-lens-result-fullscreen-toggle)]])
+
+;;;###autoload
+(transient-define-prefix data-lens-record-dispatch ()
+  "Dispatch menu for data-lens record buffer."
+  [["Navigate"
+    ("n" "Next row"     data-lens-record-next-row)
+    ("p" "Prev row"     data-lens-record-prev-row)
+    ("RET" "Expand/FK"  data-lens-record-toggle-expand)]
+   ["Edit"
+    ("C-c '" "Edit field" data-lens-record-edit-field)]
+   ["Copy"
+    ("y" "Yank field"      data-lens-record-yank-field)
+    ("w" "Row as INSERT"   data-lens-record-copy-as-insert)]
+   ["Other"
+    ("g" "Refresh" data-lens-record-refresh)
+    ("q" "Quit"    quit-window)]])
 
 (provide 'data-lens)
 ;;; data-lens.el ends here
