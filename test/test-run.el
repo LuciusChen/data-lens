@@ -1,25 +1,25 @@
 ;;; test-run.el --- Test the column paging + record buffer -*- lexical-binding: t; -*-
-(require 'mysql)
+(require 'data-lens-db)
 (require 'data-lens)
 
 (defun test-mysql ()
   "Run all tests."
   (message "=== Loading packages ===")
-  (message "mysql.el: %s  mysql-interactive.el: %s"
-           (featurep 'mysql) (featurep 'mysql-interactive))
+  (message "data-lens-db: %s  data-lens: %s"
+           (featurep 'data-lens-db) (featurep 'data-lens))
 
   (message "\n=== Connecting ===")
-  (let ((conn (mysql-connect :host "127.0.0.1" :port 3307
-                             :user "testuser" :password "testpass"
-                             :database "testdb")))
-    (mysql-query conn "SET NAMES utf8mb4")
+  (let ((conn (data-lens-db-connect 'mysql
+                '(:host "127.0.0.1" :port 3307
+                  :user "testuser" :password "testpass"
+                  :database "testdb"))))
     (message "Connected: %s" (data-lens--connection-key conn))
 
     ;; Test 1: basic query
     (message "\n=== Test 1: SELECT * FROM customers ===")
-    (let* ((result (mysql-query conn "SELECT * FROM customers"))
-           (columns (mysql-result-columns result))
-           (rows (mysql-result-rows result))
+    (let* ((result (data-lens-db-query conn "SELECT * FROM customers"))
+           (columns (data-lens-db-result-columns result))
+           (rows (data-lens-db-result-rows result))
            (col-names (data-lens--column-names columns)))
       (message "Columns (%d): %s"
                (length col-names) (mapconcat #'identity col-names ", "))
@@ -48,7 +48,8 @@
         (message "\n=== Test 5: long field detection ===")
         (dolist (col columns)
           (when (data-lens--long-field-type-p col)
-            (message "  Long: %s (type=%d)" (plist-get col :name) (plist-get col :type))))
+            (message "  Long: %s (category=%s)"
+                     (plist-get col :name) (plist-get col :type-category))))
 
         ;; Test 6: render single row
         (message "\n=== Test 6: render-row ===")
@@ -117,9 +118,9 @@
 
     ;; Test 10: orders
     (message "\n=== Test 10: orders (16 cols) ===")
-    (let* ((result (mysql-query conn "SELECT * FROM orders"))
-           (columns (mysql-result-columns result))
-           (rows (mysql-result-rows result))
+    (let* ((result (data-lens-db-query conn "SELECT * FROM orders"))
+           (columns (data-lens-db-result-columns result))
+           (rows (data-lens-db-result-rows result))
            (col-names (data-lens--column-names columns))
            (widths (data-lens--compute-column-widths col-names rows columns))
            (pages (data-lens--compute-column-pages widths nil 80)))
@@ -141,9 +142,9 @@
 
     ;; Test 11: CSV export
     (message "\n=== Test 11: CSV export ===")
-    (let* ((result (mysql-query conn "SELECT id, first_name, last_name, email FROM customers LIMIT 3"))
-           (col-names (data-lens--column-names (mysql-result-columns result)))
-           (rows (mysql-result-rows result))
+    (let* ((result (data-lens-db-query conn "SELECT id, first_name, last_name, email FROM customers LIMIT 3"))
+           (col-names (data-lens--column-names (data-lens-db-result-columns result)))
+           (rows (data-lens-db-result-rows result))
            (csv-escape (lambda (val)
                          (let ((s (data-lens--format-value val)))
                            (if (string-match-p "[,\"\n]" s)
@@ -155,10 +156,10 @@
 
     ;; Test 12: order_items with FK
     (message "\n=== Test 12: order_items FK columns ===")
-    (let* ((result (mysql-query conn "SELECT * FROM order_items"))
-           (columns (mysql-result-columns result))
+    (let* ((result (data-lens-db-query conn "SELECT * FROM order_items"))
+           (columns (data-lens-db-result-columns result))
            (col-names (data-lens--column-names columns))
-           (rows (mysql-result-rows result)))
+           (rows (data-lens-db-result-rows result)))
       (with-temp-buffer
         (setq-local data-lens-connection conn)
         (setq-local data-lens--result-columns col-names)
@@ -168,7 +169,7 @@
         (data-lens--load-fk-info)
         (message "FK info: %s" data-lens--fk-info)))
 
-    (mysql-disconnect conn)
+    (data-lens-db-disconnect conn)
     (message "\n=== ALL TESTS PASSED ===")))
 
 (condition-case err
