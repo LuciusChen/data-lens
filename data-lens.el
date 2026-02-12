@@ -805,7 +805,7 @@ ACTIVE-CIDX is the highlighted column index, if any."
 (defun data-lens--build-header-line (visible-cols widths nw
                                                   has-prev has-next
                                                   &optional active-cidx)
-  "Build the tab-line-format string for the column header row.
+  "Build the header-line-format string for the column header row.
 VISIBLE-COLS, WIDTHS describe columns.
 NW is the digit width for the row number column.
 HAS-PREV/HAS-NEXT control edge border indicators.
@@ -882,13 +882,15 @@ EDGE-FN applies column-page edge indicators."
     (erase-buffer)
     (setq tab-line-format
           (concat (propertize " " 'display '(space :align-to 0))
+                  (data-lens--build-separator
+                   visible-cols widths 'top nw edge-fn)))
+    (setq header-line-format
+          (concat (propertize " " 'display '(space :align-to 0))
                   (data-lens--build-header-line visible-cols widths nw
                                                 has-prev has-next
                                                 data-lens--header-active-col)))
-    (setq header-line-format
-          (concat (propertize " " 'display '(space :align-to 0))
-                  (data-lens--build-separator
-                   visible-cols widths 'middle nw edge-fn)))
+    (insert (data-lens--build-separator
+             visible-cols widths 'middle nw edge-fn) "\n")
     (when data-lens--pending-edits
       (insert (propertize
                (format "-- %d pending edit%s\n"
@@ -1603,7 +1605,7 @@ Key bindings:
 
 (defun data-lens--update-header-highlight ()
   "Highlight the header cell for the column under the cursor.
-Rebuilds `tab-line-format' with the active column highlighted."
+Rebuilds `header-line-format' with the active column highlighted."
   (when data-lens--column-widths
     (data-lens--update-position-indicator)
     (data-lens--update-row-highlight)
@@ -1617,7 +1619,7 @@ Rebuilds `tab-line-format' with the active column highlighted."
                (has-prev (> cur-page 0))
                (has-next (< cur-page (1- col-num-pages)))
                (nw (data-lens--row-number-digits)))
-          (setq tab-line-format
+          (setq header-line-format
                 (concat (propertize " " 'display '(space :align-to 0))
                         (data-lens--build-header-line
                          visible-cols widths nw
@@ -1652,8 +1654,8 @@ Rebuilds `tab-line-format' with the active column highlighted."
   \\[data-lens-result-export]	Export results"
   (setq truncate-lines t)
   (hl-line-mode 1)
-  ;; Overline on tab-line simulates the top border (sep-top)
-  (face-remap-add-relative 'tab-line :overline t)
+  ;; Make tab-line use default background so sep-top renders cleanly
+  (face-remap-add-relative 'tab-line :inherit 'default)
   (add-hook 'post-command-hook
             #'data-lens--update-header-highlight nil t))
 
