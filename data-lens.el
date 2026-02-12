@@ -531,11 +531,14 @@ POSITION is `top', `middle', or `bottom' (default `middle')."
 
 (defun data-lens--header-label (name cidx)
   "Build the display label for column NAME at index CIDX.
-Prepends sort indicator (▲/▼) and pin marker (⊡) before the name."
-  (let ((sort (when (and data-lens--sort-column
-                         (string= name data-lens--sort-column))
-                (if data-lens--sort-descending "▼" "▲")))
-        (pin (when (memq cidx data-lens--pinned-columns) "⊡")))
+Prepends sort indicator (▲/▼) and pin marker () before the name."
+  (let* ((hi 'font-lock-keyword-face)
+         (sort (when (and data-lens--sort-column
+                          (string= name data-lens--sort-column))
+                 (propertize (if data-lens--sort-descending "▼" "▲")
+                             'face hi)))
+         (pin (when (memq cidx data-lens--pinned-columns)
+                (propertize "" 'face hi))))
     (if (or sort pin)
         (concat (or sort "") (or pin "") (if (or sort pin) " " "") name)
       name)))
@@ -612,9 +615,9 @@ Returns a propertized string."
   (let ((hi 'font-lock-keyword-face)
         (dim 'font-lock-comment-face)
         (parts nil))
-    (push (concat (propertize (format "%d" total) 'face hi)
-                  (propertize (format " row%s" (if (= total 1) "" "s"))
-                              'face dim))
+    (push (concat (propertize (format "row%s " (if (= total 1) "" "s"))
+                              'face dim)
+                  (propertize (format "%d" total) 'face hi))
           parts)
     (when (< offset total)
       (push (concat (propertize " (showing " 'face dim)
