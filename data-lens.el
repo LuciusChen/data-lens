@@ -584,12 +584,15 @@ Returns a propertized string."
              (edited (assoc (cons ridx cidx) data-lens--pending-edits))
              (display-val (if edited (cdr edited) val))
              (w (aref widths cidx))
-             (formatted (if (and (not edited)
-                                 (data-lens--long-field-type-p col-def))
-                            (data-lens--long-field-placeholder col-def)
-                          (replace-regexp-in-string
-                           "\n" "↵"
-                           (data-lens--format-value display-val))))
+             (formatted (let ((s (replace-regexp-in-string
+                               "\n" "↵"
+                               (data-lens--format-value display-val))))
+                          (if (and (not edited)
+                                   (data-lens--long-field-type-p col-def)
+                                   (> (length s) w)
+                                   (not (stringp display-val)))
+                              (data-lens--long-field-placeholder col-def)
+                            s)))
              (truncated (if (> (string-width formatted) w)
                             (concat (truncate-string-to-width formatted (1- w)) "…")
                           formatted))
