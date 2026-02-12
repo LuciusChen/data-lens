@@ -61,10 +61,7 @@
   :group 'data-lens)
 
 (defface data-lens-header-active-face
-  '((((background light)) :background "#d0d0ff" :foreground "#000000"
-     :weight bold)
-    (((background dark)) :background "#3a3a6a" :foreground "#ffffff"
-     :weight bold))
+  '((t :inherit hl-line :weight bold))
   "Face for the column header under the cursor."
   :group 'data-lens)
 
