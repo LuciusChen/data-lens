@@ -1288,7 +1288,7 @@ Key bindings:
   (when (get-text-property (point) 'data-lens-row-idx)
     (let ((ov (make-overlay (line-beginning-position)
                             (line-end-position))))
-      (overlay-put ov 'face 'data-lens-header-active-face)
+      (overlay-put ov 'face 'hl-line)
       (overlay-put ov 'priority -1)
       (setq data-lens--row-overlay ov))))
 
