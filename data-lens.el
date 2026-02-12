@@ -559,7 +559,7 @@ so the active-column overlay can find it."
              (label (data-lens--header-label name cidx))
              (padded (string-pad
                       (if (> (string-width label) w)
-                          (concat (truncate-string-to-width label (1- w)) "…")
+                          (truncate-string-to-width label w)
                         label)
                       w))
              (face (if (memq cidx data-lens--pinned-columns)
@@ -598,7 +598,7 @@ Returns a propertized string."
                               (data-lens--long-field-placeholder col-def)
                             s)))
              (truncated (if (> (string-width formatted) w)
-                            (concat (truncate-string-to-width formatted (1- w)) "…")
+                            (truncate-string-to-width formatted w)
                           formatted))
              (padded (string-pad truncated w))
              (face (cond (edited 'data-lens-modified-face)
