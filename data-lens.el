@@ -1234,7 +1234,7 @@ Key bindings:
     (define-key map (kbd "RET") #'data-lens-result-open-record)
     (define-key map "]" #'data-lens-result-next-col-page)
     (define-key map "[" #'data-lens-result-prev-col-page)
-    (define-key map "+" #'data-lens-result-widen-column)
+    (define-key map "=" #'data-lens-result-widen-column)
     (define-key map "-" #'data-lens-result-narrow-column)
     (define-key map "p" #'data-lens-result-pin-column)
     (define-key map "P" #'data-lens-result-unpin-column)

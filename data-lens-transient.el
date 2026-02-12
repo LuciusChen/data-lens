@@ -60,7 +60,7 @@
   ["Column Pages"
    ("]" "Next page"     data-lens-result-next-col-page)
    ("[" "Prev page"     data-lens-result-prev-col-page)
-   ("+" "Widen column"  data-lens-result-widen-column)
+   ("=" "Widen column"  data-lens-result-widen-column)
    ("-" "Narrow column" data-lens-result-narrow-column)
    ("p" "Pin column"    data-lens-result-pin-column)
    ("P" "Unpin column"  data-lens-result-unpin-column)]
