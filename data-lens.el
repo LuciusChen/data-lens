@@ -378,6 +378,14 @@ nil → \"NULL\", numbers unquoted, strings escaped."
    ((stringp val) (mysql-escape-literal val))
    (t (mysql-escape-literal (data-lens--format-value val)))))
 
+(defun data-lens--string-pad (str width)
+  "Pad STR with spaces to reach display WIDTH.
+Unlike `string-pad', this accounts for wide characters (CJK)."
+  (let ((sw (string-width str)))
+    (if (>= sw width)
+        str
+      (concat str (make-string (- width sw) ?\s)))))
+
 ;;;; Column width computation and paging
 
 (defun data-lens--long-field-type-p (col-def)
@@ -560,7 +568,7 @@ so the active-column overlay can find it."
       (let* ((name (nth cidx data-lens--result-columns))
              (w (aref widths cidx))
              (label (data-lens--header-label name cidx))
-             (padded (string-pad
+             (padded (data-lens--string-pad
                       (if (> (string-width label) w)
                           (truncate-string-to-width label w)
                         label)
@@ -603,7 +611,7 @@ Returns a propertized string."
              (truncated (if (> (string-width formatted) w)
                             (truncate-string-to-width formatted w)
                           formatted))
-             (padded (string-pad truncated w))
+             (padded (data-lens--string-pad truncated w))
              (face (cond (edited 'data-lens-modified-face)
                          ((null val) 'data-lens-null-face)
                          ((assq cidx data-lens--fk-info) 'data-lens-fk-face)
@@ -1969,7 +1977,7 @@ MAX-NAME-W is the label column width."
                      ((null val) 'data-lens-null-face)
                      (fk 'data-lens-fk-face)
                      (t nil))))
-    (insert (propertize (string-pad name max-name-w)
+    (insert (propertize (data-lens--string-pad name max-name-w)
                         'face 'data-lens-header-face)
             (propertize " : " 'face 'data-lens-border-face)
             (propertize display
