@@ -1173,8 +1173,8 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
       (data-lens-schema-mode)
       (setq-local data-lens-connection conn)
       (require 'sql)
-      (setq-local font-lock-defaults (list (sql-font-lock-keywords-builder
-                                            'font-lock-keywords 'mysql)))
+      (setq-local font-lock-defaults
+                  (list sql-mode-mysql-font-lock-keywords))
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert ddl)
