@@ -407,14 +407,20 @@ Skips if `data-lens-db-test-pg-password' is nil."
     ;; list-tables (temporary tables not in pg_tables, so just check it runs)
     (let ((tables (data-lens-db-list-tables conn)))
       (should (listp tables)))
-    ;; list-columns for pg_tables (always exists)
-    (let ((columns (data-lens-db-list-columns conn "pg_tables")))
+    ;; Create a real table for column/DDL tests
+    (data-lens-db-query conn
+     "CREATE TABLE IF NOT EXISTS _schema_real (id SERIAL PRIMARY KEY, name TEXT)")
+    ;; list-columns
+    (let ((columns (data-lens-db-list-columns conn "_schema_real")))
       (should (listp columns))
-      (should (member "tablename" columns)))
+      (should (member "id" columns))
+      (should (member "name" columns)))
     ;; show-create-table (synthesized DDL)
-    (let ((ddl (data-lens-db-show-create-table conn "pg_tables")))
+    (let ((ddl (data-lens-db-show-create-table conn "_schema_real")))
       (should (stringp ddl))
-      (should (string-match-p "CREATE TABLE" ddl)))))
+      (should (string-match-p "CREATE TABLE" ddl)))
+    ;; Cleanup
+    (data-lens-db-query conn "DROP TABLE IF EXISTS _schema_real")))
 
 (ert-deftest data-lens-db-test-pg-live-error ()
   :tags '(:db-live :pg-live)

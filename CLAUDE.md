@@ -2,17 +2,24 @@
 
 Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/marginalia.
 
+## First Principles
+
+- **Question every abstraction**: Before adding a layer, file, or indirection, ask "is this solving a real problem right now?" If the answer is hypothetical, don't add it.
+- **Simplify relentlessly**: Three similar lines of code are better than a premature abstraction. A single large file (like eglot's 3500-line `eglot.el`) is better than five tiny files with unclear boundaries.
+- **Fewer files, clearer boundaries**: Only split a file when it has a genuinely distinct responsibility (e.g., wire protocol vs. UI). Never split for cosmetic reasons or predicted future growth.
+- **Delete, don't deprecate**: If something is unused, remove it entirely. No backward-compatibility shims, no re-exports, no "removed" comments.
+
 ## Architecture
 
-- **Interface / Implementation separation**: `mysql.el` (protocol layer) is pure library with no UI; `data-lens.el` (UI layer) depends on `mysql.el` but never the reverse. `data-lens-transient.el` depends on `data-lens.el` for transient menus. Keep the dependency flow strictly one-directional.
+- **Interface / Implementation separation**: `mysql.el` and `pg.el` (protocol layers) are pure libraries with no UI; `data-lens.el` (UI layer) depends on `data-lens-db.el` (generic interface) but never on protocol layers directly. Keep the dependency flow strictly one-directional.
 - **Single responsibility per file**: Each file has one job. Don't mix protocol code with rendering code.
 - **No side effects on load**: Loading a file should not alter Emacs behavior. All behavior activation must be explicit (user calls a command or enables a mode).
 - **Reuse Emacs infrastructure**: Use `completing-read` (not framework-specific APIs), `special-mode` for read-only buffers, `text-property-search-forward` for navigation, standard hooks, etc.
 
 ## Naming
 
-- **Public API**: `data-lens-` prefix for UI layer, `mysql-` prefix for protocol layer. No double dash for public symbols.
-- **Internal/private**: `data-lens--` or `mysql--` double-dash prefix. Never call from outside the defining file.
+- **Public API**: `data-lens-` prefix for UI layer, `mysql-` / `pg-` prefix for protocol layers. No double dash for public symbols.
+- **Internal/private**: `data-lens--`, `mysql--`, or `pg--` double-dash prefix. Never call from outside the defining file.
 - **Predicates**: multi-word names end in `-p` (e.g., `data-lens--connection-alive-p`).
 - **Unused args**: prefix with `_` (e.g., `(_ridx)`).
 

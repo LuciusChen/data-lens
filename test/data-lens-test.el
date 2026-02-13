@@ -344,10 +344,8 @@ Skips if `data-lens-test-password' is nil."
         (data-lens--render-result)
         ;; Verify buffer has content
         (should (> (buffer-size) 0))
-        ;; Verify column names appear
-        (should (string-match-p "id" (buffer-string)))
-        (should (string-match-p "name" (buffer-string)))
-        ;; Verify data appears
+        ;; Column names are in header-line/tab-line, not buffer text.
+        ;; Verify data values appear in the rendered table.
         (should (string-match-p "test" (buffer-string)))))))
 
 (ert-deftest data-lens-test-live-schema-introspection ()

@@ -87,6 +87,11 @@
 Underlined to indicate clickable (RET to follow)."
   :group 'data-lens)
 
+(defface data-lens-marked-face
+  '((t :inherit dired-marked))
+  "Face for marked rows in result buffer."
+  :group 'data-lens)
+
 (defcustom data-lens-connection-alist nil
   "Alist of saved database connections.
 Each entry has the form:
@@ -215,6 +220,9 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
 
 (defvar-local data-lens--base-query nil
   "The original unfiltered SQL query, used by WHERE filtering.")
+
+(defvar-local data-lens--marked-rows nil
+  "List of marked row indices (dired-style selection).")
 
 (defvar-local data-lens-record--result-buffer nil
   "Reference to the parent result buffer (Record buffer local).")
@@ -811,8 +819,9 @@ ACTIVE-CIDX highlights that column when non-nil."
          (data-header (funcall edge
                                (concat (apply #'concat cells)
                                        (propertize "│" 'face bface)))))
+    ;; 1 char for mark column + nw for row number + padding
     (concat (propertize "│" 'face bface)
-            pad-str (make-string nw ?\s) pad-str
+            " " (make-string nw ?\s) pad-str
             data-header)))
 
 (defun data-lens--build-separator (visible-cols widths position
@@ -823,7 +832,8 @@ POSITION is \\='top, \\='middle, or \\='bottom.
 NW is the row-number digit width.
 EDGE-FN applies column-page edge indicators."
   (let* ((bface 'data-lens-border-face)
-         (rn-dash (+ nw (* 2 data-lens-column-padding)))
+         ;; +1 for the mark column char
+         (rn-dash (+ 1 nw data-lens-column-padding))
          (raw (data-lens--render-separator visible-cols widths position))
          (cross (pcase position ('top "┬") ('bottom "┴") (_ "┼")))
          (left (pcase position ('top "┌") ('bottom "└") (_ "├")))
@@ -840,21 +850,24 @@ GLOBAL-FIRST-ROW is the 0-based offset for numbering.
 EDGE-FN applies column-page edge indicators."
   (let ((bface 'data-lens-border-face)
         (pad-str (make-string data-lens-column-padding ?\s))
-        (ridx 0))
-    (dolist (row rows)
-      (let* ((data-row (funcall edge-fn
-                                (data-lens--render-row
-                                 row ridx visible-cols widths)))
-             (num-label (string-pad
-                         (number-to-string
-                          (1+ (+ global-first-row ridx)))
-                         nw nil t)))
-        (insert (propertize "│" 'face bface)
-                pad-str
-                (propertize num-label 'face 'shadow)
-                pad-str
-                data-row "\n"))
-      (cl-incf ridx))))
+        (marked data-lens--marked-rows))
+    (cl-loop for row in rows
+             for ridx from 0
+             for data-row = (funcall edge-fn
+                                     (data-lens--render-row
+                                      row ridx visible-cols widths))
+             for mark-char = (if (memq ridx marked) "*" " ")
+             for num-label = (string-pad
+                              (number-to-string
+                               (1+ (+ global-first-row ridx)))
+                              nw nil t)
+             for num-face = (if (memq ridx marked)
+                                'data-lens-marked-face 'shadow)
+             do (insert (propertize "│" 'face bface)
+                        (propertize mark-char 'face num-face)
+                        (propertize num-label 'face num-face)
+                        pad-str
+                        data-row "\n"))))
 
 (defun data-lens--render-result ()
   "Render the result buffer content using column paging."
@@ -1021,6 +1034,7 @@ Otherwise shows DML summary (affected rows, etc.)."
             (setq-local data-lens--result-column-defs columns)
             (setq-local data-lens--result-rows rows)
             (setq-local data-lens--pending-edits nil)
+            (setq-local data-lens--marked-rows nil)
             (setq-local data-lens--current-col-page 0)
             (setq-local data-lens--pinned-columns nil)
             (setq-local data-lens--sort-column nil)
@@ -1079,6 +1093,7 @@ Signals an error if pagination is not available."
       (setq-local data-lens--result-rows rows)
       (setq-local data-lens--page-current page-num)
       (setq-local data-lens--pending-edits nil)
+      (setq-local data-lens--marked-rows nil)
       (setq-local data-lens--column-widths
                   (data-lens--compute-column-widths col-names rows columns))
       (data-lens--refresh-display)
@@ -1123,6 +1138,7 @@ Returns the query result."
                   data-lens--result-column-defs columns
                   data-lens--result-rows rows
                   data-lens--pending-edits nil
+                  data-lens--marked-rows nil
                   data-lens--current-col-page 0
                   data-lens--pinned-columns nil
                   data-lens--sort-column nil
@@ -1512,6 +1528,82 @@ Key bindings:
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.mysql\\'" . data-lens-mode))
 
+;;;; Cell navigation
+
+(defun data-lens-result-next-cell ()
+  "Move point to the next cell (right, then wrap to next row)."
+  (interactive)
+  (let ((start (point)))
+    (goto-char (next-single-property-change (point) 'data-lens-col-idx
+                                            nil (point-max)))
+    (if-let* ((m (text-property-search-forward 'data-lens-col-idx nil
+                                               (lambda (_val cur) cur))))
+        (goto-char (prop-match-beginning m))
+      (goto-char start))))
+
+(defun data-lens-result-prev-cell ()
+  "Move point to the previous cell (left, then wrap to prev row)."
+  (interactive)
+  (let ((start (point)))
+    (when-let* ((beg (previous-single-property-change
+                      (1+ (point)) 'data-lens-col-idx nil (point-min))))
+      (goto-char beg))
+    (if-let* ((m (text-property-search-backward 'data-lens-col-idx nil
+                                                (lambda (_val cur) cur))))
+        (goto-char (prop-match-beginning m))
+      (goto-char start))))
+
+(defun data-lens-result-down-cell ()
+  "Move to the same column in the next row."
+  (interactive)
+  (when-let* ((cidx (data-lens--col-idx-at-point))
+              (ridx (get-text-property (point) 'data-lens-row-idx)))
+    (data-lens--goto-cell (1+ ridx) cidx)))
+
+(defun data-lens-result-up-cell ()
+  "Move to the same column in the previous row."
+  (interactive)
+  (when-let* ((cidx (data-lens--col-idx-at-point))
+              (ridx (get-text-property (point) 'data-lens-row-idx))
+              ((> ridx 0)))
+    (data-lens--goto-cell (1- ridx) cidx)))
+
+;;;; Row marking (dired-style)
+
+(defun data-lens-result--marked-row-indices ()
+  "Return the effective row indices for batch operations.
+Priority: marked rows > current row."
+  (or data-lens--marked-rows
+      (when-let* ((ridx (data-lens-result--row-idx-at-line)))
+        (list ridx))))
+
+(defun data-lens-result-toggle-mark ()
+  "Toggle mark on the row at point and move to next row."
+  (interactive)
+  (when-let* ((ridx (data-lens-result--row-idx-at-line)))
+    (if (memq ridx data-lens--marked-rows)
+        (setq data-lens--marked-rows (delq ridx data-lens--marked-rows))
+      (push ridx data-lens--marked-rows))
+    (data-lens--render-result)
+    (data-lens--goto-cell (1+ ridx)
+                          (or (data-lens--col-idx-at-point) 0))))
+
+(defun data-lens-result-unmark-row ()
+  "Unmark the row at point and move to next row."
+  (interactive)
+  (when-let* ((ridx (data-lens-result--row-idx-at-line)))
+    (setq data-lens--marked-rows (delq ridx data-lens--marked-rows))
+    (data-lens--render-result)
+    (data-lens--goto-cell (1+ ridx)
+                          (or (data-lens--col-idx-at-point) 0))))
+
+(defun data-lens-result-unmark-all ()
+  "Remove all row marks."
+  (interactive)
+  (when data-lens--marked-rows
+    (setq data-lens--marked-rows nil)
+    (data-lens--render-result)))
+
 ;;;; data-lens-result-mode
 
 (defvar data-lens-result-mode-map
@@ -1542,6 +1634,15 @@ Key bindings:
     (define-key map (kbd "C-c P") #'data-lens-result-unpin-column)
     (define-key map "F" #'data-lens-result-fullscreen-toggle)
     (define-key map "?" #'data-lens-result-dispatch)
+    ;; Cell navigation
+    (define-key map (kbd "TAB") #'data-lens-result-next-cell)
+    (define-key map (kbd "<backtab>") #'data-lens-result-prev-cell)
+    (define-key map (kbd "M-n") #'data-lens-result-down-cell)
+    (define-key map (kbd "M-p") #'data-lens-result-up-cell)
+    ;; Row marking
+    (define-key map "m" #'data-lens-result-toggle-mark)
+    (define-key map "u" #'data-lens-result-unmark-row)
+    (define-key map "U" #'data-lens-result-unmark-all)
     map)
   "Keymap for `data-lens-result-mode'.")
 
@@ -1557,14 +1658,17 @@ Key bindings:
                    (ncols (length data-lens--result-columns))
                    (col-name (when cidx
                                (nth cidx data-lens--result-columns))))
-              (format " R%d/%s C%d/%d%s (pg %d)"
-                      (1+ global-row)
-                      (if data-lens--page-total-rows
-                          (number-to-string data-lens--page-total-rows)
-                        "?")
-                      (if cidx (1+ cidx) 0) ncols
-                      (if col-name (format " [%s]" col-name) "")
-                      (1+ data-lens--page-current)))))))
+              (let ((mark-info (when data-lens--marked-rows
+                                 (format " *%d" (length data-lens--marked-rows)))))
+                (format " R%d/%s C%d/%d%s (pg %d)%s"
+                        (1+ global-row)
+                        (if data-lens--page-total-rows
+                            (number-to-string data-lens--page-total-rows)
+                          "?")
+                        (if cidx (1+ cidx) 0) ncols
+                        (if col-name (format " [%s]" col-name) "")
+                        (1+ data-lens--page-current)
+                        (or mark-info ""))))))))
 
 (defun data-lens--update-row-highlight ()
   "Highlight the entire row under the cursor."
@@ -1604,29 +1708,41 @@ Rebuilds `header-line-format' with the active column highlighted."
   "Mode for displaying database query results with SQL pagination.
 
 \\<data-lens-result-mode-map>
+Navigate:
+  \\[data-lens-result-next-cell]	Next cell (Tab)
+  \\[data-lens-result-prev-cell]	Previous cell (S-Tab)
+  \\[data-lens-result-down-cell]	Down in same column
+  \\[data-lens-result-up-cell]	Up in same column
   \\[data-lens-result-open-record]	Open record view for row
+  \\[data-lens-result-goto-column]	Jump to column by name
+Mark:
+  \\[data-lens-result-toggle-mark]	Toggle mark on row
+  \\[data-lens-result-unmark-row]	Unmark row
+  \\[data-lens-result-unmark-all]	Unmark all rows
+Pages:
   \\[data-lens-result-next-page]	Next data page
   \\[data-lens-result-prev-page]	Previous data page
   \\[data-lens-result-first-page]	First data page
   \\[data-lens-result-last-page]	Last data page
   \\[data-lens-result-count-total]	Query total row count
-  \\[data-lens-result-apply-filter]	Apply WHERE filter
-  \\[data-lens-result-edit-cell]	Edit cell value
-  \\[data-lens-result-commit]	Commit edits as UPDATE
-  \\[data-lens-result-goto-column]	Jump to column by name
   \\[data-lens-result-next-col-page]	Next column page
   \\[data-lens-result-prev-col-page]	Previous column page
+Copy (C-u for column selection):
+  \\[data-lens-result-yank-cell]	Copy cell value
+  \\[data-lens-result-copy-row-as-insert]	Copy row(s) as INSERT
+  \\[data-lens-result-copy-as-csv]	Copy row(s) as CSV
+  \\[data-lens-result-export]	Export results
+Edit:
+  \\[data-lens-result-edit-cell]	Edit cell value
+  \\[data-lens-result-commit]	Commit edits as UPDATE
+  \\[data-lens-result-apply-filter]	Apply WHERE filter
   \\[data-lens-result-sort-by-column]	Sort ascending (SQL ORDER BY)
   \\[data-lens-result-sort-by-column-desc]	Sort descending (SQL ORDER BY)
   \\[data-lens-result-widen-column]	Widen column
   \\[data-lens-result-narrow-column]	Narrow column
   \\[data-lens-result-pin-column]	Pin column
   \\[data-lens-result-unpin-column]	Unpin column
-  \\[data-lens-result-yank-cell]	Copy cell value
-  \\[data-lens-result-copy-row-as-insert]	Copy row(s) as INSERT
-  \\[data-lens-result-copy-as-csv]	Copy row(s) as CSV
-  \\[data-lens-result-rerun]	Re-execute the query
-  \\[data-lens-result-export]	Export results"
+  \\[data-lens-result-rerun]	Re-execute the query"
   (setq truncate-lines t)
   (hl-line-mode 1)
   ;; Make tab-line use default background so sep-top renders cleanly
@@ -2029,55 +2145,84 @@ Prompts for a WHERE condition.  Enter empty string to clear."
     (kill-new text)
     (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
 
-(defun data-lens-result-copy-row-as-insert ()
-  "Copy the current row as an INSERT statement to the kill ring.
-With an active region, copies all rows in the region."
-  (interactive)
-  (let* ((indices (if (use-region-p)
-                      (data-lens-result--rows-in-region (region-beginning) (region-end))
-                    (list (or (data-lens-result--row-idx-at-line)
-                              (user-error "No row at point")))))
+(defun data-lens-result--select-columns ()
+  "Prompt user to select columns via `completing-read-multiple'."
+  (let* ((col-names data-lens--result-columns)
+         (chosen (completing-read-multiple "Columns: " col-names nil t)))
+    (or (cl-loop for name in chosen
+                 for idx = (cl-position name col-names :test #'string=)
+                 when idx collect idx)
+        (user-error "No valid columns selected"))))
+
+(defun data-lens-result-copy-row-as-insert (&optional select-cols)
+  "Copy row(s) as INSERT statement(s) to the kill ring.
+Rows: marked > region > current.
+With prefix arg SELECT-COLS, prompt to choose columns."
+  (interactive "P")
+  (let* ((indices (or (data-lens-result--marked-row-indices)
+                      (when (use-region-p)
+                        (data-lens-result--rows-in-region
+                         (region-beginning) (region-end)))
+                      (user-error "No row at point")))
+         (col-indices (if select-cols
+                          (data-lens-result--select-columns)
+                        (cl-loop for i below (length data-lens--result-columns)
+                                 collect i)))
+         (col-names (mapcar (lambda (i) (nth i data-lens--result-columns))
+                            col-indices))
          (table (or (data-lens-result--detect-table) "TABLE"))
-         (col-names data-lens--result-columns)
          (rows data-lens--result-rows)
          (conn data-lens-connection)
          (cols (mapconcat (lambda (c)
                             (data-lens-db-escape-identifier conn c))
                           col-names ", "))
-         (stmts (mapcar
-                 (lambda (ridx)
-                   (let ((row (nth ridx rows)))
-                     (format "INSERT INTO %s (%s) VALUES (%s);"
-                             (data-lens-db-escape-identifier conn table) cols
-                             (mapconcat #'data-lens--value-to-literal row ", "))))
-                 indices)))
+         (stmts (cl-loop for ridx in indices
+                         for row = (nth ridx rows)
+                         for vals = (mapcar (lambda (i) (nth i row)) col-indices)
+                         collect (format "INSERT INTO %s (%s) VALUES (%s);"
+                                         (data-lens-db-escape-identifier conn table)
+                                         cols
+                                         (mapconcat #'data-lens--value-to-literal
+                                                    vals ", ")))))
     (kill-new (mapconcat #'identity stmts "\n"))
-    (message "Copied %d INSERT statement%s"
-             (length stmts) (if (= (length stmts) 1) "" "s"))))
+    (message "Copied %d INSERT statement%s (%d col%s)"
+             (length stmts) (if (= (length stmts) 1) "" "s")
+             (length col-names) (if (= (length col-names) 1) "" "s"))))
 
-(defun data-lens-result-copy-as-csv ()
-  "Copy the current row as CSV to the kill ring.
-With an active region, copies all rows in the region.
+(defun data-lens-result-copy-as-csv (&optional select-cols)
+  "Copy row(s) as CSV to the kill ring.
+Rows: marked > region > current.
+With prefix arg SELECT-COLS, prompt to choose columns.
 Includes a header row with column names."
-  (interactive)
-  (let* ((indices (if (use-region-p)
-                      (data-lens-result--rows-in-region (region-beginning) (region-end))
-                    (list (or (data-lens-result--row-idx-at-line)
-                              (user-error "No row at point")))))
-         (col-names data-lens--result-columns)
+  (interactive "P")
+  (let* ((indices (or (data-lens-result--marked-row-indices)
+                      (when (use-region-p)
+                        (data-lens-result--rows-in-region
+                         (region-beginning) (region-end)))
+                      (user-error "No row at point")))
+         (col-indices (if select-cols
+                          (data-lens-result--select-columns)
+                        (cl-loop for i below (length data-lens--result-columns)
+                                 collect i)))
+         (col-names (mapcar (lambda (i) (nth i data-lens--result-columns))
+                            col-indices))
          (rows data-lens--result-rows)
          (csv-escape (lambda (val)
                        (let ((s (data-lens--format-value val)))
                          (if (string-match-p "[,\"\n]" s)
-                             (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s))
+                             (format "\"%s\"" (replace-regexp-in-string
+                                              "\"" "\"\"" s))
                            s))))
          (lines (cons (mapconcat #'identity col-names ",")
-                      (mapcar (lambda (ridx)
-                                (mapconcat csv-escape (nth ridx rows) ","))
-                              indices))))
+                      (cl-loop for ridx in indices
+                               for row = (nth ridx rows)
+                               for vals = (mapcar (lambda (i) (nth i row))
+                                                  col-indices)
+                               collect (mapconcat csv-escape vals ",")))))
     (kill-new (mapconcat #'identity lines "\n"))
-    (message "Copied %d row%s as CSV"
-             (length indices) (if (= (length indices) 1) "" "s"))))
+    (message "Copied %d row%s as CSV (%d col%s)"
+             (length indices) (if (= (length indices) 1) "" "s")
+             (length col-names) (if (= (length col-names) 1) "" "s"))))
 
 (defun data-lens-result--goto-col-idx (col-idx)
   "Move point to the first data cell matching COL-IDX in the buffer."
@@ -2564,35 +2709,43 @@ Accumulates input until a semicolon is found, then executes."
 (transient-define-prefix data-lens-result-dispatch ()
   "Dispatch menu for data-lens result buffer."
   [["Navigate"
-    ("RET" "Open record"  data-lens-result-open-record)
-    ("c" "Go to column"   data-lens-result-goto-column)
-    ("n" "Next page"      data-lens-result-next-page)
-    ("p" "Prev page"      data-lens-result-prev-page)
-    ("M-<" "First page"   data-lens-result-first-page)
-    ("M->" "Last page"    data-lens-result-last-page)
-    ("#" "Count total"    data-lens-result-count-total)]
-   ["Column Pages"
-    ("]" "Next col page"  data-lens-result-next-col-page)
-    ("[" "Prev col page"  data-lens-result-prev-col-page)
-    ("=" "Widen column"   data-lens-result-widen-column)
-    ("-" "Narrow column"  data-lens-result-narrow-column)
-    ("C-c p" "Pin column"   data-lens-result-pin-column)
-    ("C-c P" "Unpin column" data-lens-result-unpin-column)]
+    ("TAB" "Next cell"     data-lens-result-next-cell)
+    ("<backtab>" "Prev cell" data-lens-result-prev-cell)
+    ("M-n" "Down cell"     data-lens-result-down-cell)
+    ("M-p" "Up cell"       data-lens-result-up-cell)
+    ("RET" "Open record"   data-lens-result-open-record)
+    ("c" "Go to column"    data-lens-result-goto-column)]
+   ["Mark"
+    ("m" "Toggle mark"     data-lens-result-toggle-mark)
+    ("u" "Unmark row"      data-lens-result-unmark-row)
+    ("U" "Unmark all"      data-lens-result-unmark-all)]
+   ["Pages"
+    ("n" "Next page"       data-lens-result-next-page)
+    ("p" "Prev page"       data-lens-result-prev-page)
+    ("M-<" "First page"    data-lens-result-first-page)
+    ("M->" "Last page"     data-lens-result-last-page)
+    ("#" "Count total"     data-lens-result-count-total)
+    ("]" "Next col page"   data-lens-result-next-col-page)
+    ("[" "Prev col page"   data-lens-result-prev-col-page)]
    ["Filter / Sort"
-    ("W" "WHERE filter" data-lens-result-apply-filter)
-    ("s" "Sort ASC"  data-lens-result-sort-by-column)
-    ("S" "Sort DESC" data-lens-result-sort-by-column-desc)]]
+    ("W" "WHERE filter"    data-lens-result-apply-filter)
+    ("s" "Sort ASC"        data-lens-result-sort-by-column)
+    ("S" "Sort DESC"       data-lens-result-sort-by-column-desc)]]
   [["Edit"
-    ("e" "Edit cell"  data-lens-result-edit-cell)
-    ("C" "Commit"     data-lens-result-commit)]
-   ["Copy / Export"
+    ("C-c '" "Edit cell"   data-lens-result-edit-cell)
+    ("C-c C-c" "Commit"    data-lens-result-commit)]
+   ["Copy (C-u = select cols)"
     ("y" "Yank cell"       data-lens-result-yank-cell)
-    ("w" "Row(s) as INSERT" data-lens-result-copy-row-as-insert)
-    ("Y" "Row(s) as CSV"   data-lens-result-copy-as-csv)
-    ("E" "Export"           data-lens-result-export)]
+    ("w" "Row(s) INSERT"   data-lens-result-copy-row-as-insert)
+    ("Y" "Row(s) CSV"      data-lens-result-copy-as-csv)
+    ("e" "Export"           data-lens-result-export)]
    ["Other"
-    ("g" "Re-execute" data-lens-result-rerun)
-    ("F" "Fullscreen"  data-lens-result-fullscreen-toggle)]])
+    ("=" "Widen column"    data-lens-result-widen-column)
+    ("-" "Narrow column"   data-lens-result-narrow-column)
+    ("C-c p" "Pin column"  data-lens-result-pin-column)
+    ("C-c P" "Unpin column" data-lens-result-unpin-column)
+    ("g" "Re-execute"      data-lens-result-rerun)
+    ("F" "Fullscreen"      data-lens-result-fullscreen-toggle)]])
 
 ;;;###autoload
 (transient-define-prefix data-lens-record-dispatch ()
