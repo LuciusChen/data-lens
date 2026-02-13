@@ -718,31 +718,6 @@ Returns a propertized string."
     (concat (mapconcat #'identity (nreverse parts) "")
             (propertize "│" 'face 'data-lens-border-face))))
 
-(defun data-lens--footer-row-range (first-row last-row total-rows)
-  "Return the row-range part of the footer.
-FIRST-ROW and LAST-ROW are 1-based; TOTAL-ROWS is nil or a number."
-  (let ((hi 'font-lock-keyword-face)
-        (dim 'font-lock-comment-face))
-    (concat (propertize "rows " 'face dim)
-            (propertize (format "%d-%d" first-row last-row) 'face hi)
-            (propertize " of " 'face dim)
-            (propertize (if total-rows (format "%d" total-rows) "?")
-                        'face hi))))
-
-(defun data-lens--footer-page-indicator (page-num page-size total-rows)
-  "Return the data-page part of the footer.
-PAGE-NUM is 0-based, PAGE-SIZE is rows per page, TOTAL-ROWS may be nil."
-  (let ((hi 'font-lock-keyword-face)
-        (dim 'font-lock-comment-face))
-    (if total-rows
-        (let ((total-pages (max 1 (ceiling total-rows (float page-size)))))
-          (concat (propertize " | Page " 'face dim)
-                  (propertize (format "%d/%d" (1+ page-num)
-                                      (truncate total-pages))
-                              'face hi)))
-      (concat (propertize " | Page " 'face dim)
-              (propertize (format "%d" (1+ page-num)) 'face hi)))))
-
 (defun data-lens--render-footer (row-count page-num page-size
                                            total-rows col-num-pages col-cur-page)
   "Return the footer string for pagination state.
@@ -753,37 +728,48 @@ TOTAL-ROWS is the known total or nil.
 COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
   (let* ((hi 'font-lock-keyword-face)
          (dim 'font-lock-comment-face)
-         (first-row (1+ (* page-num page-size)))
-         (last-row (+ (* page-num page-size) row-count))
-         (parts (list (data-lens--footer-page-indicator page-num page-size total-rows)
-                      (data-lens--footer-row-range first-row last-row total-rows))))
+         (sep (propertize "  •  " 'face dim))
+         (total-pages (when total-rows
+                        (max 1 (ceiling total-rows (float page-size)))))
+         (icon-rows (data-lens--icon '(codicon . "nf-cod-symbol_numeric") "Σ"))
+         (icon-page (data-lens--icon '(codicon . "nf-cod-files") "⊞"))
+         (icon-time (data-lens--icon '(mdicon . "nf-md-timer_outline") "⏱"))
+         (icon-col (data-lens--icon '(codicon . "nf-cod-split_horizontal") "⫼"))
+         (icon-where (data-lens--icon '(codicon . "nf-cod-filter") "W:"))
+         (icon-filter (data-lens--icon '(codicon . "nf-cod-search") "/:"))
+         (parts nil))
+    (push (concat (propertize (concat icon-rows " ") 'face dim)
+                  (propertize (format "%d" (or total-rows row-count))
+                              'face hi)
+                  (propertize " rows" 'face dim))
+          parts)
+    (push (concat (propertize (concat icon-page " ") 'face dim)
+                  (propertize (format "%d" (1+ page-num)) 'face hi)
+                  (propertize " / " 'face dim)
+                  (propertize (format "%d" (or total-pages 1)) 'face hi))
+          parts)
     (when (> col-num-pages 1)
-      (push (concat (propertize " | Col page " 'face dim)
+      (push (concat (propertize (concat icon-col " ") 'face dim)
                     (propertize (format "%d/%d" col-cur-page col-num-pages)
-                                'face hi)
-                    (propertize " | " 'face dim)
-                    (propertize "[" 'face hi)
-                    (propertize "-prev/ " 'face dim)
-                    (propertize "]" 'face hi)
-                    (propertize "-next" 'face dim))
+                                'face hi))
+            parts))
+    (when data-lens--query-elapsed
+      (push (concat (propertize (concat icon-time " ") 'face dim)
+                    (propertize (data-lens--format-elapsed
+                                 data-lens--query-elapsed)
+                                'face hi))
             parts))
     (when data-lens--where-filter
-      (push (concat (propertize " | W: " 'face 'font-lock-warning-face)
+      (push (concat (propertize (concat icon-where " ") 'face 'font-lock-warning-face)
                     (propertize data-lens--where-filter
                                 'face 'font-lock-warning-face))
             parts))
     (when data-lens--filter-pattern
-      (push (concat (propertize " | /: " 'face 'font-lock-string-face)
+      (push (concat (propertize (concat icon-filter " ") 'face 'font-lock-string-face)
                     (propertize data-lens--filter-pattern
                                 'face 'font-lock-string-face))
             parts))
-    (when data-lens--query-elapsed
-      (push (propertize
-             (format " | %s" (data-lens--format-elapsed
-                              data-lens--query-elapsed))
-             'face dim)
-            parts))
-    (apply #'concat (nreverse parts))))
+    (mapconcat #'identity (nreverse parts) sep)))
 
 (defun data-lens--effective-widths ()
   "Return column widths adjusted for header indicator icons.
