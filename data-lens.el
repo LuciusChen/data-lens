@@ -739,9 +739,18 @@ COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
          (icon-filter (data-lens--icon '(codicon . "nf-cod-search") "/:"))
          (parts nil))
     (push (concat (propertize (concat icon-rows " ") 'face dim)
-                  (propertize (format "%d" (or total-rows row-count))
-                              'face hi)
-                  (propertize " rows" 'face dim))
+                  (if (and total-rows (= total-rows row-count))
+                      ;; Single page — just show total
+                      (concat (propertize (format "%d" total-rows) 'face hi)
+                              (propertize " rows" 'face dim))
+                    ;; Paginated — show page rows of total
+                    (concat (propertize (format "%d" row-count) 'face hi)
+                            (propertize " of " 'face dim)
+                            (propertize (if total-rows
+                                            (format "%d" total-rows)
+                                          "?")
+                                        'face hi)
+                            (propertize " rows" 'face dim))))
           parts)
     (push (concat (propertize (concat icon-page " ") 'face dim)
                   (propertize (format "%d" (1+ page-num)) 'face hi)
@@ -801,8 +810,8 @@ ACTIVE-CIDX is the highlighted column index, if any."
                  'data-lens-pinned-header-face)
                 (t 'data-lens-header-face)))
          (pad-str (make-string data-lens-column-padding ?\s)))
-    ;; 1 space aligns with │ in data rows
-    (concat " " pad-str
+    (concat (propertize "│" 'face 'data-lens-border-face)
+            pad-str
             (propertize padded 'face face
                         'data-lens-header-col cidx)
             pad-str)))
@@ -816,14 +825,17 @@ NW is the digit width for the row number column.
 HAS-PREV/HAS-NEXT control edge border indicators.
 ACTIVE-CIDX highlights that column when non-nil."
   (let* ((edge (lambda (s) (data-lens--replace-edge-borders s has-prev has-next)))
+         (bface 'data-lens-border-face)
          (pad-str (make-string data-lens-column-padding ?\s))
          (cells (mapcar (lambda (cidx)
                           (data-lens--header-cell cidx widths active-cidx))
                         visible-cols))
          (data-header (funcall edge
-                               (concat (apply #'concat cells) " "))))
-    ;; 1 space for │ + 1 for mark + nw for row number + padding
-    (concat " " " " (make-string nw ?\s) pad-str
+                               (concat (apply #'concat cells)
+                                       (propertize "│" 'face bface)))))
+    ;; 1 char for mark column + nw for row number + padding
+    (concat (propertize "│" 'face bface)
+            " " (make-string nw ?\s) pad-str
             data-header)))
 
 (defun data-lens--build-separator (visible-cols widths position
@@ -899,7 +911,7 @@ EDGE-FN applies column-page edge indicators."
                                                 has-prev has-next
                                                 data-lens--header-active-col)))
     (insert (data-lens--build-separator
-             visible-cols widths 'top nw edge-fn) "\n")
+             visible-cols widths 'middle nw edge-fn) "\n")
     (when data-lens--pending-edits
       (insert (propertize
                (format "-- %d pending edit%s\n"
