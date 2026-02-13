@@ -1866,11 +1866,6 @@ Preserves the window scroll position relative to the target row."
                 (push (format "*%d" (length data-lens--marked-rows)) parts))
               (format " %s" (mapconcat #'identity parts " | ")))))))
 
-(defun data-lens--reset-vscroll (win _start)
-  "Reset pixel-level vscroll on WIN to keep rows aligned with header."
-  (when (> (window-vscroll win t) 0)
-    (set-window-vscroll win 0 t)))
-
 (defun data-lens--update-row-highlight ()
   "Highlight the entire row under the cursor."
   (when data-lens--row-overlay
@@ -1948,9 +1943,6 @@ Edit:
   (hl-line-mode 1)
   ;; Make tab-line use default background so footer renders cleanly
   (face-remap-add-relative 'tab-line :inherit 'default)
-  ;; Snap to whole lines so pixel-scroll-precision-mode doesn't leave
-  ;; a partial row peeking below the fixed header-line.
-  (add-hook 'window-scroll-functions #'data-lens--reset-vscroll nil t)
   (add-hook 'post-command-hook
             #'data-lens--update-header-highlight nil t))
 
