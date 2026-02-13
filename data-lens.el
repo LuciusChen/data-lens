@@ -910,8 +910,6 @@ EDGE-FN applies column-page edge indicators."
                   (data-lens--build-header-line visible-cols widths nw
                                                 has-prev has-next
                                                 data-lens--header-active-col)))
-    (insert (data-lens--build-separator
-             visible-cols widths 'middle nw edge-fn) "\n")
     (when data-lens--pending-edits
       (insert (propertize
                (format "-- %d pending edit%s\n"
