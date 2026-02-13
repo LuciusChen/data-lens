@@ -1941,8 +1941,10 @@ Edit:
   \\[data-lens-result-rerun]	Re-execute the query"
   (setq truncate-lines t)
   (hl-line-mode 1)
-  ;; Make tab-line use default background so sep-top renders cleanly
+  ;; Make tab-line use default background so footer renders cleanly
   (face-remap-add-relative 'tab-line :inherit 'default)
+  ;; Underline header-line to separate it from data when ├──┼──┤ scrolls away
+  (face-remap-add-relative 'header-line :underline t)
   (add-hook 'post-command-hook
             #'data-lens--update-header-highlight nil t))
 
