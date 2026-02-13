@@ -778,8 +778,13 @@ COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
                                 'face 'font-lock-string-face))
             parts))
     (when data-lens--query-elapsed
-      (push (propertize (format " | %.3fs" data-lens--query-elapsed)
-                        'face dim)
+      (push (propertize
+             (format " | %s"
+                     (if (< data-lens--query-elapsed 1.0)
+                         (format "%dms"
+                                 (round (* data-lens--query-elapsed 1000)))
+                       (format "%.3fs" data-lens--query-elapsed)))
+             'face dim)
             parts))
     (apply #'concat (nreverse parts))))
 
@@ -904,13 +909,17 @@ EDGE-FN applies column-page edge indicators."
     (erase-buffer)
     (setq tab-line-format
           (concat (propertize " " 'display '(space :align-to 0))
-                  (data-lens--build-separator
-                   visible-cols widths 'top nw edge-fn)))
+                  (data-lens--render-footer
+                   (length rows) data-lens--page-current
+                   data-lens-result-max-rows data-lens--page-total-rows
+                   col-num-pages (1+ cur-page))))
     (setq header-line-format
           (concat (propertize " " 'display '(space :align-to 0))
                   (data-lens--build-header-line visible-cols widths nw
                                                 has-prev has-next
                                                 data-lens--header-active-col)))
+    (insert (data-lens--build-separator
+             visible-cols widths 'top nw edge-fn) "\n")
     (insert (data-lens--build-separator
              visible-cols widths 'middle nw edge-fn) "\n")
     (when data-lens--pending-edits
@@ -923,11 +932,6 @@ EDGE-FN applies column-page edge indicators."
                                  global-first-row edge-fn)
     (insert (data-lens--build-separator
              visible-cols widths 'bottom nw edge-fn) "\n")
-    (insert (data-lens--render-footer
-             (length rows) data-lens--page-current
-             data-lens-result-max-rows data-lens--page-total-rows
-             col-num-pages (1+ cur-page))
-            "\n")
     (when data-lens--last-query
       (insert (propertize
                (truncate-string-to-width
@@ -1033,7 +1037,10 @@ Preserves cursor position (row + column) across the refresh."
     (when-let* ((w (data-lens-db-result-warnings result))
                 ((> w 0)))
       (insert (format "Warnings: %s\n" w)))
-    (insert (propertize (format "\nCompleted in %.3fs\n" elapsed)
+    (insert (propertize (format "\nCompleted in %s\n"
+                                (if (< elapsed 1.0)
+                                    (format "%dms" (round (* elapsed 1000)))
+                                  (format "%.3fs" elapsed)))
                         'face 'font-lock-comment-face))
     (goto-char (point-min))))
 
@@ -1126,8 +1133,12 @@ Signals an error if pagination is not available."
       (setq-local data-lens--column-widths
                   (data-lens--compute-column-widths col-names rows columns))
       (data-lens--refresh-display)
-      (message "Page %d loaded (%.3fs, %d row%s)"
-               (1+ page-num) elapsed (length rows)
+      (message "Page %d loaded (%s, %d row%s)"
+               (1+ page-num)
+               (if (< elapsed 1.0)
+                   (format "%dms" (round (* elapsed 1000)))
+                 (format "%.3fs" elapsed))
+               (length rows)
                (if (= (length rows) 1) "" "s")))))
 
 ;;;; Query execution engine
