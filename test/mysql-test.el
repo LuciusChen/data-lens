@@ -128,11 +128,11 @@
 
 (ert-deftest mysql-test-parse-value ()
   "Test MySQL type conversion."
-  (should (= (mysql--parse-value "42" mysql--type-long) 42))
-  (should (= (mysql--parse-value "3.14" mysql--type-float) 3.14))
-  (should (= (mysql--parse-value "2024" mysql--type-year) 2024))
-  (should (equal (mysql--parse-value "hello" mysql--type-var-string) "hello"))
-  (should (null (mysql--parse-value nil mysql--type-long))))
+  (should (= (mysql--parse-value "42" mysql-type-long) 42))
+  (should (= (mysql--parse-value "3.14" mysql-type-float) 3.14))
+  (should (= (mysql--parse-value "2024" mysql-type-year) 2024))
+  (should (equal (mysql--parse-value "hello" mysql-type-var-string) "hello"))
+  (should (null (mysql--parse-value nil mysql-type-long))))
 
 ;;;; Extended type system tests
 
@@ -170,22 +170,22 @@
 
 (ert-deftest mysql-test-custom-type-parser ()
   "Test custom type parser override."
-  (let ((mysql-type-parsers (list (cons mysql--type-long
+  (let ((mysql-type-parsers (list (cons mysql-type-long
                                        (lambda (v) (concat "custom:" v))))))
-    (should (equal (mysql--parse-value "42" mysql--type-long) "custom:42")))
+    (should (equal (mysql--parse-value "42" mysql-type-long) "custom:42")))
   ;; Without override, original behavior
-  (should (= (mysql--parse-value "42" mysql--type-long) 42)))
+  (should (= (mysql--parse-value "42" mysql-type-long) 42)))
 
 (ert-deftest mysql-test-parse-value-date-types ()
   "Test that parse-value dispatches date/time types correctly."
-  (should (equal (mysql--parse-value "2024-03-15" mysql--type-date)
+  (should (equal (mysql--parse-value "2024-03-15" mysql-type-date)
                  '(:year 2024 :month 3 :day 15)))
-  (should (equal (mysql--parse-value "13:45:30" mysql--type-time)
+  (should (equal (mysql--parse-value "13:45:30" mysql-type-time)
                  '(:hours 13 :minutes 45 :seconds 30 :negative nil)))
-  (should (equal (mysql--parse-value "2024-03-15 13:45:30" mysql--type-datetime)
+  (should (equal (mysql--parse-value "2024-03-15 13:45:30" mysql-type-datetime)
                  '(:year 2024 :month 3 :day 15
                    :hours 13 :minutes 45 :seconds 30)))
-  (should (equal (mysql--parse-value "2024-03-15 13:45:30" mysql--type-timestamp)
+  (should (equal (mysql--parse-value "2024-03-15 13:45:30" mysql-type-timestamp)
                  '(:year 2024 :month 3 :day 15
                    :hours 13 :minutes 45 :seconds 30))))
 
@@ -277,10 +277,10 @@
 
 (ert-deftest mysql-test-elisp-to-mysql-type ()
   "Test Elisp to MySQL type mapping."
-  (should (= (car (mysql--elisp-to-mysql-type nil)) mysql--type-null))
-  (should (= (car (mysql--elisp-to-mysql-type 42)) mysql--type-longlong))
-  (should (= (car (mysql--elisp-to-mysql-type 3.14)) mysql--type-var-string))
-  (should (= (car (mysql--elisp-to-mysql-type "hello")) mysql--type-var-string)))
+  (should (= (car (mysql--elisp-to-mysql-type nil)) mysql-type-null))
+  (should (= (car (mysql--elisp-to-mysql-type 42)) mysql-type-longlong))
+  (should (= (car (mysql--elisp-to-mysql-type 3.14)) mysql-type-var-string))
+  (should (= (car (mysql--elisp-to-mysql-type "hello")) mysql-type-var-string)))
 
 (ert-deftest mysql-test-ieee754-double ()
   "Test IEEE 754 double decoding."
@@ -316,16 +316,16 @@
   "Test binary DATETIME decoding."
   ;; Length 0: nil
   (let ((data (unibyte-string 0)))
-    (should (null (car (mysql--decode-binary-datetime data 0 mysql--type-datetime)))))
+    (should (null (car (mysql--decode-binary-datetime data 0 mysql-type-datetime)))))
   ;; Length 4: date only
   (let ((data (unibyte-string 4 #xe8 #x07 3 15)))  ; 2024-03-15
-    (let ((result (car (mysql--decode-binary-datetime data 0 mysql--type-datetime))))
+    (let ((result (car (mysql--decode-binary-datetime data 0 mysql-type-datetime))))
       (should (= (plist-get result :year) 2024))
       (should (= (plist-get result :month) 3))
       (should (= (plist-get result :day) 15))))
   ;; Length 7: date + time
   (let ((data (unibyte-string 7 #xe8 #x07 3 15 13 45 30)))
-    (let ((result (car (mysql--decode-binary-datetime data 0 mysql--type-datetime))))
+    (let ((result (car (mysql--decode-binary-datetime data 0 mysql-type-datetime))))
       (should (= (plist-get result :year) 2024))
       (should (= (plist-get result :hours) 13))
       (should (= (plist-get result :seconds) 30)))))
@@ -356,8 +356,8 @@
   ;; null bitmap for 2 cols: (2+2+7)/8 = 1 byte, all zeros
   ;; INT (LONGLONG): 42 as 8-byte LE
   ;; STRING: lenenc "hi" = 0x02 "hi"
-  (let* ((columns (list (list :type mysql--type-longlong :name "id")
-                        (list :type mysql--type-var-string :name "name")))
+  (let* ((columns (list (list :type mysql-type-longlong :name "id")
+                        (list :type mysql-type-var-string :name "name")))
          (packet (concat (unibyte-string #x00)          ; header
                          (unibyte-string #x00)          ; null bitmap
                          (mysql--int-le-bytes 42 8)     ; INT value

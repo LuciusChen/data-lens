@@ -34,14 +34,13 @@
 
 ;;; Code:
 
-(require 'mysql)
+(require 'data-lens-db)
 (require 'sql)
 (require 'comint)
 (require 'cl-lib)
 (require 'ring)
+(require 'transient)
 
-(declare-function data-lens-dispatch "data-lens-transient")
-(declare-function data-lens-result-dispatch "data-lens-transient")
 (declare-function nerd-icons-mdicon "nerd-icons")
 (declare-function nerd-icons-codicon "nerd-icons")
 
@@ -49,7 +48,7 @@
 
 (defgroup data-lens nil
   "Interactive database lens."
-  :group 'mysql
+  :group 'comm
   :prefix "data-lens-")
 
 (defface data-lens-header-face
@@ -88,11 +87,18 @@
 Underlined to indicate clickable (RET to follow)."
   :group 'data-lens)
 
+(defface data-lens-marked-face
+  '((t :inherit dired-marked))
+  "Face for marked rows in result buffer."
+  :group 'data-lens)
+
 (defcustom data-lens-connection-alist nil
   "Alist of saved database connections.
 Each entry has the form:
-  (NAME . (:host H :port P :user U :password P :database D [:sql-product SYM]))
+  (NAME . (:host H :port P :user U :password P :database D
+           [:backend SYM] [:sql-product SYM]))
 NAME is a string used for `completing-read'.
+:backend is a symbol (\\='mysql or \\='pg, default \\='mysql).
 :sql-product overrides `data-lens-sql-product' for this connection."
   :type '(alist :key-type string
                 :value-type (plist :options
@@ -101,6 +107,7 @@ NAME is a string used for `completing-read'.
                                     (:user string)
                                     (:password string)
                                     (:database string)
+                                    (:backend symbol)
                                     (:sql-product symbol))))
   :group 'data-lens)
 
@@ -147,7 +154,7 @@ Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
 ;;;; Buffer-local variables
 
 (defvar-local data-lens-connection nil
-  "Current `mysql-conn' for this buffer.")
+  "Current database connection for this buffer.")
 
 (defvar-local data-lens--conn-sql-product nil
   "SQL product for the current connection, or nil to use the default.")
@@ -214,6 +221,9 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
 (defvar-local data-lens--base-query nil
   "The original unfiltered SQL query, used by WHERE filtering.")
 
+(defvar-local data-lens--marked-rows nil
+  "List of marked row indices (dired-style selection).")
+
 (defvar-local data-lens-record--result-buffer nil
   "Reference to the parent result buffer (Record buffer local).")
 
@@ -279,16 +289,14 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
 (defun data-lens--connection-key (conn)
   "Return a descriptive string for CONN like \"user@host:port/db\"."
   (format "%s@%s:%s/%s"
-          (or (mysql-conn-user conn) "?")
-          (or (mysql-conn-host conn) "?")
-          (or (mysql-conn-port conn) 3306)
-          (or (mysql-conn-database conn) "")))
+          (or (data-lens-db-user conn) "?")
+          (or (data-lens-db-host conn) "?")
+          (or (data-lens-db-port conn) "?")
+          (or (data-lens-db-database conn) "")))
 
 (defun data-lens--connection-alive-p (conn)
   "Return non-nil if CONN is live."
-  (and conn
-       (mysql-conn-p conn)
-       (process-live-p (mysql-conn-process conn))))
+  (and conn (data-lens-db-live-p conn)))
 
 (defun data-lens--ensure-connection ()
   "Ensure current buffer has a live connection.  Signal error if not."
@@ -299,19 +307,19 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
   "Update mode-line lighter with connection status."
   (setq mode-name
         (if (data-lens--connection-alive-p data-lens-connection)
-            (format "MySQL[%s]"
-                    (data-lens--connection-key
-                     data-lens-connection))
-          "MySQL[disconnected]"))
+            (format "%s[%s]"
+                    (data-lens-db-display-name data-lens-connection)
+                    (data-lens--connection-key data-lens-connection))
+          "DB[disconnected]"))
   (force-mode-line-update))
 
 (defun data-lens-connect ()
-  "Connect to a MySQL server interactively.
+  "Connect to a database server interactively.
 If `data-lens-connection-alist' is non-empty, offer saved connections via
 `completing-read'.  Otherwise prompt for each parameter."
   (interactive)
   (when (data-lens--connection-alive-p data-lens-connection)
-    (mysql-disconnect data-lens-connection)
+    (data-lens-db-disconnect data-lens-connection)
     (setq data-lens-connection nil))
   (let* ((conn-params
           (if data-lens-connection-alist
@@ -325,16 +333,16 @@ If `data-lens-connection-alist' is non-empty, offer saved connections via
                   :password (read-passwd "Password: ")
                   :database (let ((db (read-string "Database (optional): ")))
                               (unless (string-empty-p db) db)))))
+         (backend (or (plist-get conn-params :backend) 'mysql))
          (product (plist-get conn-params :sql-product))
-         (mysql-params (cl-loop for (k v) on conn-params by #'cddr
-                                unless (eq k :sql-product)
-                                append (list k v)))
+         (db-params (cl-loop for (k v) on conn-params by #'cddr
+                             unless (memq k '(:sql-product :backend))
+                             append (list k v)))
          (conn (condition-case err
-                   (apply #'mysql-connect mysql-params)
-                 (mysql-error
+                   (data-lens-db-connect backend db-params)
+                 (data-lens-db-error
                   (user-error "Connection failed: %s"
                               (error-message-string err))))))
-    (mysql-query conn "SET NAMES utf8mb4")
     (setq data-lens-connection conn)
     (setq data-lens--conn-sql-product product)
     (data-lens--update-mode-line)
@@ -342,10 +350,10 @@ If `data-lens-connection-alist' is non-empty, offer saved connections via
     (message "Connected to %s" (data-lens--connection-key conn))))
 
 (defun data-lens-disconnect ()
-  "Disconnect from the current MySQL server."
+  "Disconnect from the current database server."
   (interactive)
   (when (data-lens--connection-alive-p data-lens-connection)
-    (mysql-disconnect data-lens-connection)
+    (data-lens-db-disconnect data-lens-connection)
     (message "Disconnected"))
   (setq data-lens-connection nil)
   (data-lens--update-mode-line))
@@ -397,8 +405,9 @@ nil → \"NULL\", numbers unquoted, strings escaped."
   (cond
    ((null val) "NULL")
    ((numberp val) (number-to-string val))
-   ((stringp val) (mysql-escape-literal val))
-   (t (mysql-escape-literal (data-lens--format-value val)))))
+   ((stringp val) (data-lens-db-escape-literal data-lens-connection val))
+   (t (data-lens-db-escape-literal data-lens-connection
+                                   (data-lens--format-value val)))))
 
 (defun data-lens--string-pad (str width &optional right-align)
   "Pad STR with spaces to reach display WIDTH.
@@ -416,25 +425,16 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
 
 (defun data-lens--numeric-type-p (col-def)
   "Return non-nil if COL-DEF is a numeric column type."
-  (memq (plist-get col-def :type)
-        (list mysql--type-decimal mysql--type-tiny mysql--type-short
-              mysql--type-long mysql--type-float mysql--type-double
-              mysql--type-longlong mysql--type-int24 mysql--type-year
-              mysql--type-newdecimal)))
+  (eq (plist-get col-def :type-category) 'numeric))
 
 (defun data-lens--long-field-type-p (col-def)
-  "Return non-nil if COL-DEF is a long field type (JSON/BLOB/TEXT)."
-  (memq (plist-get col-def :type)
-        (list mysql--type-json
-              mysql--type-blob
-              mysql--type-tiny-blob
-              mysql--type-medium-blob
-              mysql--type-long-blob)))
+  "Return non-nil if COL-DEF is a long field type (JSON/BLOB)."
+  (memq (plist-get col-def :type-category) '(json blob)))
 
 (defun data-lens--long-field-placeholder (col-def)
   "Return a placeholder string for a long field type COL-DEF."
-  (pcase (plist-get col-def :type)
-    (245 "<JSON>")
+  (pcase (plist-get col-def :type-category)
+    ('json "<JSON>")
     (_ "<BLOB>")))
 
 (defun data-lens--compute-column-widths (col-names rows column-defs
@@ -508,9 +508,9 @@ Pinned columns come first, followed by the current page's columns."
 (defun data-lens--result-buffer-name ()
   "Return the result buffer name based on current connection."
   (if (data-lens--connection-alive-p data-lens-connection)
-      (format "*mysql: %s*"
-              (or (mysql-conn-database data-lens-connection) "results"))
-    "*mysql: results*"))
+      (format "*data-lens: %s*"
+              (or (data-lens-db-database data-lens-connection) "results"))
+    "*data-lens: results*"))
 
 (defun data-lens--render-static-table (col-names rows &optional column-defs)
   "Render a table string from COL-NAMES and ROWS.
@@ -691,8 +691,7 @@ Returns a propertized string."
              (truncated (if (> (string-width formatted) w)
                             (truncate-string-to-width formatted w)
                           formatted))
-             (ralign (and (not (null val))
-                         (data-lens--numeric-type-p col-def)))
+             (ralign (data-lens--numeric-type-p col-def))
              (padded (data-lens--string-pad truncated w ralign))
              (face (cond (edited 'data-lens-modified-face)
                          ((null val) 'data-lens-null-face)
@@ -747,8 +746,8 @@ COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
          (dim 'font-lock-comment-face)
          (first-row (1+ (* page-num page-size)))
          (last-row (+ (* page-num page-size) row-count))
-         (parts (list (data-lens--footer-row-range first-row last-row total-rows)
-                      (data-lens--footer-page-indicator page-num page-size total-rows))))
+         (parts (list (data-lens--footer-page-indicator page-num page-size total-rows)
+                      (data-lens--footer-row-range first-row last-row total-rows))))
     (when (> col-num-pages 1)
       (push (concat (propertize " | Col page " 'face dim)
                     (propertize (format "%d/%d" col-cur-page col-num-pages)
@@ -819,8 +818,9 @@ ACTIVE-CIDX highlights that column when non-nil."
          (data-header (funcall edge
                                (concat (apply #'concat cells)
                                        (propertize "│" 'face bface)))))
+    ;; 1 char for mark column + nw for row number + padding
     (concat (propertize "│" 'face bface)
-            pad-str (make-string nw ?\s) pad-str
+            " " (make-string nw ?\s) pad-str
             data-header)))
 
 (defun data-lens--build-separator (visible-cols widths position
@@ -831,7 +831,8 @@ POSITION is \\='top, \\='middle, or \\='bottom.
 NW is the row-number digit width.
 EDGE-FN applies column-page edge indicators."
   (let* ((bface 'data-lens-border-face)
-         (rn-dash (+ nw (* 2 data-lens-column-padding)))
+         ;; +1 for the mark column char
+         (rn-dash (+ 1 nw data-lens-column-padding))
          (raw (data-lens--render-separator visible-cols widths position))
          (cross (pcase position ('top "┬") ('bottom "┴") (_ "┼")))
          (left (pcase position ('top "┌") ('bottom "└") (_ "├")))
@@ -848,21 +849,24 @@ GLOBAL-FIRST-ROW is the 0-based offset for numbering.
 EDGE-FN applies column-page edge indicators."
   (let ((bface 'data-lens-border-face)
         (pad-str (make-string data-lens-column-padding ?\s))
-        (ridx 0))
-    (dolist (row rows)
-      (let* ((data-row (funcall edge-fn
-                                (data-lens--render-row
-                                 row ridx visible-cols widths)))
-             (num-label (string-pad
-                         (number-to-string
-                          (1+ (+ global-first-row ridx)))
-                         nw nil t)))
-        (insert (propertize "│" 'face bface)
-                pad-str
-                (propertize num-label 'face 'shadow)
-                pad-str
-                data-row "\n"))
-      (cl-incf ridx))))
+        (marked data-lens--marked-rows))
+    (cl-loop for row in rows
+             for ridx from 0
+             for data-row = (funcall edge-fn
+                                     (data-lens--render-row
+                                      row ridx visible-cols widths))
+             for mark-char = (if (memq ridx marked) "*" " ")
+             for num-label = (string-pad
+                              (number-to-string
+                               (1+ (+ global-first-row ridx)))
+                              nw nil t)
+             for num-face = (if (memq ridx marked)
+                                'data-lens-marked-face 'shadow)
+             do (insert (propertize "│" 'face bface)
+                        (propertize mark-char 'face num-face)
+                        (propertize num-label 'face num-face)
+                        pad-str
+                        data-row "\n"))))
 
 (defun data-lens--render-result ()
   "Render the result buffer content using column paging."
@@ -906,6 +910,15 @@ EDGE-FN applies column-page edge indicators."
              data-lens-result-max-rows data-lens--page-total-rows
              col-num-pages (1+ cur-page))
             "\n")
+    (when data-lens--last-query
+      (insert (propertize
+               (truncate-string-to-width
+                (replace-regexp-in-string
+                 "[\n\r]+" " "
+                 (string-trim data-lens--last-query))
+                120 nil nil t)
+               'face 'font-lock-comment-face)
+              "\n"))
     (goto-char (point-min))))
 
 (defun data-lens--col-idx-at-point ()
@@ -995,11 +1008,11 @@ Preserves cursor position (row + column) across the refresh."
     (insert (propertize (format "-- %s\n" (string-trim sql))
                         'face 'font-lock-comment-face))
     (insert (format "Affected rows: %s\n"
-                    (or (mysql-result-affected-rows result) 0)))
-    (when-let* ((id (mysql-result-last-insert-id result))
+                    (or (data-lens-db-result-affected-rows result) 0)))
+    (when-let* ((id (data-lens-db-result-last-insert-id result))
                 ((> id 0)))
       (insert (format "Last insert ID: %s\n" id)))
-    (when-let* ((w (mysql-result-warnings result))
+    (when-let* ((w (data-lens-db-result-warnings result))
                 ((> w 0)))
       (insert (format "Warnings: %s\n" w)))
     (insert (propertize (format "\nCompleted in %.3fs\n" elapsed)
@@ -1013,14 +1026,14 @@ If the result has columns, shows a table (without pagination).
 Otherwise shows DML summary (affected rows, etc.)."
   (let* ((buf-name (data-lens--result-buffer-name))
          (buf (get-buffer-create buf-name))
-         (columns (mysql-result-columns result))
+         (columns (data-lens-db-result-columns result))
          (col-names (when columns (data-lens--column-names columns)))
-         (rows (mysql-result-rows result)))
+         (rows (data-lens-db-result-rows result)))
     (with-current-buffer buf
       (data-lens-result-mode)
       (setq-local data-lens--last-query sql)
       (setq-local data-lens-connection
-                  (mysql-result-connection result))
+                  (data-lens-db-result-connection result))
       (if col-names
           ;; Tabular result (DESCRIBE, SHOW, EXPLAIN, etc.)
           (progn
@@ -1029,6 +1042,7 @@ Otherwise shows DML summary (affected rows, etc.)."
             (setq-local data-lens--result-column-defs columns)
             (setq-local data-lens--result-rows rows)
             (setq-local data-lens--pending-edits nil)
+            (setq-local data-lens--marked-rows nil)
             (setq-local data-lens--current-col-page 0)
             (setq-local data-lens--pinned-columns nil)
             (setq-local data-lens--sort-column nil)
@@ -1052,20 +1066,12 @@ Otherwise shows DML summary (affected rows, etc.)."
   "Build a paged SQL query wrapping BASE-SQL.
 PAGE-NUM is 0-based, PAGE-SIZE is the row limit.
 ORDER-BY is a cons (COL-NAME . DIRECTION) or nil.
-If BASE-SQL already has LIMIT, return it unchanged."
+If BASE-SQL already has LIMIT, return it unchanged.
+Delegates to the backend for dialect-specific pagination."
   (if (data-lens--sql-has-limit-p base-sql)
       base-sql
-    (let* ((trimmed (string-trim-right
-                     (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
-           (offset (* page-num page-size))
-           (order-clause (when order-by
-                           (format " ORDER BY %s %s"
-                                   (mysql-escape-identifier (car order-by))
-                                   (cdr order-by)))))
-      (format "SELECT * FROM (%s) AS _dl_t%s LIMIT %d OFFSET %d"
-              trimmed
-              (or order-clause "")
-              page-size offset))))
+    (data-lens-db-build-paged-sql data-lens-connection base-sql
+                                  page-num page-size order-by)))
 
 (defun data-lens--execute-page (page-num)
   "Execute the query for PAGE-NUM and refresh the result buffer display.
@@ -1082,19 +1088,20 @@ Signals an error if pagination is not available."
       (user-error "Not connected"))
     (let* ((start (float-time))
            (result (condition-case err
-                       (mysql-query conn paged-sql)
-                     (mysql-error
+                       (data-lens-db-query conn paged-sql)
+                     (data-lens-db-error
                       (user-error "Query error: %s"
                                   (error-message-string err)))))
            (elapsed (- (float-time) start))
-           (columns (mysql-result-columns result))
-           (rows (mysql-result-rows result))
+           (columns (data-lens-db-result-columns result))
+           (rows (data-lens-db-result-rows result))
            (col-names (data-lens--column-names columns)))
       (setq-local data-lens--result-columns col-names)
       (setq-local data-lens--result-column-defs columns)
       (setq-local data-lens--result-rows rows)
       (setq-local data-lens--page-current page-num)
       (setq-local data-lens--pending-edits nil)
+      (setq-local data-lens--marked-rows nil)
       (setq-local data-lens--column-widths
                   (data-lens--compute-column-widths col-names rows columns))
       (data-lens--refresh-display)
@@ -1104,15 +1111,35 @@ Signals an error if pagination is not available."
 
 ;;;; Query execution engine
 
+(defun data-lens--strip-leading-comments (sql)
+  "Strip leading SQL comments and whitespace from SQL.
+Handles single-line (--) and multi-line (/* */) comments."
+  (let ((s (string-trim-left sql)))
+    (while (or (string-prefix-p "--" s)
+               (string-prefix-p "/*" s))
+      (setq s (string-trim-left
+               (cond
+                ((string-prefix-p "--" s)
+                 (if-let* ((nl (string-search "\n" s)))
+                     (substring s (1+ nl))
+                   ""))
+                ((string-prefix-p "/*" s)
+                 (if-let* ((end (string-search "*/" s)))
+                     (substring s (+ end 2))
+                   ""))))))
+    s))
+
 (defun data-lens--destructive-query-p (sql)
-  "Return non-nil if SQL is a destructive operation."
-  (let ((trimmed (string-trim-left sql)))
+  "Return non-nil if SQL is a destructive operation.
+Leading SQL comments are stripped before checking."
+  (let ((trimmed (data-lens--strip-leading-comments sql)))
     (string-match-p "\\`\\(?:DELETE\\|DROP\\|TRUNCATE\\|ALTER\\)\\b"
                     (upcase trimmed))))
 
 (defun data-lens--select-query-p (sql)
-  "Return non-nil if SQL is a SELECT query."
-  (let ((trimmed (string-trim-left sql)))
+  "Return non-nil if SQL is a SELECT query.
+Leading SQL comments are stripped before checking."
+  (let ((trimmed (data-lens--strip-leading-comments sql)))
     (string-match-p "\\`\\(?:SELECT\\|WITH\\)\\b"
                     (upcase trimmed))))
 
@@ -1120,15 +1147,15 @@ Signals an error if pagination is not available."
   "Execute a SELECT SQL query with pagination on CONNECTION.
 Returns the query result."
   (let* ((page-size data-lens-result-max-rows)
-         (paged-sql (data-lens--build-paged-sql sql 0 page-size))
+         (paged-sql (data-lens-db-build-paged-sql connection sql 0 page-size))
          (result (condition-case err
-                     (mysql-query connection paged-sql)
-                   (mysql-error
+                     (data-lens-db-query connection paged-sql)
+                   (data-lens-db-error
                     (user-error "Query error: %s"
                                 (error-message-string err)))))
          (buf (get-buffer-create (data-lens--result-buffer-name)))
-         (columns (mysql-result-columns result))
-         (rows (mysql-result-rows result))
+         (columns (data-lens-db-result-columns result))
+         (rows (data-lens-db-result-rows result))
          (col-names (data-lens--column-names columns)))
     (with-current-buffer buf
       (data-lens-result-mode)
@@ -1139,6 +1166,7 @@ Returns the query result."
                   data-lens--result-column-defs columns
                   data-lens--result-rows rows
                   data-lens--pending-edits nil
+                  data-lens--marked-rows nil
                   data-lens--current-col-page 0
                   data-lens--pinned-columns nil
                   data-lens--sort-column nil
@@ -1158,8 +1186,8 @@ Returns the query result."
   (setq data-lens--last-query sql)
   (let* ((start (float-time))
          (result (condition-case err
-                     (mysql-query connection sql)
-                   (mysql-error
+                     (data-lens-db-query connection sql)
+                   (data-lens-db-error
                     (user-error "Query error: %s"
                                 (error-message-string err)))))
          (elapsed (- (float-time) start)))
@@ -1226,7 +1254,7 @@ Queries are delimited by semicolons or blank lines."
    (string-trim (buffer-substring-no-properties (point-min) (point-max)))))
 
 (defun data-lens--find-connection ()
-  "Find a live MySQL connection from any data-lens-mode buffer.
+  "Find a live database connection from any data-lens-mode buffer.
 Returns the connection or nil."
   (cl-loop for buf in (buffer-list)
            for conn = (buffer-local-value 'data-lens-connection buf)
@@ -1248,7 +1276,7 @@ current line.  Uses the connection from any data-lens-mode buffer."
     (user-error "No SQL to execute"))
   (let ((conn (or data-lens-connection
                   (data-lens--find-connection)
-                  (user-error "No active MySQL connection.  Use M-x data-lens-mode then C-c C-e to connect"))))
+                  (user-error "No active connection.  Use M-x data-lens-mode then C-c C-e to connect"))))
     (data-lens--execute sql conn)))
 
 ;;;; Indirect edit buffer
@@ -1291,7 +1319,7 @@ Key bindings:
     (when (string-empty-p sql)
       (user-error "No SQL to execute"))
     (unless conn
-      (user-error "No active MySQL connection"))
+      (user-error "No active connection"))
     (quit-window 'kill)
     (data-lens--execute sql conn)))
 
@@ -1345,30 +1373,25 @@ Values are hash-tables mapping table-name → list of column-name strings.")
 Only loads table names (fast).  Column info is loaded lazily."
   (condition-case nil
       (let* ((key (data-lens--connection-key conn))
-             (table-result (mysql-query conn "SHOW TABLES"))
-             (table-names (mapcar #'car (mysql-result-rows table-result)))
+             (table-names (data-lens-db-list-tables conn))
              (schema (make-hash-table :test 'equal)))
         (dolist (tbl table-names)
           (puthash tbl nil schema))
         (puthash key schema data-lens--schema-cache)
         (message "Connected — %d tables" (hash-table-count schema)))
-    (mysql-error nil)))
+    (data-lens-db-error nil)))
 
 (defun data-lens--ensure-columns (conn schema table)
   "Ensure column info for TABLE is loaded in SCHEMA.
-Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
+Fetches from the backend if not yet cached.  Returns column list."
   (let ((cols (gethash table schema 'missing)))
     (unless (eq cols 'missing)
       (or cols
           (condition-case nil
-              (let* ((result (mysql-query
-                              conn
-                              (format "SHOW COLUMNS FROM %s"
-                                      (mysql-escape-identifier table))))
-                     (col-names (mapcar #'car (mysql-result-rows result))))
+              (let ((col-names (data-lens-db-list-columns conn table)))
                 (puthash table col-names schema)
                 col-names)
-            (mysql-error nil))))))
+            (data-lens-db-error nil))))))
 
 (defun data-lens--schema-for-connection ()
   "Return the schema hash-table for the current connection, or nil."
@@ -1376,8 +1399,19 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
     (gethash (data-lens--connection-key data-lens-connection)
              data-lens--schema-cache)))
 
+(defun data-lens--tables-in-buffer (schema)
+  "Return table names from SCHEMA that appear in the current buffer."
+  (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+        (tables nil))
+    (dolist (tbl (hash-table-keys schema))
+      (when (string-match-p (regexp-quote tbl) text)
+        (push tbl tables)))
+    tables))
+
 (defun data-lens-completion-at-point ()
-  "Completion-at-point function for SQL identifiers."
+  "Completion-at-point function for SQL identifiers.
+Skips column loading if the connection is busy (prevents re-entrancy
+when completion triggers during an in-flight query)."
   (when-let* ((schema (data-lens--schema-for-connection))
               (conn data-lens-connection)
               (bounds (bounds-of-thing-at-point 'symbol)))
@@ -1390,12 +1424,13 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
             (string-match-p
              "\\b\\(FROM\\|JOIN\\|INTO\\|UPDATE\\|TABLE\\|DESCRIBE\\|DESC\\)\\s-+\\S-*\\'"
              (upcase line-before)))
+           (busy (data-lens-db-busy-p conn))
            (candidates
-            (if table-context-p
+            (if (or table-context-p busy)
                 (hash-table-keys schema)
-              ;; Combine table names and lazily-loaded column names
+              ;; Load columns only for tables mentioned in the buffer
               (let ((all (copy-sequence (hash-table-keys schema))))
-                (dolist (tbl (hash-table-keys schema))
+                (dolist (tbl (data-lens--tables-in-buffer schema))
                   (when-let* ((cols (data-lens--ensure-columns
                                      conn schema tbl)))
                     (setq all (nconc all (copy-sequence cols)))))
@@ -1412,8 +1447,8 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
     map)
   "Keymap for `data-lens-schema-mode'.")
 
-(define-derived-mode data-lens-schema-mode special-mode "MySQL-Schema"
-  "Mode for browsing MySQL schema."
+(define-derived-mode data-lens-schema-mode special-mode "DB-Schema"
+  "Mode for browsing database schema."
   (setq truncate-lines t)
   (setq-local revert-buffer-function #'data-lens-schema--revert))
 
@@ -1426,11 +1461,10 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
   (interactive)
   (data-lens--ensure-connection)
   (let* ((conn data-lens-connection)
-         (result (mysql-query conn "SHOW TABLES"))
-         (tables (mapcar #'car (mysql-result-rows result)))
+         (tables (data-lens-db-list-tables conn))
          (buf (get-buffer-create
-               (format "*mysql: %s tables*"
-                       (or (mysql-conn-database conn) "?")))))
+               (format "*data-lens: %s tables*"
+                       (or (data-lens-db-database conn) "?")))))
     (with-current-buffer buf
       (data-lens-schema-mode)
       (setq-local data-lens-connection conn)
@@ -1438,7 +1472,7 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
         (erase-buffer)
         (insert (propertize
                  (format "-- Tables in %s (%d)\n\n"
-                         (or (mysql-conn-database conn) "?")
+                         (or (data-lens-db-database conn) "?")
                          (length tables))
                  'face 'font-lock-comment-face))
         (dolist (tbl tables)
@@ -1460,11 +1494,8 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
   (data-lens--ensure-connection)
   (let* ((conn data-lens-connection)
          (product (or data-lens--conn-sql-product data-lens-sql-product))
-         (result (mysql-query conn (format "SHOW CREATE TABLE %s"
-                                           (mysql-escape-identifier table))))
-         (rows (mysql-result-rows result))
-         (ddl (nth 1 (car rows)))
-         (buf (get-buffer-create (format "*mysql: %s*" table))))
+         (ddl (data-lens-db-show-create-table conn table))
+         (buf (get-buffer-create (format "*data-lens: %s*" table))))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (sql-mode)
@@ -1518,8 +1549,8 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
   "Keymap for `data-lens-mode'.")
 
 ;;;###autoload
-(define-derived-mode data-lens-mode sql-mode "MySQL"
-  "Major mode for editing and executing MySQL queries.
+(define-derived-mode data-lens-mode sql-mode "DataLens"
+  "Major mode for editing and executing SQL queries.
 
 \\<data-lens-mode-map>
 Key bindings:
@@ -1536,6 +1567,92 @@ Key bindings:
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.mysql\\'" . data-lens-mode))
+
+;;;; Cell navigation
+
+(defun data-lens-result-next-cell ()
+  "Move point to the next cell (right, then wrap to next row)."
+  (interactive)
+  (let ((start (point)))
+    (goto-char (next-single-property-change (point) 'data-lens-col-idx
+                                            nil (point-max)))
+    (if-let* ((m (text-property-search-forward 'data-lens-col-idx nil
+                                               (lambda (_val cur) cur))))
+        (goto-char (prop-match-beginning m))
+      (goto-char start))))
+
+(defun data-lens-result-prev-cell ()
+  "Move point to the previous cell (left, then wrap to prev row)."
+  (interactive)
+  (let ((start (point)))
+    (when-let* ((beg (previous-single-property-change
+                      (1+ (point)) 'data-lens-col-idx nil (point-min))))
+      (goto-char beg))
+    (if-let* ((m (text-property-search-backward 'data-lens-col-idx nil
+                                                (lambda (_val cur) cur))))
+        (goto-char (prop-match-beginning m))
+      (goto-char start))))
+
+(defun data-lens-result-down-cell ()
+  "Move to the same column in the next row."
+  (interactive)
+  (when-let* ((cidx (data-lens--col-idx-at-point))
+              (ridx (get-text-property (point) 'data-lens-row-idx)))
+    (data-lens--goto-cell (1+ ridx) cidx)))
+
+(defun data-lens-result-up-cell ()
+  "Move to the same column in the previous row."
+  (interactive)
+  (when-let* ((cidx (data-lens--col-idx-at-point))
+              (ridx (get-text-property (point) 'data-lens-row-idx))
+              ((> ridx 0)))
+    (data-lens--goto-cell (1- ridx) cidx)))
+
+;;;; Row marking (dired-style)
+
+(defun data-lens-result--marked-row-indices ()
+  "Return the effective row indices for batch operations.
+Priority: marked rows > current row."
+  (or data-lens--marked-rows
+      (when-let* ((ridx (data-lens-result--row-idx-at-line)))
+        (list ridx))))
+
+(defun data-lens-result--rerender-and-goto (ridx cidx)
+  "Re-render the result buffer and move to cell at RIDX, CIDX.
+Preserves the window scroll position relative to the target row."
+  (let ((win (selected-window))
+        (line-offset (count-lines (window-start) (point))))
+    (data-lens--render-result)
+    (data-lens--goto-cell ridx cidx)
+    (set-window-start win (save-excursion
+                            (forward-line (- line-offset))
+                            (point))
+                       t)))
+
+(defun data-lens-result-toggle-mark ()
+  "Toggle mark on the row at point and move to next row."
+  (interactive)
+  (when-let* ((ridx (data-lens-result--row-idx-at-line))
+              (cidx (or (data-lens--col-idx-at-point) 0)))
+    (if (memq ridx data-lens--marked-rows)
+        (setq data-lens--marked-rows (delq ridx data-lens--marked-rows))
+      (push ridx data-lens--marked-rows))
+    (data-lens-result--rerender-and-goto (1+ ridx) cidx)))
+
+(defun data-lens-result-unmark-row ()
+  "Unmark the row at point and move to next row."
+  (interactive)
+  (when-let* ((ridx (data-lens-result--row-idx-at-line))
+              (cidx (or (data-lens--col-idx-at-point) 0)))
+    (setq data-lens--marked-rows (delq ridx data-lens--marked-rows))
+    (data-lens-result--rerender-and-goto (1+ ridx) cidx)))
+
+(defun data-lens-result-unmark-all ()
+  "Remove all row marks."
+  (interactive)
+  (when data-lens--marked-rows
+    (setq data-lens--marked-rows nil)
+    (data-lens--render-result)))
 
 ;;;; data-lens-result-mode
 
@@ -1567,6 +1684,15 @@ Key bindings:
     (define-key map (kbd "C-c P") #'data-lens-result-unpin-column)
     (define-key map "F" #'data-lens-result-fullscreen-toggle)
     (define-key map "?" #'data-lens-result-dispatch)
+    ;; Cell navigation
+    (define-key map (kbd "TAB") #'data-lens-result-next-cell)
+    (define-key map (kbd "<backtab>") #'data-lens-result-prev-cell)
+    (define-key map (kbd "M-n") #'data-lens-result-down-cell)
+    (define-key map (kbd "M-p") #'data-lens-result-up-cell)
+    ;; Row marking
+    (define-key map "m" #'data-lens-result-toggle-mark)
+    (define-key map "u" #'data-lens-result-unmark-row)
+    (define-key map "U" #'data-lens-result-unmark-all)
     map)
   "Keymap for `data-lens-result-mode'.")
 
@@ -1582,14 +1708,17 @@ Key bindings:
                    (ncols (length data-lens--result-columns))
                    (col-name (when cidx
                                (nth cidx data-lens--result-columns))))
-              (format " R%d/%s C%d/%d%s (pg %d)"
-                      (1+ global-row)
-                      (if data-lens--page-total-rows
-                          (number-to-string data-lens--page-total-rows)
-                        "?")
-                      (if cidx (1+ cidx) 0) ncols
-                      (if col-name (format " [%s]" col-name) "")
-                      (1+ data-lens--page-current)))))))
+              (let ((mark-info (when data-lens--marked-rows
+                                 (format " *%d" (length data-lens--marked-rows)))))
+                (format " R%d/%s C%d/%d%s (pg %d)%s"
+                        (1+ global-row)
+                        (if data-lens--page-total-rows
+                            (number-to-string data-lens--page-total-rows)
+                          "?")
+                        (if cidx (1+ cidx) 0) ncols
+                        (if col-name (format " [%s]" col-name) "")
+                        (1+ data-lens--page-current)
+                        (or mark-info ""))))))))
 
 (defun data-lens--update-row-highlight ()
   "Highlight the entire row under the cursor."
@@ -1625,33 +1754,45 @@ Rebuilds `header-line-format' with the active column highlighted."
                          visible-cols widths nw
                          has-prev has-next cidx))))))))
 
-(define-derived-mode data-lens-result-mode special-mode "MySQL-Result"
-  "Mode for displaying MySQL query results with SQL pagination.
+(define-derived-mode data-lens-result-mode special-mode "DB-Result"
+  "Mode for displaying database query results with SQL pagination.
 
 \\<data-lens-result-mode-map>
+Navigate:
+  \\[data-lens-result-next-cell]	Next cell (Tab)
+  \\[data-lens-result-prev-cell]	Previous cell (S-Tab)
+  \\[data-lens-result-down-cell]	Down in same column
+  \\[data-lens-result-up-cell]	Up in same column
   \\[data-lens-result-open-record]	Open record view for row
+  \\[data-lens-result-goto-column]	Jump to column by name
+Mark:
+  \\[data-lens-result-toggle-mark]	Toggle mark on row
+  \\[data-lens-result-unmark-row]	Unmark row
+  \\[data-lens-result-unmark-all]	Unmark all rows
+Pages:
   \\[data-lens-result-next-page]	Next data page
   \\[data-lens-result-prev-page]	Previous data page
   \\[data-lens-result-first-page]	First data page
   \\[data-lens-result-last-page]	Last data page
   \\[data-lens-result-count-total]	Query total row count
-  \\[data-lens-result-apply-filter]	Apply WHERE filter
-  \\[data-lens-result-edit-cell]	Edit cell value
-  \\[data-lens-result-commit]	Commit edits as UPDATE
-  \\[data-lens-result-goto-column]	Jump to column by name
   \\[data-lens-result-next-col-page]	Next column page
   \\[data-lens-result-prev-col-page]	Previous column page
+Copy (C-u for column selection):
+  \\[data-lens-result-yank-cell]	Copy cell value
+  \\[data-lens-result-copy-row-as-insert]	Copy row(s) as INSERT
+  \\[data-lens-result-copy-as-csv]	Copy row(s) as CSV
+  \\[data-lens-result-export]	Export results
+Edit:
+  \\[data-lens-result-edit-cell]	Edit cell value
+  \\[data-lens-result-commit]	Commit edits as UPDATE
+  \\[data-lens-result-apply-filter]	Apply WHERE filter
   \\[data-lens-result-sort-by-column]	Sort ascending (SQL ORDER BY)
   \\[data-lens-result-sort-by-column-desc]	Sort descending (SQL ORDER BY)
   \\[data-lens-result-widen-column]	Widen column
   \\[data-lens-result-narrow-column]	Narrow column
   \\[data-lens-result-pin-column]	Pin column
   \\[data-lens-result-unpin-column]	Unpin column
-  \\[data-lens-result-yank-cell]	Copy cell value
-  \\[data-lens-result-copy-row-as-insert]	Copy row(s) as INSERT
-  \\[data-lens-result-copy-as-csv]	Copy row(s) as CSV
-  \\[data-lens-result-rerun]	Re-execute the query
-  \\[data-lens-result-export]	Export results"
+  \\[data-lens-result-rerun]	Re-execute the query"
   (setq truncate-lines t)
   (hl-line-mode 1)
   ;; Make tab-line use default background so sep-top renders cleanly
@@ -1706,11 +1847,11 @@ Triggers a COUNT(*) query if total rows are not yet known."
                               (string-trim-right
                                (replace-regexp-in-string ";\\s-*\\'" "" base))))
            (result (condition-case err
-                       (mysql-query conn count-sql)
-                     (mysql-error
+                       (data-lens-db-query conn count-sql)
+                     (data-lens-db-error
                       (user-error "COUNT query error: %s"
                                   (error-message-string err)))))
-           (count-val (car (car (mysql-result-rows result)))))
+           (count-val (car (car (data-lens-db-result-rows result)))))
       (setq-local data-lens--page-total-rows
                   (if (numberp count-val) count-val
                     (string-to-number (format "%s" count-val))))
@@ -1762,7 +1903,7 @@ Scans text properties across the line."
         (forward-line 1)))
     (sort indices #'<)))
 
-(defvar data-lens-result--edit-callback nil
+(defvar-local data-lens-result--edit-callback nil
   "Callback for the cell edit buffer: (lambda (new-value) ...).")
 
 (defvar data-lens-result-edit-mode-map
@@ -1773,11 +1914,11 @@ Scans text properties across the line."
   "Keymap for the cell edit buffer.")
 
 (define-minor-mode data-lens-result-edit-mode
-  "Minor mode for editing a MySQL cell value.
+  "Minor mode for editing a database cell value.
 \\<data-lens-result-edit-mode-map>
   \\[data-lens-result-edit-finish]	Accept edit
   \\[data-lens-result-edit-cancel]	Cancel"
-  :lighter " MySQL-Edit"
+  :lighter " DB-Edit"
   :keymap data-lens-result-edit-mode-map)
 
 (defun data-lens-result-edit-cell ()
@@ -1854,19 +1995,12 @@ Returns table name string or nil."
   (when-let* ((conn data-lens-connection)
               (table (data-lens-result--detect-table)))
     (condition-case nil
-        (let* ((result (mysql-query
-                        conn
-                        (format "SHOW KEYS FROM %s WHERE Key_name = 'PRIMARY'"
-                                (mysql-escape-identifier table))))
-               (pk-cols (mapcar (lambda (row)
-                                  (let ((name (nth 4 row)))
-                                    (if (stringp name) name (format "%s" name))))
-                                (mysql-result-rows result)))
+        (let* ((pk-cols (data-lens-db-primary-key-columns conn table))
                (col-names data-lens--result-columns))
           (delq nil (mapcar (lambda (pk)
                               (cl-position pk col-names :test #'string=))
                             pk-cols)))
-      (mysql-error nil))))
+      (data-lens-db-error nil))))
 
 (defun data-lens--load-fk-info ()
   "Load foreign key info for the current result's source table.
@@ -1877,25 +2011,14 @@ column indices to their referenced table and column."
               (table (data-lens-result--detect-table))
               (col-names data-lens--result-columns))
     (condition-case nil
-        (let* ((sql (format
-                     "SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
-FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
-WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s \
-AND REFERENCED_TABLE_NAME IS NOT NULL"
-                     (mysql-escape-literal table)))
-               (result (mysql-query conn sql))
-               (rows (mysql-result-rows result)))
-          (dolist (row rows)
-            (let* ((col-name (let ((n (nth 0 row)))
-                               (if (stringp n) n (format "%s" n))))
-                   (ref-table (nth 1 row))
-                   (ref-col (nth 2 row))
+        (let ((fks (data-lens-db-foreign-keys conn table)))
+          (dolist (fk fks)
+            (let* ((col-name (car fk))
+                   (ref-info (cdr fk))
                    (idx (cl-position col-name col-names :test #'string=)))
               (when idx
-                (push (cons idx (list :ref-table ref-table
-                                      :ref-column ref-col))
-                      data-lens--fk-info)))))
-      (mysql-error nil))))
+                (push (cons idx ref-info) data-lens--fk-info)))))
+      (data-lens-db-error nil))))
 
 (defun data-lens-result--group-edits-by-row (edits)
   "Group EDITS alist by row index into a hash-table.
@@ -1909,25 +2032,28 @@ Returns hash-table mapping ridx → list of (cidx . value)."
   "Build an UPDATE statement for TABLE.
 ROW is the original row data at _RIDX, EDITS is a list of (cidx . value),
 COL-NAMES are column names, PK-INDICES are primary key column indices."
-  (let ((set-parts
-         (mapcar (lambda (e)
-                   (format "%s = %s"
-                           (mysql-escape-identifier (nth (car e) col-names))
-                           (data-lens--value-to-literal (cdr e))))
-                 edits))
-        (where-parts
-         (mapcar (lambda (pki)
-                   (let ((v (nth pki row)))
-                     (format "%s %s"
-                             (mysql-escape-identifier (nth pki col-names))
-                             (if (null v) "IS NULL"
-                               (format "= %s"
-                                       (data-lens--value-to-literal v))))))
-                 pk-indices)))
-    (format "UPDATE %s SET %s WHERE %s"
-            (mysql-escape-identifier table)
-            (mapconcat #'identity set-parts ", ")
-            (mapconcat #'identity where-parts " AND "))))
+  (let ((conn data-lens-connection))
+    (let ((set-parts
+           (mapcar (lambda (e)
+                     (format "%s = %s"
+                             (data-lens-db-escape-identifier
+                              conn (nth (car e) col-names))
+                             (data-lens--value-to-literal (cdr e))))
+                   edits))
+          (where-parts
+           (mapcar (lambda (pki)
+                     (let ((v (nth pki row)))
+                       (format "%s %s"
+                               (data-lens-db-escape-identifier
+                                conn (nth pki col-names))
+                               (if (null v) "IS NULL"
+                                 (format "= %s"
+                                         (data-lens--value-to-literal v))))))
+                   pk-indices)))
+      (format "UPDATE %s SET %s WHERE %s"
+              (data-lens-db-escape-identifier conn table)
+              (mapconcat #'identity set-parts ", ")
+              (mapconcat #'identity where-parts " AND ")))))
 
 (defun data-lens-result-commit ()
   "Generate and execute UPDATE statements for pending edits."
@@ -1957,8 +2083,8 @@ COL-NAMES are column names, PK-INDICES are primary key column indices."
                      sql-text))
         (dolist (stmt statements)
           (condition-case err
-              (mysql-query data-lens-connection stmt)
-            (mysql-error
+              (data-lens-db-query data-lens-connection stmt)
+            (data-lens-db-error
              (user-error "UPDATE failed: %s" (error-message-string err)))))
         (setq data-lens--pending-edits nil)
         (message "%d row%s updated"
@@ -2069,52 +2195,84 @@ Prompts for a WHERE condition.  Enter empty string to clear."
     (kill-new text)
     (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
 
-(defun data-lens-result-copy-row-as-insert ()
-  "Copy the current row as an INSERT statement to the kill ring.
-With an active region, copies all rows in the region."
-  (interactive)
-  (let* ((indices (if (use-region-p)
-                      (data-lens-result--rows-in-region (region-beginning) (region-end))
-                    (list (or (data-lens-result--row-idx-at-line)
-                              (user-error "No row at point")))))
-         (table (or (data-lens-result--detect-table) "TABLE"))
-         (col-names data-lens--result-columns)
-         (rows data-lens--result-rows)
-         (cols (mapconcat #'mysql-escape-identifier col-names ", "))
-         (stmts (mapcar
-                 (lambda (ridx)
-                   (let ((row (nth ridx rows)))
-                     (format "INSERT INTO %s (%s) VALUES (%s);"
-                             (mysql-escape-identifier table) cols
-                             (mapconcat #'data-lens--value-to-literal row ", "))))
-                 indices)))
-    (kill-new (mapconcat #'identity stmts "\n"))
-    (message "Copied %d INSERT statement%s"
-             (length stmts) (if (= (length stmts) 1) "" "s"))))
+(defun data-lens-result--select-columns ()
+  "Prompt user to select columns via `completing-read-multiple'."
+  (let* ((col-names data-lens--result-columns)
+         (chosen (completing-read-multiple "Columns: " col-names nil t)))
+    (or (cl-loop for name in chosen
+                 for idx = (cl-position name col-names :test #'string=)
+                 when idx collect idx)
+        (user-error "No valid columns selected"))))
 
-(defun data-lens-result-copy-as-csv ()
-  "Copy the current row as CSV to the kill ring.
-With an active region, copies all rows in the region.
+(defun data-lens-result-copy-row-as-insert (&optional select-cols)
+  "Copy row(s) as INSERT statement(s) to the kill ring.
+Rows: marked > region > current.
+With prefix arg SELECT-COLS, prompt to choose columns."
+  (interactive "P")
+  (let* ((indices (or (data-lens-result--marked-row-indices)
+                      (when (use-region-p)
+                        (data-lens-result--rows-in-region
+                         (region-beginning) (region-end)))
+                      (user-error "No row at point")))
+         (col-indices (if select-cols
+                          (data-lens-result--select-columns)
+                        (cl-loop for i below (length data-lens--result-columns)
+                                 collect i)))
+         (col-names (mapcar (lambda (i) (nth i data-lens--result-columns))
+                            col-indices))
+         (table (or (data-lens-result--detect-table) "TABLE"))
+         (rows data-lens--result-rows)
+         (conn data-lens-connection)
+         (cols (mapconcat (lambda (c)
+                            (data-lens-db-escape-identifier conn c))
+                          col-names ", "))
+         (stmts (cl-loop for ridx in indices
+                         for row = (nth ridx rows)
+                         for vals = (mapcar (lambda (i) (nth i row)) col-indices)
+                         collect (format "INSERT INTO %s (%s) VALUES (%s);"
+                                         (data-lens-db-escape-identifier conn table)
+                                         cols
+                                         (mapconcat #'data-lens--value-to-literal
+                                                    vals ", ")))))
+    (kill-new (mapconcat #'identity stmts "\n"))
+    (message "Copied %d INSERT statement%s (%d col%s)"
+             (length stmts) (if (= (length stmts) 1) "" "s")
+             (length col-names) (if (= (length col-names) 1) "" "s"))))
+
+(defun data-lens-result-copy-as-csv (&optional select-cols)
+  "Copy row(s) as CSV to the kill ring.
+Rows: marked > region > current.
+With prefix arg SELECT-COLS, prompt to choose columns.
 Includes a header row with column names."
-  (interactive)
-  (let* ((indices (if (use-region-p)
-                      (data-lens-result--rows-in-region (region-beginning) (region-end))
-                    (list (or (data-lens-result--row-idx-at-line)
-                              (user-error "No row at point")))))
-         (col-names data-lens--result-columns)
+  (interactive "P")
+  (let* ((indices (or (data-lens-result--marked-row-indices)
+                      (when (use-region-p)
+                        (data-lens-result--rows-in-region
+                         (region-beginning) (region-end)))
+                      (user-error "No row at point")))
+         (col-indices (if select-cols
+                          (data-lens-result--select-columns)
+                        (cl-loop for i below (length data-lens--result-columns)
+                                 collect i)))
+         (col-names (mapcar (lambda (i) (nth i data-lens--result-columns))
+                            col-indices))
          (rows data-lens--result-rows)
          (csv-escape (lambda (val)
                        (let ((s (data-lens--format-value val)))
                          (if (string-match-p "[,\"\n]" s)
-                             (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s))
+                             (format "\"%s\"" (replace-regexp-in-string
+                                              "\"" "\"\"" s))
                            s))))
          (lines (cons (mapconcat #'identity col-names ",")
-                      (mapcar (lambda (ridx)
-                                (mapconcat csv-escape (nth ridx rows) ","))
-                              indices))))
+                      (cl-loop for ridx in indices
+                               for row = (nth ridx rows)
+                               for vals = (mapcar (lambda (i) (nth i row))
+                                                  col-indices)
+                               collect (mapconcat csv-escape vals ",")))))
     (kill-new (mapconcat #'identity lines "\n"))
-    (message "Copied %d row%s as CSV"
-             (length indices) (if (= (length indices) 1) "" "s"))))
+    (message "Copied %d row%s as CSV (%d col%s)"
+             (length indices) (if (= (length indices) 1) "" "s")
+             (length col-names) (if (= (length col-names) 1) "" "s"))))
 
 (defun data-lens-result--goto-col-idx (col-idx)
   "Move point to the first data cell matching COL-IDX in the buffer."
@@ -2166,7 +2324,7 @@ Generates CSV directly from cached data."
                              (format "\"%s\""
                                      (replace-regexp-in-string "\"" "\"\"" s))
                            s))))
-         (csv-buf (generate-new-buffer "*mysql: export.csv*")))
+         (csv-buf (generate-new-buffer "*data-lens: export.csv*")))
     (with-current-buffer csv-buf
       (insert (mapconcat #'identity col-names ",") "\n")
       (dolist (row rows)
@@ -2272,10 +2430,8 @@ previous window layout."
     map)
   "Keymap for `data-lens-record-mode'.")
 
-(declare-function data-lens-record-dispatch "data-lens-transient")
-
-(define-derived-mode data-lens-record-mode special-mode "MySQL-Record"
-  "Mode for displaying a single MySQL row in detail.
+(define-derived-mode data-lens-record-mode special-mode "DB-Record"
+  "Mode for displaying a single database row in detail.
 
 \\<data-lens-record-mode-map>
   \\[data-lens-record-toggle-expand]	Expand/collapse field or follow FK
@@ -2377,10 +2533,13 @@ MAX-NAME-W is the label column width."
             (user-error "NULL value — cannot follow"))
           (with-current-buffer result-buf
             (data-lens--execute
-             (format "SELECT * FROM %s WHERE %s = %s"
-                     (mysql-escape-identifier (plist-get fk :ref-table))
-                     (mysql-escape-identifier (plist-get fk :ref-column))
-                     (data-lens--value-to-literal val))
+             (let ((c (buffer-local-value 'data-lens-connection result-buf)))
+               (format "SELECT * FROM %s WHERE %s = %s"
+                       (data-lens-db-escape-identifier
+                        c (plist-get fk :ref-table))
+                       (data-lens-db-escape-identifier
+                        c (plist-get fk :ref-column))
+                       (data-lens--value-to-literal val)))
              data-lens-connection)))
          ((data-lens--long-field-type-p col-def)
           (if (memq cidx data-lens-record--expanded-fields)
@@ -2460,10 +2619,13 @@ MAX-NAME-W is the label column width."
       (let* ((table (or (data-lens-result--detect-table) "TABLE"))
              (col-names data-lens--result-columns)
              (row (nth ridx data-lens--result-rows))
-             (cols (mapconcat #'mysql-escape-identifier col-names ", "))
+             (conn (buffer-local-value 'data-lens-connection result-buf))
+             (cols (mapconcat (lambda (c)
+                                (data-lens-db-escape-identifier conn c))
+                              col-names ", "))
              (vals (mapconcat #'data-lens--value-to-literal row ", ")))
         (kill-new (format "INSERT INTO %s (%s) VALUES (%s);"
-                          (mysql-escape-identifier table) cols vals))
+                          (data-lens-db-escape-identifier conn table) cols vals))
         (message "Copied INSERT statement")))))
 
 (defun data-lens-record-refresh ()
@@ -2485,14 +2647,14 @@ MAX-NAME-W is the label column width."
 (defvar-local data-lens-repl--pending-input ""
   "Accumulated partial SQL input waiting for a semicolon.")
 
-(define-derived-mode data-lens-repl-mode comint-mode "MySQL-REPL"
-  "Major mode for MySQL REPL.
+(define-derived-mode data-lens-repl-mode comint-mode "DB-REPL"
+  "Major mode for database REPL.
 
 \\<data-lens-repl-mode-map>
   \\[data-lens-connect]	Connect to server
   \\[data-lens-list-tables]	List tables
   \\[data-lens-describe-table-at-point]	Describe table at point"
-  (setq comint-prompt-regexp "^mysql> \\|^    -> ")
+  (setq comint-prompt-regexp "^db> \\|^    -> ")
   (setq comint-input-sender #'data-lens-repl--input-sender)
   (add-hook 'completion-at-point-functions
             #'data-lens-completion-at-point nil t))
@@ -2523,46 +2685,46 @@ Accumulates input until a semicolon is found, then executes."
 (defun data-lens-repl--format-dml-result (result elapsed)
   "Format a DML RESULT with ELAPSED time as a string for the REPL."
   (let ((msg (format "\nAffected rows: %s"
-                     (or (mysql-result-affected-rows result) 0))))
-    (when-let* ((id (mysql-result-last-insert-id result))
+                     (or (data-lens-db-result-affected-rows result) 0))))
+    (when-let* ((id (data-lens-db-result-last-insert-id result))
                 ((> id 0)))
       (setq msg (concat msg (format ", Last insert ID: %s" id))))
-    (when-let* ((w (mysql-result-warnings result))
+    (when-let* ((w (data-lens-db-result-warnings result))
                 ((> w 0)))
       (setq msg (concat msg (format ", Warnings: %s" w))))
-    (format "%s (%.3fs)\n\nmysql> " msg elapsed)))
+    (format "%s (%.3fs)\n\ndb> " msg elapsed)))
 
 (defun data-lens-repl--execute-and-print (sql)
   "Execute SQL and print results inline in the REPL."
   (if (not (data-lens--connection-alive-p data-lens-connection))
-      (data-lens-repl--output "ERROR: Not connected.  Use C-c C-e to connect.\nmysql> ")
+      (data-lens-repl--output "ERROR: Not connected.  Use C-c C-e to connect.\ndb> ")
     (data-lens--add-history sql)
     (setq data-lens--last-query sql)
     (condition-case err
         (let* ((start (float-time))
-               (result (mysql-query data-lens-connection sql))
+               (result (data-lens-db-query data-lens-connection sql))
                (elapsed (- (float-time) start))
-               (columns (mysql-result-columns result))
-               (rows (mysql-result-rows result)))
+               (columns (data-lens-db-result-columns result))
+               (rows (data-lens-db-result-rows result)))
           (if columns
               (let* ((col-names (data-lens--column-names columns))
                      (table-str (data-lens--render-static-table
                                  col-names rows columns)))
                 (data-lens-repl--output
-                 (format "\n%s\n%d row%s in %.3fs\n\nmysql> "
+                 (format "\n%s\n%d row%s in %.3fs\n\ndb> "
                          table-str (length rows)
                          (if (= (length rows) 1) "" "s")
                          elapsed)))
             (data-lens-repl--output (data-lens-repl--format-dml-result result elapsed))))
-      (mysql-error
+      (data-lens-db-error
        (data-lens-repl--output
-        (format "\nERROR: %s\n\nmysql> " (error-message-string err)))))))
+        (format "\nERROR: %s\n\ndb> " (error-message-string err)))))))
 
 ;;;###autoload
 (defun data-lens-repl ()
-  "Start a MySQL REPL buffer."
+  "Start a database REPL buffer."
   (interactive)
-  (let* ((buf-name "*MySQL REPL*")
+  (let* ((buf-name "*DataLens REPL*")
          (buf (get-buffer-create buf-name)))
     (unless (comint-check-proc buf)
       (with-current-buffer buf
@@ -2570,8 +2732,84 @@ Accumulates input until a semicolon is found, then executes."
         (let ((proc (start-process "data-lens-repl" buf "cat")))
           (set-process-query-on-exit-flag proc nil)
           (data-lens-repl-mode)
-          (data-lens-repl--output "mysql> "))))
+          (data-lens-repl--output "db> "))))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
+
+;;;; Transient dispatch menus
+
+;;;###autoload
+(transient-define-prefix data-lens-dispatch ()
+  "Main dispatch menu for data-lens."
+  [["Connection"
+    ("c" "Connect"    data-lens-connect)
+    ("d" "Disconnect" data-lens-disconnect)
+    ("R" "REPL"       data-lens-repl)]
+   ["Execute"
+    ("x" "Query at point" data-lens-execute-query-at-point)
+    ("r" "Region"         data-lens-execute-region)
+    ("b" "Buffer"         data-lens-execute-buffer)]
+   ["Edit / History"
+    ("'" "Indirect edit"  data-lens-edit-indirect)
+    ("l" "History"        data-lens-show-history)]
+   ["Schema"
+    ("t" "List tables"    data-lens-list-tables)
+    ("D" "Describe table" data-lens-describe-table-at-point)]])
+
+(transient-define-prefix data-lens-result-dispatch ()
+  "Dispatch menu for data-lens result buffer."
+  [["Navigate"
+    ("TAB" "Next cell"     data-lens-result-next-cell)
+    ("<backtab>" "Prev cell" data-lens-result-prev-cell)
+    ("M-n" "Down cell"     data-lens-result-down-cell)
+    ("M-p" "Up cell"       data-lens-result-up-cell)
+    ("RET" "Open record"   data-lens-result-open-record)
+    ("c" "Go to column"    data-lens-result-goto-column)]
+   ["Mark"
+    ("m" "Toggle mark"     data-lens-result-toggle-mark)
+    ("u" "Unmark row"      data-lens-result-unmark-row)
+    ("U" "Unmark all"      data-lens-result-unmark-all)]
+   ["Pages"
+    ("n" "Next page"       data-lens-result-next-page)
+    ("p" "Prev page"       data-lens-result-prev-page)
+    ("M-<" "First page"    data-lens-result-first-page)
+    ("M->" "Last page"     data-lens-result-last-page)
+    ("#" "Count total"     data-lens-result-count-total)
+    ("]" "Next col page"   data-lens-result-next-col-page)
+    ("[" "Prev col page"   data-lens-result-prev-col-page)]
+   ["Filter / Sort"
+    ("W" "WHERE filter"    data-lens-result-apply-filter)
+    ("s" "Sort ASC"        data-lens-result-sort-by-column)
+    ("S" "Sort DESC"       data-lens-result-sort-by-column-desc)]]
+  [["Edit"
+    ("C-c '" "Edit cell"   data-lens-result-edit-cell)
+    ("C-c C-c" "Commit"    data-lens-result-commit)]
+   ["Copy (C-u = select cols)"
+    ("y" "Yank cell"       data-lens-result-yank-cell)
+    ("w" "Row(s) INSERT"   data-lens-result-copy-row-as-insert)
+    ("Y" "Row(s) CSV"      data-lens-result-copy-as-csv)
+    ("e" "Export"           data-lens-result-export)]
+   ["Other"
+    ("=" "Widen column"    data-lens-result-widen-column)
+    ("-" "Narrow column"   data-lens-result-narrow-column)
+    ("C-c p" "Pin column"  data-lens-result-pin-column)
+    ("C-c P" "Unpin column" data-lens-result-unpin-column)
+    ("g" "Re-execute"      data-lens-result-rerun)
+    ("F" "Fullscreen"      data-lens-result-fullscreen-toggle)]])
+
+(transient-define-prefix data-lens-record-dispatch ()
+  "Dispatch menu for data-lens record buffer."
+  [["Navigate"
+    ("n" "Next row"     data-lens-record-next-row)
+    ("p" "Prev row"     data-lens-record-prev-row)
+    ("RET" "Expand/FK"  data-lens-record-toggle-expand)]
+   ["Edit"
+    ("C-c '" "Edit field" data-lens-record-edit-field)]
+   ["Copy"
+    ("y" "Yank field"      data-lens-record-yank-field)
+    ("w" "Row as INSERT"   data-lens-record-copy-as-insert)]
+   ["Other"
+    ("g" "Refresh" data-lens-record-refresh)
+    ("q" "Quit"    quit-window)]])
 
 (provide 'data-lens)
 ;;; data-lens.el ends here

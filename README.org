@@ -3,15 +3,19 @@
 
 * Overview
 
-A pure Emacs Lisp MySQL client with an interactive data browsing UI.
+A pure Emacs Lisp database client with an interactive data browsing UI.
+Supports MySQL (primary, daily-use) and PostgreSQL (compatible, less frequently tested).
 
 - =mysql.el= — pure Elisp MySQL wire protocol implementation (no external CLI needed)
-- =data-lens.el= — interactive UI layer: column-paged result browser, record view, FK navigation, editing, REPL
-- =data-lens-transient.el= — Magit-style transient menus
+- =pg.el= — pure Elisp PostgreSQL wire protocol v3 implementation
+- =data-lens-db.el= — generic database interface (=cl-defgeneric= dispatch)
+- =data-lens-db-mysql.el= — MySQL backend adapter
+- =data-lens-db-pg.el= — PostgreSQL backend adapter
+- =data-lens.el= — interactive UI layer: column-paged result browser, record view, FK navigation, editing, transient menus, REPL
 - =ob-mysql.el= — Org-Babel integration
 
-Inspired by [[https://github.com/cbbrowne/pg.el][pg.el]] which proved that implementing a database wire protocol
-in pure Elisp is entirely feasible.
+*Note:* MySQL is the primary backend — thoroughly tested and used daily.
+PostgreSQL support is functional and compatible, but has not been tested as extensively in daily use.
 
 * Features
 
@@ -47,7 +51,7 @@ in pure Elisp is entirely feasible.
 * Requirements
 
 - Emacs 28.1+
-- A MySQL 5.7+ or 8.x server
+- MySQL 5.7+ / 8.x, or PostgreSQL 12+
 
 * Installation
 
@@ -58,7 +62,7 @@ Clone this repository and add it to your =load-path=:
 (require 'data-lens)
 #+end_src
 
-* Protocol Layer Usage
+* Protocol Layer Usage (mysql.el)
 
 #+begin_src emacs-lisp
 (require 'mysql)
@@ -132,21 +136,87 @@ Clone this repository and add it to your =load-path=:
 (mysql-escape-literal "it's a \"test\"")   ;; => "'it\\'s a \\\"test\\\"'"
 #+end_src
 
+* Protocol Layer Usage (pg.el)
+
+#+begin_src emacs-lisp
+(require 'pg)
+
+;; Connect
+(setq conn (pg-connect :host "127.0.0.1"
+                        :port 5432
+                        :user "postgres"
+                        :password "secret"
+                        :database "mydb"))
+
+;; Query
+(let ((result (pg-query conn "SELECT * FROM users LIMIT 10")))
+  (pg-result-columns result)  ;; column metadata
+  (pg-result-rows result))    ;; list of rows (list of values)
+
+;; DML
+(let ((result (pg-query conn "INSERT INTO users (name) VALUES ('alice')")))
+  (pg-result-affected-rows result))  ;; => 1
+
+;; Disconnect
+(pg-disconnect conn)
+#+end_src
+
+** TLS Connection
+
+#+begin_src emacs-lisp
+(setq conn (pg-connect :host "127.0.0.1"
+                        :port 5432
+                        :user "postgres"
+                        :password "secret"
+                        :database "mydb"
+                        :tls t))
+#+end_src
+
+** Convenience Macros
+
+#+begin_src emacs-lisp
+;; Auto-close connection
+(with-pg-connection conn (:host "127.0.0.1" :user "postgres"
+                          :password "secret" :database "mydb")
+  (pg-query conn "SELECT 1"))
+
+;; Transaction with auto-rollback on error
+(with-pg-transaction conn
+  (pg-query conn "INSERT INTO users (name) VALUES ('alice')")
+  (pg-query conn "INSERT INTO users (name) VALUES ('bob')"))
+#+end_src
+
+** Features
+
+- Pure Elisp — no =libpq= or external CLI needed
+- PostgreSQL wire protocol v3
+- SCRAM-SHA-256 (SASL) and MD5 authentication
+- TLS/SSL support via Emacs built-in GnuTLS
+- OID-based type parsing (int, float, numeric, bool, date/time, json/jsonb, bytea)
+- Convenience macros: =with-pg-connection=, =with-pg-transaction=
+- Utilities: =pg-ping=, =pg-escape-identifier=, =pg-escape-literal=
+
 * Interactive Client
 
 ** Quick Start
 
-*** 1. Configure a connection
+*** 1. Configure connections
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "~/repos/data-lens")
 (require 'data-lens)
 
 (setq data-lens-connection-alist
-      '(("dev" . (:host "127.0.0.1" :port 3306
-                  :user "root" :password "test"
-                  :database "mydb"))))
+      '(("dev-mysql" . (:host "127.0.0.1" :port 3306
+                         :user "root" :password "test"
+                         :database "mydb"))
+        ("dev-pg"    . (:backend pg
+                         :host "127.0.0.1" :port 5432
+                         :user "postgres" :password "test"
+                         :database "mydb"))))
 #+end_src
+
+MySQL is the default backend. Add =:backend pg= for PostgreSQL connections.
 
 *** 2. Open a SQL editing buffer
 
@@ -280,10 +350,6 @@ g                            ;; Refresh
 
 Requires the =transient= package (bundled with Magit).
 
-#+begin_src emacs-lisp
-(require 'data-lens-transient)
-#+end_src
-
 Press =C-c C-o= in data-lens-mode or =?= in the result buffer to open the menu.
 
 ** Org-Babel Integration
@@ -314,7 +380,7 @@ Or with inline connection parameters:
 
 * Testing
 
-** Integration tests (require a running MySQL)
+** MySQL tests (require a running MySQL)
 
 Start a MySQL instance:
 
@@ -327,8 +393,26 @@ Load test data and run tests:
 
 #+begin_src sh
 mysql -h 127.0.0.1 -P 3307 -u testuser -ptestpass testdb < test-wide-table.sql
-emacs --batch -L . -l test-run.el
+emacs --batch -L . -l test/test-run.el
 #+end_src
+
+** PostgreSQL tests (require a running PostgreSQL)
+
+Start a PostgreSQL instance:
+
+#+begin_src sh
+docker run --rm -e POSTGRES_USER=testuser -e POSTGRES_PASSWORD=testpass \
+  -e POSTGRES_DB=testdb -p 5433:5432 postgres:16-alpine
+#+end_src
+
+Run tests:
+
+#+begin_src sh
+emacs --batch -L . -l test/pg-test.el
+#+end_src
+
+Unit tests (message encoding, type parsing, auth) run without a server.
+Live tests require the Docker instance above.
 
 * License
 

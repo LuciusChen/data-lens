@@ -93,33 +93,33 @@
 
 ;;;; Column type constants
 
-(defconst mysql--type-decimal     0)
-(defconst mysql--type-tiny        1)
-(defconst mysql--type-short       2)
-(defconst mysql--type-long        3)
-(defconst mysql--type-float       4)
-(defconst mysql--type-double      5)
-(defconst mysql--type-null        6)
-(defconst mysql--type-timestamp   7)
-(defconst mysql--type-longlong    8)
-(defconst mysql--type-int24       9)
-(defconst mysql--type-date       10)
-(defconst mysql--type-time       11)
-(defconst mysql--type-datetime   12)
-(defconst mysql--type-year       13)
-(defconst mysql--type-varchar    15)
-(defconst mysql--type-bit        16)
-(defconst mysql--type-json      245)
-(defconst mysql--type-newdecimal 246)
-(defconst mysql--type-enum      247)
-(defconst mysql--type-set       248)
-(defconst mysql--type-tiny-blob  249)
-(defconst mysql--type-medium-blob 250)
-(defconst mysql--type-long-blob  251)
-(defconst mysql--type-blob       252)
-(defconst mysql--type-var-string 253)
-(defconst mysql--type-string     254)
-(defconst mysql--type-geometry   255)
+(defconst mysql-type-decimal     0)
+(defconst mysql-type-tiny        1)
+(defconst mysql-type-short       2)
+(defconst mysql-type-long        3)
+(defconst mysql-type-float       4)
+(defconst mysql-type-double      5)
+(defconst mysql-type-null        6)
+(defconst mysql-type-timestamp   7)
+(defconst mysql-type-longlong    8)
+(defconst mysql-type-int24       9)
+(defconst mysql-type-date       10)
+(defconst mysql-type-time       11)
+(defconst mysql-type-datetime   12)
+(defconst mysql-type-year       13)
+(defconst mysql-type-varchar    15)
+(defconst mysql-type-bit        16)
+(defconst mysql-type-json      245)
+(defconst mysql-type-newdecimal 246)
+(defconst mysql-type-enum      247)
+(defconst mysql-type-set       248)
+(defconst mysql-type-tiny-blob  249)
+(defconst mysql-type-medium-blob 250)
+(defconst mysql-type-long-blob  251)
+(defconst mysql-type-blob       252)
+(defconst mysql-type-var-string 253)
+(defconst mysql-type-string     254)
+(defconst mysql-type-geometry   255)
 
 ;;;; Data structures
 
@@ -135,7 +135,8 @@
   status-flags
   (read-timeout 10)
   (sequence-id 0)
-  tls)
+  tls
+  (busy nil))
 
 (cl-defstruct mysql-result
   "A MySQL query result."
@@ -724,8 +725,8 @@ PASSWORD is the plaintext password; TLS non-nil means upgrade to TLS first."
          (salt (plist-get handshake-info :salt))
          (auth-plugin (plist-get handshake-info :auth-plugin)))
     (when tls
-      (unless (not (zerop (logand (mysql-conn-capability-flags conn)
-                                  mysql--cap-ssl)))
+      (when (zerop (logand (mysql-conn-capability-flags conn)
+                          mysql--cap-ssl))
         (signal 'mysql-connection-error
                 (list "Server does not support SSL")))
       (setf (mysql-conn-sequence-id conn) 1)
@@ -744,7 +745,7 @@ HOST defaults to \"127.0.0.1\", PORT defaults to 3306.
 USER, PASSWORD, and DATABASE are strings (DATABASE is optional).
 When TLS is non-nil, upgrade the connection to TLS before authenticating."
   (unless user
-    (signal 'mysql-connection-error (list "USER is required")))
+    (signal 'mysql-connection-error (list "No user specified")))
   (when (and tls (not (mysql--tls-available-p)))
     (signal 'mysql-connection-error (list "TLS requested but GnuTLS is not available")))
   (let* ((buf (generate-new-buffer " *mysql-input*")))
@@ -848,34 +849,49 @@ SALT is the nonce, AUTH-PLUGIN is the current auth plugin name."
 
 (defun mysql-query (conn sql)
   "Execute SQL query on CONN and return a `mysql-result'.
-SQL is a string containing the query to execute."
-  (setf (mysql-conn-sequence-id conn) 0)
-  (mysql--send-packet conn (concat (unibyte-string #x03)
-                                   (encode-coding-string sql 'utf-8)))
-  (let ((packet (mysql--read-packet conn)))
-    (pcase (mysql--packet-type packet)
-      ('ok
-       (let ((ok-info (mysql--parse-ok-packet packet)))
-         (setf (mysql-conn-status-flags conn)
-               (plist-get ok-info :status-flags))
-         (make-mysql-result
-          :connection conn
-          :status "OK"
-          :affected-rows (plist-get ok-info :affected-rows)
-          :last-insert-id (plist-get ok-info :last-insert-id)
-          :warnings (plist-get ok-info :warnings))))
-      ('err
-       (let ((err-info (mysql--parse-err-packet packet)))
-         (signal 'mysql-query-error
-                 (list (format "[%d] %s%s"
-                               (plist-get err-info :code)
-                               (if (plist-get err-info :state)
-                                   (format "(%s) " (plist-get err-info :state))
-                                 "")
-                               (plist-get err-info :message))))))
-      (_
-       ;; Result set: first byte is column_count (lenenc int)
-       (mysql--read-result-set conn packet)))))
+SQL is a string containing the query to execute.
+Signals `mysql-error' if the connection is busy (re-entrant call)."
+  (when (mysql-conn-busy conn)
+    (signal 'mysql-error
+            (list "Connection busy — cannot send query while another is in progress")))
+  ;; Flush any stale data left from previously interrupted queries.
+  (with-current-buffer (mysql-conn-buf conn)
+    (erase-buffer))
+  (setf (mysql-conn-busy conn) t)
+  (unwind-protect
+      ;; Bind throw-on-input to nil so that `while-no-input' (used by
+      ;; completion frameworks like corfu/company) cannot abort us
+      ;; mid-response, which would leave partial data in the buffer and
+      ;; corrupt subsequent queries.
+      (let ((throw-on-input nil))
+        (setf (mysql-conn-sequence-id conn) 0)
+        (mysql--send-packet conn (concat (unibyte-string #x03)
+                                         (encode-coding-string sql 'utf-8)))
+        (let ((packet (mysql--read-packet conn)))
+          (pcase (mysql--packet-type packet)
+            ('ok
+             (let ((ok-info (mysql--parse-ok-packet packet)))
+               (setf (mysql-conn-status-flags conn)
+                     (plist-get ok-info :status-flags))
+               (make-mysql-result
+                :connection conn
+                :status "OK"
+                :affected-rows (plist-get ok-info :affected-rows)
+                :last-insert-id (plist-get ok-info :last-insert-id)
+                :warnings (plist-get ok-info :warnings))))
+            ('err
+             (let ((err-info (mysql--parse-err-packet packet)))
+               (signal 'mysql-query-error
+                       (list (format "[%d] %s%s"
+                                     (plist-get err-info :code)
+                                     (if (plist-get err-info :state)
+                                         (format "(%s) " (plist-get err-info :state))
+                                       "")
+                                     (plist-get err-info :message))))))
+            (_
+             ;; Result set: first byte is column_count (lenenc int)
+             (mysql--read-result-set conn packet)))))
+    (setf (mysql-conn-busy conn) nil)))
 
 (defun mysql--read-column-definitions (conn col-count)
   "Read COL-COUNT column definition packets from CONN.
@@ -885,8 +901,8 @@ Returns a list of column plists.  Also consumes the EOF packet."
       (push (mysql--parse-column-definition (mysql--read-packet conn)) columns))
     (setq columns (nreverse columns))
     ;; Read EOF after columns (unless CLIENT_DEPRECATE_EOF)
-    (unless (not (zerop (logand (mysql-conn-capability-flags conn)
-                                mysql--cap-deprecate-eof)))
+    (when (zerop (logand (mysql-conn-capability-flags conn)
+                        mysql--cap-deprecate-eof))
       (let ((eof-packet (mysql--read-packet conn)))
         (unless (eq (mysql--packet-type eof-packet) 'eof)
           (signal 'mysql-protocol-error
@@ -990,11 +1006,11 @@ Returns a `mysql-stmt'."
   "Map Elisp VALUE to a 2-byte MySQL type code (little-endian).
 Returns a cons (TYPE-CODE . UNSIGNED-FLAG)."
   (cond
-   ((null value) (cons mysql--type-null 0))
-   ((integerp value) (cons mysql--type-longlong 0))
-   ((floatp value) (cons mysql--type-var-string 0))
-   ((stringp value) (cons mysql--type-var-string 0))
-   (t (cons mysql--type-var-string 0))))
+   ((null value) (cons mysql-type-null 0))
+   ((integerp value) (cons mysql-type-longlong 0))
+   ((floatp value) (cons mysql-type-var-string 0))
+   ((stringp value) (cons mysql-type-var-string 0))
+   (t (cons mysql-type-var-string 0))))
 
 (defun mysql--encode-binary-value (value)
   "Encode VALUE for a binary protocol parameter.
@@ -1172,27 +1188,27 @@ Binary row NULL bitmap has a 2-bit offset."
 Returns (value . new-pos)."
   (pcase type
     ;; Integer types
-    ((pred (= mysql--type-tiny))
+    ((pred (= mysql-type-tiny))
      (cons (aref packet pos) (1+ pos)))
-    ((or (pred (= mysql--type-short)) (pred (= mysql--type-year)))
+    ((or (pred (= mysql-type-short)) (pred (= mysql-type-year)))
      (cons (mysql--read-le-uint packet pos 2) (+ pos 2)))
-    ((or (pred (= mysql--type-long)) (pred (= mysql--type-int24)))
+    ((or (pred (= mysql-type-long)) (pred (= mysql-type-int24)))
      (cons (mysql--read-le-uint packet pos 4) (+ pos 4)))
-    ((pred (= mysql--type-longlong))
+    ((pred (= mysql-type-longlong))
      (cons (mysql--read-le-uint packet pos 8) (+ pos 8)))
     ;; Floating point
-    ((pred (= mysql--type-float))
+    ((pred (= mysql-type-float))
      (cons (mysql--ieee754-single-to-float packet pos) (+ pos 4)))
-    ((pred (= mysql--type-double))
+    ((pred (= mysql-type-double))
      (cons (mysql--ieee754-double-to-float packet pos) (+ pos 8)))
     ;; Temporal types
-    ((or (pred (= mysql--type-date))
-         (pred (= mysql--type-datetime))
-         (pred (= mysql--type-timestamp)))
+    ((or (pred (= mysql-type-date))
+         (pred (= mysql-type-datetime))
+         (pred (= mysql-type-timestamp)))
      (mysql--decode-binary-datetime packet pos type))
-    ((pred (= mysql--type-time))
+    ((pred (= mysql-type-time))
      (mysql--decode-binary-time packet pos))
-    ((pred (= mysql--type-null))
+    ((pred (= mysql-type-null))
      (cons nil pos))
     ;; All string-like types: lenenc string
     (_
@@ -1231,25 +1247,14 @@ Returns (value . new-pos)."
          (sign (if (zerop (logand b7 #x80)) 1.0 -1.0))
          (exponent (logior (ash (logand b7 #x7f) 4)
                            (ash b6 -4)))
-         (mantissa-hi (logior (ash (logand b6 #x0f) 16)
-                              (ash b5 8)
-                              b4))
-         (mantissa-lo (logior (ash b3 16) (ash b2 8) (ash b1 0)))
-         ;; Full mantissa = mantissa-hi * 2^24 + mantissa-lo + b0... wait
-         ;; Actually mantissa is 52 bits: b6[3:0] b5 b4 b3 b2 b1 b0
-         ;; = 4 + 8 + 8 + 8 + 8 + 8 + 8 = 52 bits
-         (mantissa (+ (* (float mantissa-hi) (expt 2.0 24))
-                      (float mantissa-lo)
-                      ;; mantissa-lo only has b3 b2 b1, need b0 too
-                      )))
-    ;; Fix: recompute mantissa properly — 52 bits total
-    (setq mantissa (+ (* (float (logand b6 #x0f)) (expt 2.0 48))
-                       (* (float b5) (expt 2.0 40))
-                       (* (float b4) (expt 2.0 32))
-                       (* (float b3) (expt 2.0 24))
-                       (* (float b2) (expt 2.0 16))
-                       (* (float b1) (expt 2.0 8))
-                       (float b0)))
+         ;; 52-bit mantissa: b6[3:0] b5 b4 b3 b2 b1 b0
+         (mantissa (+ (* (float (logand b6 #x0f)) (expt 2.0 48))
+                      (* (float b5) (expt 2.0 40))
+                      (* (float b4) (expt 2.0 32))
+                      (* (float b3) (expt 2.0 24))
+                      (* (float b2) (expt 2.0 16))
+                      (* (float b1) (expt 2.0 8))
+                      (float b0))))
     (cond
      ((= exponent 0)
       (if (= mantissa 0.0) (* sign 0.0)
@@ -1271,7 +1276,7 @@ Returns (value . new-pos)."
        (let ((year (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8)))
              (month (aref packet (+ pos 2)))
              (day (aref packet (+ pos 3))))
-         (cons (if (= type mysql--type-date)
+         (cons (if (= type mysql-type-date)
                    (list :year year :month month :day day)
                  (list :year year :month month :day day
                        :hours 0 :minutes 0 :seconds 0))
