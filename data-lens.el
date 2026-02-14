@@ -925,8 +925,6 @@ EDGE-FN applies column-page edge indicators."
                'face 'data-lens-modified-face)))
     (data-lens--insert-data-rows rows visible-cols widths nw
                                  global-first-row edge-fn)
-    (insert (data-lens--build-separator
-             visible-cols widths 'bottom nw edge-fn) "\n")
     (goto-char (point-min))))
 
 (defun data-lens--col-idx-at-point ()
