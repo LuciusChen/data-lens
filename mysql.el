@@ -374,25 +374,25 @@ Returns a plist with :salt and :auth-plugin."
       (setq pos (1+ nul-pos)))
     (setf (mysql-conn-connection-id conn) (mysql--read-le-uint packet pos 4))
     (cl-incf pos 4)
-    ;; auth_plugin_data_part_1: 8 bytes
+    ;; auth_plugin_data_part_1 (8 bytes) + filler
     (let ((salt-part1 (substring packet pos (+ pos 8))))
-      (cl-incf pos 8)
-      (cl-incf pos 1) ;; filler
-      (let ((cap-low (mysql--read-le-uint packet pos 2)))
-        (cl-incf pos 2)
-        (setf (mysql-conn-character-set conn) (aref packet pos))
-        (cl-incf pos 1)
-        (setf (mysql-conn-status-flags conn) (mysql--read-le-uint packet pos 2))
-        (cl-incf pos 2)
-        (let ((cap-high (mysql--read-le-uint packet pos 2)))
-          (cl-incf pos 2)
-          (setf (mysql-conn-capability-flags conn)
-                (logior cap-low (ash cap-high 16)))
-          (let ((auth-data-len (aref packet pos)))
-            (cl-incf pos 1)
-            (cl-incf pos 10) ;; reserved
-            (mysql--parse-handshake-salt
-             conn packet pos salt-part1 auth-data-len)))))))
+      (cl-incf pos 9) ;; 8 + 1 filler
+      ;; capability_flags (low 2 bytes)
+      (setf (mysql-conn-capability-flags conn) (mysql--read-le-uint packet pos 2))
+      (cl-incf pos 2)
+      (setf (mysql-conn-character-set conn) (aref packet pos))
+      (cl-incf pos 1)
+      (setf (mysql-conn-status-flags conn) (mysql--read-le-uint packet pos 2))
+      (cl-incf pos 2)
+      ;; capability_flags (high 2 bytes) — merge with low
+      (setf (mysql-conn-capability-flags conn)
+            (logior (mysql-conn-capability-flags conn)
+                    (ash (mysql--read-le-uint packet pos 2) 16)))
+      (cl-incf pos 2)
+      (let ((auth-data-len (aref packet pos)))
+        (cl-incf pos 11) ;; 1 + 10 reserved
+        (mysql--parse-handshake-salt
+         conn packet pos salt-part1 auth-data-len)))))
 
 (defun mysql--client-capabilities (conn)
   "Compute the client capability flags for CONN."
@@ -450,11 +450,8 @@ PASSWORD is the plaintext password, SALT is the server nonce."
 (defun mysql--parse-ok-packet (packet)
   "Parse an OK_Packet from PACKET (first byte 0x00 already verified).
 Returns a plist with :affected-rows, :last-insert-id, :status-flags, :warnings."
-  (let* ((r1 (mysql--read-lenenc-int-from-string packet 1))
-         (affected-rows (car r1))
-         (r2 (mysql--read-lenenc-int-from-string packet (cdr r1)))
-         (last-insert-id (car r2))
-         (pos (cdr r2))
+  (pcase-let* ((`(,affected-rows . ,pos1) (mysql--read-lenenc-int-from-string packet 1))
+               (`(,last-insert-id . ,pos) (mysql--read-lenenc-int-from-string packet pos1))
          (status-flags (when (< (1+ pos) (length packet))
                          (prog1 (logior (aref packet pos)
                                         (ash (aref packet (+ pos 1)) 8))
@@ -524,41 +521,35 @@ Returns (value . new-pos)."
 (defun mysql--read-lenenc-string-from-string (str pos)
   "Read a length-encoded string from STR at POS.
 Returns (string . new-pos)."
-  (let* ((r (mysql--read-lenenc-int-from-string str pos))
-         (len (car r))
-         (p (cdr r)))
+  (pcase-let* ((`(,len . ,p) (mysql--read-lenenc-int-from-string str pos)))
     (cons (substring str p (+ p len)) (+ p len))))
 
 (defun mysql--parse-column-definition (packet)
   "Parse a Column Definition packet.
 Returns a plist with column metadata."
   ;; Read the 6 lenenc-string fields: catalog, schema, table, org_table, name, org_name
-  (let ((pos 0)
-        (strings nil))
-    (dotimes (_ 6)
-      (let ((r (mysql--read-lenenc-string-from-string packet pos)))
-        (push (decode-coding-string (car r) 'utf-8) strings)
-        (setq pos (cdr r))))
-    (setq strings (nreverse strings))
-    ;; Skip fixed-length fields marker (0x0c)
+  (let* ((pos 0)
+         (strings (cl-loop repeat 6
+                           collect (pcase-let ((`(,str . ,new-pos)
+                                               (mysql--read-lenenc-string-from-string packet pos)))
+                                     (setq pos new-pos)
+                                     (decode-coding-string str 'utf-8)))))
+    ;; Fixed-length fields after 0x0c marker: offsets relative to pos+1
     (cl-incf pos 1)
-    (let ((character-set (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8))))
-      (cl-incf pos 2)
-      (let ((column-length (logior (aref packet pos)
-                                   (ash (aref packet (+ pos 1)) 8)
-                                   (ash (aref packet (+ pos 2)) 16)
-                                   (ash (aref packet (+ pos 3)) 24))))
-        (cl-incf pos 4)
-        (let ((column-type (aref packet pos)))
-          (cl-incf pos 1)
-          (let ((flags (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8))))
-            (cl-incf pos 2)
-            (list :catalog (nth 0 strings) :schema (nth 1 strings)
-                  :table (nth 2 strings) :org-table (nth 3 strings)
-                  :name (nth 4 strings) :org-name (nth 5 strings)
-                  :character-set character-set
-                  :column-length column-length :type column-type :flags flags
-                  :decimals (aref packet pos))))))))
+    (let ((character-set (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8)))
+          (column-length (logior (aref packet (+ pos 2))
+                                 (ash (aref packet (+ pos 3)) 8)
+                                 (ash (aref packet (+ pos 4)) 16)
+                                 (ash (aref packet (+ pos 5)) 24)))
+          (column-type (aref packet (+ pos 6)))
+          (flags (logior (aref packet (+ pos 7)) (ash (aref packet (+ pos 8)) 8)))
+          (decimals (aref packet (+ pos 9))))
+      (list :catalog (nth 0 strings) :schema (nth 1 strings)
+            :table (nth 2 strings) :org-table (nth 3 strings)
+            :name (nth 4 strings) :org-name (nth 5 strings)
+            :character-set character-set
+            :column-length column-length :type column-type :flags flags
+            :decimals decimals))))
 
 ;;;; Row parsing
 
@@ -572,9 +563,9 @@ Each column value is either NULL (0xFB prefix) or a lenenc-string."
           (progn
             (push nil row)
             (cl-incf pos 1))
-        (let ((r (mysql--read-lenenc-string-from-string packet pos)))
-          (push (car r) row)
-          (setq pos (cdr r)))))
+        (pcase-let ((`(,val . ,new-pos) (mysql--read-lenenc-string-from-string packet pos)))
+          (push val row)
+          (setq pos new-pos))))
     (nreverse row)))
 
 ;;;; Type conversion
@@ -589,10 +580,10 @@ converted Elisp value.  Entries here override built-in parsers.")
 Returns (:year Y :month M :day D), or nil for zero dates."
   (if (or (string= value "0000-00-00") (string-empty-p value))
       nil
-    (let ((parts (split-string value "-")))
-      (list :year (string-to-number (nth 0 parts))
-            :month (string-to-number (nth 1 parts))
-            :day (string-to-number (nth 2 parts))))))
+    (pcase-let ((`(,y ,m ,d) (split-string value "-")))
+      (list :year (string-to-number y)
+            :month (string-to-number m)
+            :day (string-to-number d)))))
 
 (defun mysql--parse-time (value)
   "Parse a MySQL TIME string \"[-]HH:MM:SS[.ffffff]\" into a plist.
@@ -602,12 +593,12 @@ Returns (:hours H :minutes M :seconds S :negative BOOL)."
     (let* ((negative (string-prefix-p "-" value))
            (s (if negative (substring value 1) value))
            (dot-pos (string-search "." s))
-           (time-part (if dot-pos (substring s 0 dot-pos) s))
-           (parts (split-string time-part ":")))
-      (list :hours (string-to-number (nth 0 parts))
-            :minutes (string-to-number (nth 1 parts))
-            :seconds (string-to-number (nth 2 parts))
-            :negative negative))))
+           (time-part (if dot-pos (substring s 0 dot-pos) s)))
+      (pcase-let ((`(,h ,m ,sec) (split-string time-part ":")))
+        (list :hours (string-to-number h)
+              :minutes (string-to-number m)
+              :seconds (string-to-number sec)
+              :negative negative)))))
 
 (defun mysql--parse-datetime (value)
   "Parse a MySQL DATETIME/TIMESTAMP string into a plist.
@@ -620,15 +611,15 @@ or nil for zero datetimes."
            (date-part (substring value 0 space-pos))
            (time-part (if space-pos (substring value (1+ space-pos)) "00:00:00"))
            (dot-pos (string-search "." time-part))
-           (time-base (if dot-pos (substring time-part 0 dot-pos) time-part))
-           (date-parts (split-string date-part "-"))
-           (time-parts (split-string time-base ":")))
-      (list :year (string-to-number (nth 0 date-parts))
-            :month (string-to-number (nth 1 date-parts))
-            :day (string-to-number (nth 2 date-parts))
-            :hours (string-to-number (nth 0 time-parts))
-            :minutes (string-to-number (nth 1 time-parts))
-            :seconds (string-to-number (nth 2 time-parts))))))
+           (time-base (if dot-pos (substring time-part 0 dot-pos) time-part)))
+      (pcase-let ((`(,y ,mo ,d) (split-string date-part "-"))
+                  (`(,h ,mi ,s) (split-string time-base ":")))
+        (list :year (string-to-number y)
+              :month (string-to-number mo)
+              :day (string-to-number d)
+              :hours (string-to-number h)
+              :minutes (string-to-number mi)
+              :seconds (string-to-number s))))))
 
 (defun mysql--parse-bit (value)
   "Parse a MySQL BIT binary string into an integer."
@@ -737,6 +728,23 @@ PASSWORD is the plaintext password; TLS non-nil means upgrade to TLS first."
                         (mysql--build-handshake-response conn password salt auth-plugin))
     (mysql--handle-auth-response conn password salt auth-plugin)))
 
+(defun mysql--open-connection (host port)
+  "Open a raw TCP connection to HOST:PORT for MySQL.
+Returns (PROCESS . BUFFER)."
+  (let ((buf (generate-new-buffer " *mysql-input*")))
+    (with-current-buffer buf
+      (set-buffer-multibyte nil))
+    (let ((proc (open-network-stream "mysql" buf host port
+                                     :type 'plain
+                                     :coding 'binary)))
+      (set-process-coding-system proc 'binary 'binary)
+      (set-process-filter proc
+                          (lambda (_proc data)
+                            (with-current-buffer buf
+                              (goto-char (point-max))
+                              (insert data))))
+      (cons proc buf))))
+
 (cl-defun mysql-connect (&key (host "127.0.0.1") (port 3306) user password database tls)
   "Connect to a MySQL server and authenticate.
 Returns a `mysql-conn' struct on success.
@@ -748,33 +756,17 @@ When TLS is non-nil, upgrade the connection to TLS before authenticating."
     (signal 'mysql-connection-error (list "No user specified")))
   (when (and tls (not (mysql--tls-available-p)))
     (signal 'mysql-connection-error (list "TLS requested but GnuTLS is not available")))
-  (let* ((buf (generate-new-buffer " *mysql-input*")))
-    (with-current-buffer buf
-      (set-buffer-multibyte nil))
-    (let* ((proc (open-network-stream "mysql" buf host port
-                                      :type 'plain
-                                      :coding 'binary))
-           (conn (make-mysql-conn :process proc
-                                  :buf buf
-                                  :host host
-                                  :port port
-                                  :user user
-                                  :database database)))
-      (set-process-coding-system proc 'binary 'binary)
-      (set-process-filter proc
-                          (lambda (_proc data)
-                            (with-current-buffer buf
-                              (goto-char (point-max))
-                              (insert data))))
+  (pcase-let ((`(,proc . ,buf) (mysql--open-connection host port)))
+    (let ((conn (make-mysql-conn :process proc :buf buf
+                                 :host host :port port
+                                 :user user :database database)))
       (condition-case err
           (progn
             (mysql--authenticate conn password tls)
             conn)
         (error
-         (when (process-live-p proc)
-           (delete-process proc))
-         (when (buffer-live-p buf)
-           (kill-buffer buf))
+         (when (process-live-p proc) (delete-process proc))
+         (when (buffer-live-p buf) (kill-buffer buf))
          (signal (car err) (cdr err)))))))
 
 (defun mysql--handle-auth-switch (conn password packet)
@@ -847,6 +839,32 @@ SALT is the nonce, AUTH-PLUGIN is the current auth plugin name."
 
 ;;;; Query execution
 
+(defun mysql--handle-query-response (conn packet)
+  "Dispatch on PACKET type and return a `mysql-result' for CONN."
+  (pcase (mysql--packet-type packet)
+    ('ok
+     (let ((ok-info (mysql--parse-ok-packet packet)))
+       (setf (mysql-conn-status-flags conn)
+             (plist-get ok-info :status-flags))
+       (make-mysql-result
+        :connection conn
+        :status "OK"
+        :affected-rows (plist-get ok-info :affected-rows)
+        :last-insert-id (plist-get ok-info :last-insert-id)
+        :warnings (plist-get ok-info :warnings))))
+    ('err
+     (let ((err-info (mysql--parse-err-packet packet)))
+       (signal 'mysql-query-error
+               (list (format "[%d] %s%s"
+                             (plist-get err-info :code)
+                             (if (plist-get err-info :state)
+                                 (format "(%s) " (plist-get err-info :state))
+                               "")
+                             (plist-get err-info :message))))))
+    (_
+     ;; Result set: first byte is column_count (lenenc int)
+     (mysql--read-result-set conn packet))))
+
 (defun mysql-query (conn sql)
   "Execute SQL query on CONN and return a `mysql-result'.
 SQL is a string containing the query to execute.
@@ -867,46 +885,22 @@ Signals `mysql-error' if the connection is busy (re-entrant call)."
         (setf (mysql-conn-sequence-id conn) 0)
         (mysql--send-packet conn (concat (unibyte-string #x03)
                                          (encode-coding-string sql 'utf-8)))
-        (let ((packet (mysql--read-packet conn)))
-          (pcase (mysql--packet-type packet)
-            ('ok
-             (let ((ok-info (mysql--parse-ok-packet packet)))
-               (setf (mysql-conn-status-flags conn)
-                     (plist-get ok-info :status-flags))
-               (make-mysql-result
-                :connection conn
-                :status "OK"
-                :affected-rows (plist-get ok-info :affected-rows)
-                :last-insert-id (plist-get ok-info :last-insert-id)
-                :warnings (plist-get ok-info :warnings))))
-            ('err
-             (let ((err-info (mysql--parse-err-packet packet)))
-               (signal 'mysql-query-error
-                       (list (format "[%d] %s%s"
-                                     (plist-get err-info :code)
-                                     (if (plist-get err-info :state)
-                                         (format "(%s) " (plist-get err-info :state))
-                                       "")
-                                     (plist-get err-info :message))))))
-            (_
-             ;; Result set: first byte is column_count (lenenc int)
-             (mysql--read-result-set conn packet)))))
+        (mysql--handle-query-response conn (mysql--read-packet conn)))
     (setf (mysql-conn-busy conn) nil)))
 
 (defun mysql--read-column-definitions (conn col-count)
   "Read COL-COUNT column definition packets from CONN.
 Returns a list of column plists.  Also consumes the EOF packet."
-  (let ((columns nil))
-    (dotimes (_ col-count)
-      (push (mysql--parse-column-definition (mysql--read-packet conn)) columns))
-    (setq columns (nreverse columns))
+  (let ((columns (cl-loop repeat col-count
+                          collect (mysql--parse-column-definition
+                                   (mysql--read-packet conn)))))
     ;; Read EOF after columns (unless CLIENT_DEPRECATE_EOF)
     (when (zerop (logand (mysql-conn-capability-flags conn)
                         mysql--cap-deprecate-eof))
       (let ((eof-packet (mysql--read-packet conn)))
         (unless (eq (mysql--packet-type eof-packet) 'eof)
           (signal 'mysql-protocol-error
-                  (list "Expected EOF packet after column definitions")))))
+                  (list "Missing EOF packet after column definitions")))))
     columns))
 
 (defun mysql--read-text-rows (conn col-count columns)
@@ -970,7 +964,7 @@ CONN is a `mysql-conn' returned by `mysql-connect'."
 Reads param and column definition packets from CONN.
 Returns a `mysql-stmt'."
   (unless (= (aref packet 0) #x00)
-    (signal 'mysql-stmt-error (list "Expected OK status in PREPARE response")))
+    (signal 'mysql-stmt-error (list "Non-OK status in PREPARE response")))
   (let* ((stmt-id (logior (aref packet 1)
                           (ash (aref packet 2) 8)
                           (ash (aref packet 3) 16)
@@ -979,22 +973,18 @@ Returns a `mysql-stmt'."
          (num-params (logior (aref packet 7) (ash (aref packet 8) 8)))
          ;; byte 9 is filler (0x00)
          ;; bytes 10-11 are warning_count
-         (param-defs nil)
-         (col-defs nil))
-    ;; Read param definitions
-    (when (> num-params 0)
-      (dotimes (_ num-params)
-        (push (mysql--parse-column-definition (mysql--read-packet conn)) param-defs))
-      (setq param-defs (nreverse param-defs))
-      ;; Read EOF after params
-      (mysql--read-packet conn))
-    ;; Read column definitions
-    (when (> num-columns 0)
-      (dotimes (_ num-columns)
-        (push (mysql--parse-column-definition (mysql--read-packet conn)) col-defs))
-      (setq col-defs (nreverse col-defs))
-      ;; Read EOF after columns
-      (mysql--read-packet conn))
+         (param-defs (when (> num-params 0)
+                       (prog1 (cl-loop repeat num-params
+                                       collect (mysql--parse-column-definition
+                                                (mysql--read-packet conn)))
+                         ;; Read EOF after params
+                         (mysql--read-packet conn))))
+         (col-defs (when (> num-columns 0)
+                     (prog1 (cl-loop repeat num-columns
+                                     collect (mysql--parse-column-definition
+                                              (mysql--read-packet conn)))
+                       ;; Read EOF after columns
+                       (mysql--read-packet conn)))))
     (make-mysql-stmt :conn conn
                      :id stmt-id
                      :param-count num-params
@@ -1127,12 +1117,10 @@ Integers are encoded as 8-byte LE; others as lenenc strings."
   "Read a binary protocol result set from CONN.
 FIRST-PACKET contains the column count.  Returns a `mysql-result'."
   (let* ((col-count (aref first-packet 0))
-         (columns nil)
+         (columns (cl-loop repeat col-count
+                           collect (mysql--parse-column-definition
+                                    (mysql--read-packet conn))))
          (rows nil))
-    ;; Read column definitions
-    (dotimes (_ col-count)
-      (push (mysql--parse-column-definition (mysql--read-packet conn)) columns))
-    (setq columns (nreverse columns))
     ;; Read EOF after columns
     (mysql--read-packet conn)
     ;; Read binary rows until EOF.
@@ -1177,10 +1165,10 @@ Binary row NULL bitmap has a 2-bit offset."
     (dotimes (i col-count)
       (if (mysql--binary-null-p null-bitmap i)
           (push nil row)
-        (let ((result (mysql--decode-binary-value packet pos
-                                                   (plist-get (nth i columns) :type))))
-          (push (car result) row)
-          (setq pos (cdr result)))))
+        (pcase-let ((`(,val . ,new-pos) (mysql--decode-binary-value packet pos
+                                                                    (plist-get (nth i columns) :type))))
+          (push val row)
+          (setq pos new-pos))))
     (nreverse row)))
 
 (defun mysql--decode-binary-value (packet pos type)
@@ -1270,8 +1258,7 @@ Returns (value . new-pos)."
   (let ((len (aref packet pos)))
     (cl-incf pos)
     (pcase len
-      (0
-       (cons nil pos))
+      (0 (cons nil pos))
       (4
        (let ((year (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8)))
              (month (aref packet (+ pos 2)))
@@ -1281,7 +1268,7 @@ Returns (value . new-pos)."
                  (list :year year :month month :day day
                        :hours 0 :minutes 0 :seconds 0))
                (+ pos 4))))
-      (7
+      ((or 7 11)
        (let ((year (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8)))
              (month (aref packet (+ pos 2)))
              (day (aref packet (+ pos 3)))
@@ -1290,20 +1277,8 @@ Returns (value . new-pos)."
              (seconds (aref packet (+ pos 6))))
          (cons (list :year year :month month :day day
                      :hours hours :minutes minutes :seconds seconds)
-               (+ pos 7))))
-      (11
-       (let ((year (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8)))
-             (month (aref packet (+ pos 2)))
-             (day (aref packet (+ pos 3)))
-             (hours (aref packet (+ pos 4)))
-             (minutes (aref packet (+ pos 5)))
-             (seconds (aref packet (+ pos 6))))
-         ;; microseconds: 4 bytes (ignored for now, but skip them)
-         (cons (list :year year :month month :day day
-                     :hours hours :minutes minutes :seconds seconds)
-               (+ pos 11))))
-      (_
-       (cons nil (+ pos len))))))
+               (+ pos len))))
+      (_ (cons nil (+ pos len))))))
 
 (defun mysql--decode-binary-time (packet pos)
   "Decode a binary TIME value from PACKET at POS.
@@ -1311,9 +1286,8 @@ Returns (value . new-pos)."
   (let ((len (aref packet pos)))
     (cl-incf pos)
     (pcase len
-      (0
-       (cons (list :hours 0 :minutes 0 :seconds 0 :negative nil) pos))
-      (8
+      (0 (cons (list :hours 0 :minutes 0 :seconds 0 :negative nil) pos))
+      ((or 8 12)
        (let ((negative (not (zerop (aref packet pos))))
              ;; days: 4 bytes LE (convert to hours)
              (days (logior (aref packet (+ pos 1))
@@ -1326,23 +1300,8 @@ Returns (value . new-pos)."
          (cons (list :hours (+ (* days 24) hours)
                      :minutes minutes :seconds seconds
                      :negative negative)
-               (+ pos 8))))
-      (12
-       (let ((negative (not (zerop (aref packet pos))))
-             (days (logior (aref packet (+ pos 1))
-                           (ash (aref packet (+ pos 2)) 8)
-                           (ash (aref packet (+ pos 3)) 16)
-                           (ash (aref packet (+ pos 4)) 24)))
-             (hours (aref packet (+ pos 5)))
-             (minutes (aref packet (+ pos 6)))
-             (seconds (aref packet (+ pos 7))))
-         ;; microseconds: 4 bytes (skip)
-         (cons (list :hours (+ (* days 24) hours)
-                     :minutes minutes :seconds seconds
-                     :negative negative)
-               (+ pos 12))))
-      (_
-       (cons nil (+ pos len))))))
+               (+ pos len))))
+      (_ (cons nil (+ pos len))))))
 
 ;;;; Convenience APIs
 

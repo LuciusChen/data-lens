@@ -468,10 +468,8 @@ PAYLOAD contains the list of SASL mechanism names."
               (list (format "Server requires unsupported SASL mechanism(s): %s"
                             (mapconcat #'identity mechanisms ", "))))))
   ;; Step 1: SASLInitialResponse
-  (let* ((scram-data (pg--scram-client-first (pg-conn-user conn)))
-         (client-first (car scram-data))
-         (client-nonce (cadr scram-data))
-         (client-first-bare (cddr scram-data))
+  (pcase-let* ((`(,client-first ,client-nonce . ,client-first-bare)
+                (pg--scram-client-first (pg-conn-user conn)))
          (msg-data (encode-coding-string client-first 'utf-8))
          (sasl-payload (concat (pg--encode-string "SCRAM-SHA-256")
                                (pg--int32-be-bytes (length msg-data))
@@ -482,20 +480,19 @@ PAYLOAD contains the list of SASL mechanism names."
            (server-first (decode-coding-string (substring cont-payload 4) 'utf-8))
            (final-data (pg--scram-client-final
                         password client-nonce client-first-bare server-first)))
-      ;; Step 3: Send client-final
-      (pg--send-message conn ?p (encode-coding-string (car final-data) 'utf-8))
-      ;; Step 4: Verify server signature
-      (let ((final-payload (pg--sasl-read-auth-message conn 12 "SASLFinal")))
-        (pg--sasl-verify-server-signature final-payload (cdr final-data))))))
+      (pcase-let ((`(,client-final . ,server-signature) final-data))
+        ;; Step 3: Send client-final
+        (pg--send-message conn ?p (encode-coding-string client-final 'utf-8))
+        ;; Step 4: Verify server signature
+        (let ((final-payload (pg--sasl-read-auth-message conn 12 "SASLFinal")))
+          (pg--sasl-verify-server-signature final-payload server-signature))))))
 
 (defun pg--handle-authentication (conn password)
   "Handle the authentication phase after sending StartupMessage.
 Reads auth messages and responds appropriately."
   (let ((done nil))
     (while (not done)
-      (let* ((msg (pg--read-message conn))
-             (msg-type (car msg))
-             (payload (cdr msg)))
+      (pcase-let* ((`(,msg-type . ,payload) (pg--read-message conn)))
         (pcase msg-type
           (?R  ;; Authentication*
            (let ((auth-type (pg--read-be-int32-from-string payload 0)))
@@ -525,9 +522,7 @@ Reads auth messages and responds appropriately."
   "Read ParameterStatus, BackendKeyData, and ReadyForQuery after auth."
   (let ((done nil))
     (while (not done)
-      (let* ((msg (pg--read-message conn))
-             (msg-type (car msg))
-             (payload (cdr msg)))
+      (pcase-let* ((`(,msg-type . ,payload) (pg--read-message conn)))
         (pcase msg-type
           (?S  ;; ParameterStatus
            (pcase-let ((`(,name . ,pos1)
@@ -657,20 +652,21 @@ converted Elisp value.  Entries here override built-in parsers.")
 
 (defun pg--parse-date (value)
   "Parse a PostgreSQL date string VALUE to a plist."
-  (let ((parts (split-string value "-")))
-    (list :year (string-to-number (nth 0 parts))
-          :month (string-to-number (nth 1 parts))
-          :day (string-to-number (nth 2 parts)))))
+  (pcase-let ((`(,year ,month ,day) (split-string value "-")))
+    (list :year (string-to-number year)
+          :month (string-to-number month)
+          :day (string-to-number day))))
 
 (defun pg--parse-time (value)
   "Parse a PostgreSQL time string VALUE to a plist."
   (let* ((dot-pos (string-search "." value))
          (time-part (if dot-pos (substring value 0 dot-pos) value))
          (parts (split-string time-part ":")))
-    (list :hours (string-to-number (nth 0 parts))
-          :minutes (string-to-number (nth 1 parts))
-          :seconds (string-to-number (nth 2 parts))
-          :negative nil)))
+    (pcase-let ((`(,hours ,minutes ,seconds) parts))
+      (list :hours (string-to-number hours)
+            :minutes (string-to-number minutes)
+            :seconds (string-to-number seconds)
+            :negative nil))))
 
 (defun pg--parse-timestamp (value)
   "Parse a PostgreSQL timestamp/timestamptz string VALUE to a plist."
@@ -682,12 +678,14 @@ converted Elisp value.  Entries here override built-in parsers.")
          (time-base (if dot-pos (substring time-str 0 dot-pos) time-str))
          (date-parts (split-string date-part "-"))
          (time-parts (split-string time-base ":")))
-    (list :year (string-to-number (nth 0 date-parts))
-          :month (string-to-number (nth 1 date-parts))
-          :day (string-to-number (nth 2 date-parts))
-          :hours (string-to-number (nth 0 time-parts))
-          :minutes (string-to-number (nth 1 time-parts))
-          :seconds (string-to-number (nth 2 time-parts)))))
+    (pcase-let ((`(,year ,month ,day) date-parts)
+                (`(,hours ,minutes ,seconds) time-parts))
+      (list :year (string-to-number year)
+            :month (string-to-number month)
+            :day (string-to-number day)
+            :hours (string-to-number hours)
+            :minutes (string-to-number minutes)
+            :seconds (string-to-number seconds)))))
 
 (defun pg--parse-value (value oid)
   "Parse string VALUE according to PostgreSQL column OID.

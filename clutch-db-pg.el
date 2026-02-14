@@ -170,18 +170,14 @@ ORDER BY ordinal_position"
 
 (defun clutch-db-pg--format-column-ddl (col)
   "Format a single column COL row as a DDL line."
-  (let* ((name (nth 0 col))
-         (dtype (nth 1 col))
-         (max-len (nth 2 col))
-         (default-val (nth 3 col))
-         (nullable (nth 4 col))
-         (type-str (if max-len (format "%s(%s)" dtype max-len) dtype))
-         (parts (list (pg-escape-identifier name) type-str)))
-    (when (string= nullable "NO")
-      (push "NOT NULL" parts))
-    (when default-val
-      (push (format "DEFAULT %s" default-val) parts))
-    (format "    %s" (mapconcat #'identity (nreverse parts) " "))))
+  (pcase-let ((`(,name ,dtype ,max-len ,default-val ,nullable) col))
+    (let* ((type-str (if max-len (format "%s(%s)" dtype max-len) dtype))
+           (parts (list (pg-escape-identifier name) type-str)))
+      (when (string= nullable "NO")
+        (push "NOT NULL" parts))
+      (when default-val
+        (push (format "DEFAULT %s" default-val) parts))
+      (format "    %s" (mapconcat #'identity (nreverse parts) " ")))))
 
 (cl-defmethod clutch-db-show-create-table ((conn pg-conn) table)
   "Return synthesized DDL for TABLE on PostgreSQL CONN.
@@ -240,9 +236,10 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
                           (pg-escape-literal table)))
              (result (pg-query conn sql)))
         (cl-loop for row in (pg-result-rows result)
-                 collect (cons (nth 0 row)
-                               (list :ref-table (nth 1 row)
-                                     :ref-column (nth 2 row)))))
+                 collect (pcase-let ((`(,col-name ,ref-table ,ref-column) row))
+                           (cons col-name
+                                 (list :ref-table ref-table
+                                       :ref-column ref-column)))))
     (pg-error nil)))
 
 ;;;; Column details
@@ -263,14 +260,13 @@ ORDER BY ordinal_position"
              (fks (clutch-db-foreign-keys conn table)))
         (mapcar
          (lambda (row)
-           (let* ((name (nth 0 row))
-                  (type (nth 1 row))
-                  (nullable (string= (nth 2 row) "YES"))
-                  (pk-p (member name pk-cols))
-                  (fk (cdr (assoc name fks))))
-             (list :name name :type type :nullable nullable
-                   :primary-key (and pk-p t)
-                   :foreign-key fk)))
+           (pcase-let ((`(,name ,type ,nullable-str . ,_) row))
+             (let* ((nullable (string= nullable-str "YES"))
+                    (pk-p (member name pk-cols))
+                    (fk (cdr (assoc name fks))))
+               (list :name name :type type :nullable nullable
+                     :primary-key (and pk-p t)
+                     :foreign-key fk))))
          col-rows))
     (pg-error nil)))
 

@@ -29,7 +29,7 @@
 
 ;;;; Type-category mapping
 
-(defconst clutch-db-mysql-type-category-alist
+(defconst clutch-db-mysql--type-category-alist
   `((,mysql-type-decimal    . numeric)
     (,mysql-type-tiny       . numeric)
     (,mysql-type-short      . numeric)
@@ -51,9 +51,9 @@
     (,mysql-type-timestamp  . datetime))
   "Alist mapping MySQL type codes to type-category symbols.")
 
-(defun clutch-db-mysql-type-category (mysql-type)
+(defun clutch-db-mysql--type-category (mysql-type)
   "Map a MySQL type code MYSQL-TYPE to a type-category symbol."
-  (or (alist-get mysql-type clutch-db-mysql-type-category-alist)
+  (or (alist-get mysql-type clutch-db-mysql--type-category-alist)
       'text))
 
 (defun clutch-db-mysql--convert-columns (mysql-columns)
@@ -61,7 +61,7 @@
 Each output plist has :name and :type-category."
   (mapcar (lambda (col)
             (list :name (plist-get col :name)
-                  :type-category (clutch-db-mysql-type-category
+                  :type-category (clutch-db-mysql--type-category
                                   (plist-get col :type))))
           mysql-columns))
 
@@ -181,7 +181,8 @@ Wraps BASE-SQL with LIMIT/OFFSET.  ORDER-BY is (COL . DIR) or nil."
                       (format "SHOW CREATE TABLE %s"
                               (mysql-escape-identifier table))))
              (rows (mysql-result-rows result)))
-        (nth 1 (car rows)))
+        (pcase-let ((`(,_ ,ddl) (car rows)))
+          ddl))
     (mysql-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
@@ -195,7 +196,7 @@ Wraps BASE-SQL with LIMIT/OFFSET.  ORDER-BY is (COL . DIR) or nil."
                               (mysql-escape-identifier table))))
              (rows (mysql-result-rows result)))
         (mapcar (lambda (row)
-                  (let ((name (nth 4 row)))
+                  (pcase-let ((`(,_ ,_ ,_ ,_ ,name) row))
                     (if (stringp name) name (format "%s" name))))
                 rows))
     (mysql-error nil)))
@@ -213,10 +214,10 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
              (result (mysql-query conn sql))
              (rows (mysql-result-rows result)))
         (cl-loop for row in rows
-                 for n = (nth 0 row)
-                 for col-name = (if (stringp n) n (format "%s" n))
-                 collect (cons col-name (list :ref-table (nth 1 row)
-                                              :ref-column (nth 2 row)))))
+                 collect (pcase-let ((`(,n ,ref-table ,ref-column) row))
+                           (let ((col-name (if (stringp n) n (format "%s" n))))
+                             (cons col-name (list :ref-table ref-table
+                                                  :ref-column ref-column))))))
     (mysql-error nil)))
 
 ;;;; Column details
@@ -233,14 +234,13 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
              (fks (clutch-db-foreign-keys conn table)))
         (mapcar
          (lambda (row)
-           (let* ((name (nth 0 row))
-                  (type (nth 1 row))
-                  (nullable (string= (nth 2 row) "YES"))
-                  (pk-p (member name pk-cols))
-                  (fk (cdr (assoc name fks))))
-             (list :name name :type type :nullable nullable
-                   :primary-key (and pk-p t)
-                   :foreign-key fk)))
+           (pcase-let ((`(,name ,type ,nullable-str . ,_) row))
+             (let* ((nullable (string= nullable-str "YES"))
+                    (pk-p (member name pk-cols))
+                    (fk (cdr (assoc name fks))))
+               (list :name name :type type :nullable nullable
+                     :primary-key (and pk-p t)
+                     :foreign-key fk))))
          col-rows))
     (mysql-error nil)))
 

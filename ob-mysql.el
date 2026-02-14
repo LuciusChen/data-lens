@@ -55,27 +55,31 @@
 (defvar ob-mysql--connection-cache (make-hash-table :test 'equal)
   "Cache of open MySQL connections keyed by connection parameters.")
 
+(defun ob-mysql--build-conn-params (params)
+  "Build connection params plist from Babel PARAMS alist.
+Uses :connection to look up `clutch-connection-alist', or
+builds from individual :host, :port, :user, :password, :database."
+  (if-let* ((conn-name (cdr (assq :connection params))))
+      (or (cdr (assoc conn-name clutch-connection-alist))
+          (user-error "Unknown connection: %s" conn-name))
+    (let ((host (or (cdr (assq :host params)) "127.0.0.1"))
+          (port (or (cdr (assq :port params)) 3306))
+          (user (cdr (assq :user params)))
+          (password (cdr (assq :password params)))
+          (database (cdr (assq :database params))))
+      (unless user
+        (user-error "Missing :user (or use :connection)"))
+      (append (list :host host :port (if (stringp port)
+                                          (string-to-number port)
+                                        port)
+                    :user user)
+              (when password (list :password password))
+              (when database (list :database database))))))
+
 (defun ob-mysql--connect (params)
   "Get or create a MySQL connection from PARAMS.
 PARAMS is the Babel params alist."
-  (let* ((conn-name (cdr (assq :connection params)))
-         (conn-params
-          (if conn-name
-              (or (cdr (assoc conn-name clutch-connection-alist))
-                  (user-error "Unknown connection: %s" conn-name))
-            (let ((host (or (cdr (assq :host params)) "127.0.0.1"))
-                  (port (or (cdr (assq :port params)) 3306))
-                  (user (cdr (assq :user params)))
-                  (password (cdr (assq :password params)))
-                  (database (cdr (assq :database params))))
-              (unless user
-                (user-error "Missing :user (or use :connection)"))
-              (append (list :host host :port (if (stringp port)
-                                                  (string-to-number port)
-                                                port)
-                            :user user)
-                      (when password (list :password password))
-                      (when database (list :database database))))))
+  (let* ((conn-params (ob-mysql--build-conn-params params))
          (key (format "%S" conn-params))
          (cached (gethash key ob-mysql--connection-cache)))
     (if (and cached

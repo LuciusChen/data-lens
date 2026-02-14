@@ -144,12 +144,10 @@ BACKEND is a symbol (e.g., \\='mysql, \\='pg).
 PARAMS is a plist of connection parameters (:host, :port, :user,
 :password, :database, etc.).
 Returns a backend-specific connection object."
-  (let ((feature-plist (alist-get backend clutch-db--backend-features)))
-    (unless feature-plist
-      (signal 'clutch-db-error
-              (list (format "Unknown backend: %s" backend))))
-    (require (plist-get feature-plist :require))
-    (let ((connect-fn (plist-get feature-plist :connect-fn)))
+  (if-let* ((feature-plist (alist-get backend clutch-db--backend-features))
+             (connect-fn (progn
+                           (require (plist-get feature-plist :require))
+                           (plist-get feature-plist :connect-fn))))
       (condition-case err
           (let ((conn (funcall connect-fn params)))
             (clutch-db-init-connection conn)
@@ -157,7 +155,8 @@ Returns a backend-specific connection object."
         (error
          (signal 'clutch-db-error
                  (list (format "Connection failed (%s): %s"
-                               backend (error-message-string err)))))))))
+                               backend (error-message-string err))))))
+    (user-error "Unknown backend: %s" backend)))
 
 (provide 'clutch-db)
 ;;; clutch-db.el ends here

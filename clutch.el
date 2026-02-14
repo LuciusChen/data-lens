@@ -545,10 +545,9 @@ Returns a string (with text properties)."
     (push sep-top lines)
     (push header lines)
     (push sep-mid lines)
-    (let ((ridx 0))
-      (dolist (row rows)
-        (push (clutch--render-row row ridx all-cols widths) lines)
-        (cl-incf ridx)))
+    (cl-loop for row in rows
+             for ridx from 0
+             do (push (clutch--render-row row ridx all-cols widths) lines))
     (push sep-bot lines)
     (mapconcat #'identity (nreverse lines) "\n")))
 
@@ -592,8 +591,7 @@ POSITION is `top', `middle', or `bottom' (default `middle')."
 NAME is a cons (FAMILY . ICON-NAME) where FAMILY is one of
 `mdicon', `codicon', etc.  Falls back gracefully when
 nerd-icons is not installed."
-  (let ((family (car name))
-        (icon-name (cdr name)))
+  (pcase-let ((`(,family . ,icon-name) name))
     (or (and (require 'nerd-icons nil t)
              (pcase family
                ('mdicon (nerd-icons-mdicon icon-name))
@@ -676,47 +674,87 @@ so the active-column overlay can find it."
     (concat (mapconcat #'identity (nreverse parts) "")
             (propertize "│" 'face 'clutch-border-face))))
 
+(defun clutch--render-cell (row ridx cidx widths)
+  "Render cell at column CIDX of ROW at row index RIDX.
+WIDTHS is the width vector.  Returns a propertized string
+including the leading border and padding."
+  (let* ((val (nth cidx row))
+         (col-def (nth cidx clutch--result-column-defs))
+         (edited (assoc (cons ridx cidx) clutch--pending-edits))
+         (display-val (if edited (cdr edited) val))
+         (w (aref widths cidx))
+         (formatted (let ((s (replace-regexp-in-string
+                             "\n" "↵"
+                             (clutch--format-value display-val))))
+                      (if (and (not edited)
+                               (clutch--long-field-type-p col-def)
+                               (> (length s) w)
+                               (not (stringp display-val)))
+                          (clutch--long-field-placeholder col-def)
+                        s)))
+         (truncated (if (> (string-width formatted) w)
+                        (truncate-string-to-width formatted w)
+                      formatted))
+         (padded (clutch--string-pad truncated w (clutch--numeric-type-p col-def)))
+         (face (cond (edited 'clutch-modified-face)
+                     ((null val) 'clutch-null-face)
+                     ((assq cidx clutch--fk-info) 'clutch-fk-face)
+                     (t nil)))
+         (pad-str (make-string clutch-column-padding ?\s)))
+    (concat (propertize "│" 'face 'clutch-border-face)
+            pad-str
+            (propertize padded
+                        'clutch-row-idx ridx
+                        'clutch-col-idx cidx
+                        'clutch-full-value (if edited (cdr edited) val)
+                        'face face)
+            pad-str)))
+
 (defun clutch--render-row (row ridx visible-cols widths)
   "Render a single data ROW at row index RIDX.
 VISIBLE-COLS is a list of column indices, WIDTHS is the width vector.
 Returns a propertized string."
-  (let ((padding clutch-column-padding)
-        (parts nil))
-    (dolist (cidx visible-cols)
-      (let* ((val (nth cidx row))
-             (col-def (nth cidx clutch--result-column-defs))
-             (edited (assoc (cons ridx cidx) clutch--pending-edits))
-             (display-val (if edited (cdr edited) val))
-             (w (aref widths cidx))
-             (formatted (let ((s (replace-regexp-in-string
-                               "\n" "↵"
-                               (clutch--format-value display-val))))
-                          (if (and (not edited)
-                                   (clutch--long-field-type-p col-def)
-                                   (> (length s) w)
-                                   (not (stringp display-val)))
-                              (clutch--long-field-placeholder col-def)
-                            s)))
-             (truncated (if (> (string-width formatted) w)
-                            (truncate-string-to-width formatted w)
-                          formatted))
-             (ralign (clutch--numeric-type-p col-def))
-             (padded (clutch--string-pad truncated w ralign))
-             (face (cond (edited 'clutch-modified-face)
-                         ((null val) 'clutch-null-face)
-                         ((assq cidx clutch--fk-info) 'clutch-fk-face)
-                         (t nil)))
-             (cell (propertize padded
-                               'clutch-row-idx ridx
-                               'clutch-col-idx cidx
-                               'clutch-full-value (if edited (cdr edited) val)
-                               'face face))
-             (pad-str (make-string padding ?\s)))
-        (push (concat (propertize "│" 'face 'clutch-border-face)
-                      pad-str cell pad-str)
-              parts)))
-    (concat (mapconcat #'identity (nreverse parts) "")
-            (propertize "│" 'face 'clutch-border-face))))
+  (concat (mapconcat (lambda (cidx)
+                       (clutch--render-cell row ridx cidx widths))
+                     visible-cols "")
+          (propertize "│" 'face 'clutch-border-face)))
+
+(defun clutch--footer-row-summary (row-count total-rows)
+  "Build propertized row count display for the footer.
+ROW-COUNT is the current page count, TOTAL-ROWS is the overall total or nil."
+  (let ((hi 'font-lock-keyword-face)
+        (dim 'font-lock-comment-face))
+    (if (and total-rows (= total-rows row-count))
+        (concat (propertize (format "%d" total-rows) 'face hi)
+                (propertize " rows" 'face dim))
+      (concat (propertize (format "%d" row-count) 'face hi)
+              (propertize " of " 'face dim)
+              (propertize (if total-rows (format "%d" total-rows) "?")
+                          'face hi)
+              (propertize " rows" 'face dim)))))
+
+(defun clutch--footer-filter-parts ()
+  "Build footer parts for active filters and query preview.
+Returns a list of propertized strings (may be empty)."
+  (let ((dim 'font-lock-comment-face))
+    (delq nil
+          (list
+           (when clutch--where-filter
+             (let ((icon (clutch--icon '(codicon . "nf-cod-filter") "W:")))
+               (concat (propertize (concat icon " ") 'face 'font-lock-warning-face)
+                       (propertize clutch--where-filter
+                                   'face 'font-lock-warning-face))))
+           (when clutch--filter-pattern
+             (let ((icon (clutch--icon '(codicon . "nf-cod-search") "/:")))
+               (concat (propertize (concat icon " ") 'face 'font-lock-string-face)
+                       (propertize clutch--filter-pattern
+                                   'face 'font-lock-string-face))))
+           (when clutch--last-query
+             (propertize (truncate-string-to-width
+                          (replace-regexp-in-string
+                           "[\n\r]+" " " (string-trim clutch--last-query))
+                          60 nil nil t)
+                         'face dim))))))
 
 (defun clutch--render-footer (row-count page-num page-size
                                            total-rows col-num-pages col-cur-page)
@@ -731,61 +769,28 @@ COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
          (sep (propertize "  •  " 'face dim))
          (total-pages (when total-rows
                         (max 1 (ceiling total-rows (float page-size)))))
-         (icon-rows (clutch--icon '(mdicon . "nf-md-sigma") "Σ"))
-         (icon-page (clutch--icon '(codicon . "nf-cod-files") "⊞"))
-         (icon-time (clutch--icon '(mdicon . "nf-md-timer_outline") "⏱"))
-         (icon-col (clutch--icon '(codicon . "nf-cod-split_horizontal") "⫼"))
-         (icon-where (clutch--icon '(codicon . "nf-cod-filter") "W:"))
-         (icon-filter (clutch--icon '(codicon . "nf-cod-search") "/:"))
-         (parts nil))
-    (push (concat (propertize (concat icon-rows " ") 'face dim)
-                  (if (and total-rows (= total-rows row-count))
-                      ;; Single page — just show total
-                      (concat (propertize (format "%d" total-rows) 'face hi)
-                              (propertize " rows" 'face dim))
-                    ;; Paginated — show page rows of total
-                    (concat (propertize (format "%d" row-count) 'face hi)
-                            (propertize " of " 'face dim)
-                            (propertize (if total-rows
-                                            (format "%d" total-rows)
-                                          "?")
-                                        'face hi)
-                            (propertize " rows" 'face dim))))
-          parts)
-    (push (concat (propertize (concat icon-page " ") 'face dim)
-                  (propertize (format "%d" (1+ page-num)) 'face hi)
-                  (propertize " / " 'face dim)
-                  (propertize (format "%d" (or total-pages 1)) 'face hi))
-          parts)
-    (when (> col-num-pages 1)
-      (push (concat (propertize (concat icon-col " ") 'face dim)
-                    (propertize (format "%d/%d" col-cur-page col-num-pages)
-                                'face hi))
-            parts))
-    (when clutch--query-elapsed
-      (push (concat (propertize (concat icon-time " ") 'face dim)
-                    (propertize (clutch--format-elapsed
-                                 clutch--query-elapsed)
-                                'face hi))
-            parts))
-    (when clutch--where-filter
-      (push (concat (propertize (concat icon-where " ") 'face 'font-lock-warning-face)
-                    (propertize clutch--where-filter
-                                'face 'font-lock-warning-face))
-            parts))
-    (when clutch--filter-pattern
-      (push (concat (propertize (concat icon-filter " ") 'face 'font-lock-string-face)
-                    (propertize clutch--filter-pattern
-                                'face 'font-lock-string-face))
-            parts))
-    (when clutch--last-query
-      (let ((sql (truncate-string-to-width
-                  (replace-regexp-in-string
-                   "[\n\r]+" " "
-                   (string-trim clutch--last-query))
-                  60 nil nil t)))
-        (push (propertize sql 'face dim) parts)))
-    (mapconcat #'identity (nreverse parts) sep)))
+         (parts
+          (delq nil
+                (list
+                 (concat (propertize (concat (clutch--icon '(mdicon . "nf-md-sigma") "Σ") " ")
+                                     'face dim)
+                         (clutch--footer-row-summary row-count total-rows))
+                 (concat (propertize (concat (clutch--icon '(codicon . "nf-cod-files") "⊞") " ")
+                                     'face dim)
+                         (propertize (format "%d" (1+ page-num)) 'face hi)
+                         (propertize " / " 'face dim)
+                         (propertize (format "%d" (or total-pages 1)) 'face hi))
+                 (when (> col-num-pages 1)
+                   (concat (propertize (concat (clutch--icon '(codicon . "nf-cod-split_horizontal") "⫼") " ")
+                                       'face dim)
+                           (propertize (format "%d/%d" col-cur-page col-num-pages)
+                                       'face hi)))
+                 (when clutch--query-elapsed
+                   (concat (propertize (concat (clutch--icon '(mdicon . "nf-md-timer_outline") "⏱") " ")
+                                       'face dim)
+                           (propertize (clutch--format-elapsed clutch--query-elapsed)
+                                       'face hi)))))))
+    (mapconcat #'identity (append parts (clutch--footer-filter-parts)) sep)))
 
 (defun clutch--effective-widths ()
   "Return column widths adjusted for header indicator icons.
@@ -1002,9 +1007,7 @@ Preserves cursor position (row + column) across the refresh."
     (setq-local clutch--column-widths
                 (clutch--compute-column-widths
                  col-names rows columns))
-    (clutch--refresh-display)
-    (add-hook 'window-size-change-functions
-              #'clutch--window-size-change)))
+    (clutch--refresh-display)))
 
 (defun clutch--display-dml-result (result sql elapsed)
   "Render a DML RESULT (INSERT/UPDATE/DELETE) with SQL and ELAPSED time."
@@ -1080,46 +1083,49 @@ Delegates to the backend for dialect-specific pagination."
     (clutch-db-build-paged-sql clutch-connection base-sql
                                   page-num page-size order-by)))
 
+(defun clutch--update-page-state (columns rows elapsed page-num)
+  "Update buffer-local state for a new page of results.
+COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the new page."
+  (let ((col-names (clutch--column-names columns)))
+    (setq-local clutch--result-columns col-names
+                clutch--result-column-defs columns
+                clutch--result-rows rows
+                clutch--page-current page-num
+                clutch--pending-edits nil
+                clutch--marked-rows nil
+                clutch--query-elapsed elapsed
+                clutch--filter-pattern nil
+                clutch--filtered-rows nil
+                clutch--column-widths
+                (clutch--compute-column-widths col-names rows columns))))
+
 (defun clutch--execute-page (page-num)
   "Execute the query for PAGE-NUM and refresh the result buffer display.
 Uses `clutch--base-query' as the base SQL.
 Signals an error if pagination is not available."
   (unless clutch--base-query
     (user-error "Pagination not available for this query"))
-  (let* ((conn clutch-connection)
-         (base clutch--base-query)
-         (page-size clutch-result-max-rows)
-         (paged-sql (clutch--build-paged-sql
-                     base page-num page-size clutch--order-by)))
-    (unless (clutch--connection-alive-p conn)
-      (user-error "Not connected"))
-    (let* ((start (float-time))
-           (result (condition-case err
-                       (clutch-db-query conn paged-sql)
-                     (clutch-db-error
-                      (user-error "Query error: %s"
-                                  (error-message-string err)))))
-           (elapsed (- (float-time) start))
-           (columns (clutch-db-result-columns result))
-           (rows (clutch-db-result-rows result))
-           (col-names (clutch--column-names columns)))
-      (setq-local clutch--result-columns col-names)
-      (setq-local clutch--result-column-defs columns)
-      (setq-local clutch--result-rows rows)
-      (setq-local clutch--page-current page-num)
-      (setq-local clutch--pending-edits nil)
-      (setq-local clutch--marked-rows nil)
-      (setq-local clutch--query-elapsed elapsed)
-      (setq-local clutch--filter-pattern nil)
-      (setq-local clutch--filtered-rows nil)
-      (setq-local clutch--column-widths
-                  (clutch--compute-column-widths col-names rows columns))
-      (clutch--refresh-display)
-      (message "Page %d loaded (%s, %d row%s)"
-               (1+ page-num)
-               (clutch--format-elapsed elapsed)
-               (length rows)
-               (if (= (length rows) 1) "" "s")))))
+  (unless (clutch--connection-alive-p clutch-connection)
+    (user-error "Not connected"))
+  (let* ((paged-sql (clutch--build-paged-sql
+                     clutch--base-query page-num
+                     clutch-result-max-rows clutch--order-by))
+         (start (float-time))
+         (result (condition-case err
+                     (clutch-db-query clutch-connection paged-sql)
+                   (clutch-db-error
+                    (user-error "Query error: %s"
+                                (error-message-string err)))))
+         (elapsed (- (float-time) start))
+         (rows (clutch-db-result-rows result)))
+    (clutch--update-page-state
+     (clutch-db-result-columns result) rows elapsed page-num)
+    (clutch--refresh-display)
+    (message "Page %d loaded (%s, %d row%s)"
+             (1+ page-num)
+             (clutch--format-elapsed elapsed)
+             (length rows)
+             (if (= (length rows) 1) "" "s"))))
 
 ;;;; Query execution engine
 
@@ -1155,6 +1161,31 @@ Leading SQL comments are stripped before checking."
     (string-match-p "\\`\\(?:SELECT\\|WITH\\)\\b"
                     (upcase trimmed))))
 
+(defun clutch--init-result-state (conn sql columns rows elapsed)
+  "Initialize buffer-local state for a fresh query result.
+CONN is the connection, SQL the original query, COLUMNS and ROWS
+the result data, ELAPSED the query time.  Returns column names."
+  (let ((col-names (clutch--column-names columns)))
+    (setq-local clutch--last-query sql
+                clutch--base-query sql
+                clutch-connection conn
+                clutch--result-columns col-names
+                clutch--result-column-defs columns
+                clutch--result-rows rows
+                clutch--pending-edits nil
+                clutch--marked-rows nil
+                clutch--current-col-page 0
+                clutch--pinned-columns nil
+                clutch--sort-column nil
+                clutch--sort-descending nil
+                clutch--page-current 0
+                clutch--page-total-rows nil
+                clutch--order-by nil
+                clutch--query-elapsed elapsed
+                clutch--filter-pattern nil
+                clutch--filtered-rows nil)
+    col-names))
+
 (defun clutch--execute-select (sql connection)
   "Execute a SELECT SQL query with pagination on CONNECTION.
 Returns the query result."
@@ -1169,30 +1200,13 @@ Returns the query result."
          (elapsed (- (float-time) start))
          (buf (get-buffer-create (clutch--result-buffer-name)))
          (columns (clutch-db-result-columns result))
-         (rows (clutch-db-result-rows result))
-         (col-names (clutch--column-names columns)))
+         (rows (clutch-db-result-rows result)))
     (with-current-buffer buf
       (clutch-result-mode)
-      (setq-local clutch--last-query sql
-                  clutch--base-query sql
-                  clutch-connection connection
-                  clutch--result-columns col-names
-                  clutch--result-column-defs columns
-                  clutch--result-rows rows
-                  clutch--pending-edits nil
-                  clutch--marked-rows nil
-                  clutch--current-col-page 0
-                  clutch--pinned-columns nil
-                  clutch--sort-column nil
-                  clutch--sort-descending nil
-                  clutch--page-current 0
-                  clutch--page-total-rows nil
-                  clutch--order-by nil
-                  clutch--query-elapsed elapsed
-                  clutch--filter-pattern nil
-                  clutch--filtered-rows nil)
-      (when col-names
-        (clutch--display-select-result col-names rows columns))
+      (let ((col-names (clutch--init-result-state
+                        connection sql columns rows elapsed)))
+        (when col-names
+          (clutch--display-select-result col-names rows columns)))
       (clutch--load-fk-info))
     (pop-to-buffer buf '(display-buffer-at-bottom))
     result))
@@ -1418,12 +1432,10 @@ Fetches from the backend if not yet cached.  Returns column list."
 
 (defun clutch--tables-in-buffer (schema)
   "Return table names from SCHEMA that appear in the current buffer."
-  (let ((text (buffer-substring-no-properties (point-min) (point-max)))
-        (tables nil))
-    (dolist (tbl (hash-table-keys schema))
-      (when (string-match-p (regexp-quote tbl) text)
-        (push tbl tables)))
-    tables))
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    (cl-loop for tbl in (hash-table-keys schema)
+             when (string-match-p (regexp-quote tbl) text)
+             collect tbl)))
 
 (defconst clutch--sql-keywords
   '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"
@@ -1964,7 +1976,9 @@ Edit:
   ;; Make tab-line use default background so footer renders cleanly
   (face-remap-add-relative 'tab-line :inherit 'default)
   (add-hook 'post-command-hook
-            #'clutch--update-header-highlight nil t))
+            #'clutch--update-header-highlight nil t)
+  (add-hook 'window-size-change-functions
+            #'clutch--window-size-change))
 
 (defun clutch-result-next-page ()
   "Go to the next data page."
@@ -2017,7 +2031,7 @@ Triggers a COUNT(*) query if total rows are not yet known."
                      (clutch-db-error
                       (user-error "COUNT query error: %s"
                                   (error-message-string err)))))
-           (count-val (car (car (clutch-db-result-rows result)))))
+           (count-val (caar (clutch-db-result-rows result))))
       (setq-local clutch--page-total-rows
                   (if (numberp count-val) count-val
                     (string-to-number (format "%s" count-val))))
@@ -2060,14 +2074,14 @@ Scans text properties across the line."
 
 (defun clutch-result--rows-in-region (beg end)
   "Return sorted list of unique row indices in the region BEG..END."
-  (let (indices)
-    (save-excursion
-      (goto-char beg)
-      (while (< (point) end)
-        (when-let* ((ridx (clutch-result--row-idx-at-line)))
-          (cl-pushnew ridx indices))
-        (forward-line 1)))
-    (sort indices #'<)))
+  (save-excursion
+    (goto-char beg)
+    (sort (cl-loop while (< (point) end)
+                   for ridx = (clutch-result--row-idx-at-line)
+                   when ridx collect ridx into acc
+                   do (forward-line 1)
+                   finally return (cl-remove-duplicates acc))
+          #'<)))
 
 (defvar-local clutch-result--edit-callback nil
   "Callback for the cell edit buffer: (lambda (new-value) ...).")
@@ -2090,12 +2104,9 @@ Scans text properties across the line."
 (defun clutch-result-edit-cell ()
   "Edit the cell at point in a dedicated buffer (like `C-c \\='` in org)."
   (interactive)
-  (let* ((cell (or (clutch-result--cell-at-point)
-                   (user-error "No cell at point")))
-         (ridx (nth 0 cell))
-         (cidx (nth 1 cell))
-         (val  (nth 2 cell))
-         (col-name (nth cidx clutch--result-columns))
+  (pcase-let* ((`(,ridx ,cidx ,val) (or (clutch-result--cell-at-point)
+                                         (user-error "No cell at point")))
+               (col-name (nth cidx clutch--result-columns))
          (result-buf (current-buffer))
          (edit-buf (get-buffer-create
                     (format "*clutch-edit: [%d].%s*" ridx col-name))))
@@ -2178,10 +2189,8 @@ column indices to their referenced table and column."
               (col-names clutch--result-columns))
     (condition-case nil
         (let ((fks (clutch-db-foreign-keys conn table)))
-          (dolist (fk fks)
-            (let* ((col-name (car fk))
-                   (ref-info (cdr fk))
-                   (idx (cl-position col-name col-names :test #'string=)))
+          (pcase-dolist (`(,col-name . ,ref-info) fks)
+            (let ((idx (cl-position col-name col-names :test #'string=)))
               (when idx
                 (push (cons idx ref-info) clutch--fk-info)))))
       (clutch-db-error nil))))
@@ -2554,9 +2563,9 @@ Prompts for a pattern; enter empty string to clear."
 (defun clutch-result-yank-cell ()
   "Copy the full value of the cell at point to the kill ring."
   (interactive)
-  (let* ((cell (or (clutch-result--cell-at-point)
-                   (user-error "No cell at point")))
-         (text (clutch--format-value (nth 2 cell))))
+  (pcase-let* ((`(,_ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
+                                           (user-error "No cell at point")))
+               (text (clutch--format-value val)))
     (kill-new text)
     (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
 
