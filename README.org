@@ -1,4 +1,4 @@
-#+TITLE: data-lens — Interactive Database Client for Emacs
+#+TITLE: clutch — Interactive Database Client for Emacs
 #+AUTHOR: Lucius Chen
 
 * Overview
@@ -8,10 +8,10 @@ Supports MySQL (primary, daily-use) and PostgreSQL (compatible, less frequently 
 
 - =mysql.el= — pure Elisp MySQL wire protocol implementation (no external CLI needed)
 - =pg.el= — pure Elisp PostgreSQL wire protocol v3 implementation
-- =data-lens-db.el= — generic database interface (=cl-defgeneric= dispatch)
-- =data-lens-db-mysql.el= — MySQL backend adapter
-- =data-lens-db-pg.el= — PostgreSQL backend adapter
-- =data-lens.el= — interactive UI layer: column-paged result browser, record view, FK navigation, editing, transient menus, REPL
+- =clutch-db.el= — generic database interface (=cl-defgeneric= dispatch)
+- =clutch-db-mysql.el= — MySQL backend adapter
+- =clutch-db-pg.el= — PostgreSQL backend adapter
+- =clutch.el= — interactive UI layer: column-paged result browser, record view, FK navigation, editing, transient menus, REPL
 - =ob-mysql.el= — Org-Babel integration
 
 *Note:* MySQL is the primary backend — thoroughly tested and used daily.
@@ -44,7 +44,7 @@ PostgreSQL support is functional and compatible, but has not been tested as exte
 - Utilities: =pg-ping=, =pg-escape-identifier=, =pg-escape-literal=
 - Proper error signaling with structured error types
 
-** Interactive UI (data-lens.el)
+** Interactive UI (clutch.el)
 
 - Column-paged result display (no horizontal scrolling)
 - SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
@@ -73,8 +73,8 @@ PostgreSQL support is functional and compatible, but has not been tested as exte
 Clone this repository and add it to your =load-path=:
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "~/repos/data-lens")
-(require 'data-lens)
+(add-to-list 'load-path "~/repos/clutch")
+(require 'clutch)
 #+end_src
 
 * Protocol Layer Usage (mysql.el)
@@ -208,10 +208,10 @@ Clone this repository and add it to your =load-path=:
 *** 1. Configure connections
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "~/repos/data-lens")
-(require 'data-lens)
+(add-to-list 'load-path "~/repos/clutch")
+(require 'clutch)
 
-(setq data-lens-connection-alist
+(setq clutch-connection-alist
       '(("dev-mysql" . (:host "127.0.0.1" :port 3306
                          :user "root" :password "test"
                          :database "mydb"))
@@ -226,7 +226,7 @@ MySQL is the default backend. Add =:backend pg= for PostgreSQL connections.
 *** 2. Open a SQL editing buffer
 
 #+begin_src
-M-x data-lens-mode
+M-x clutch-mode
 #+end_src
 
 *** 3. Connect to the database
@@ -244,7 +244,7 @@ SELECT * FROM users LIMIT 10;
 
 Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appear in a split result buffer below.
 
-** SQL Editing (data-lens-mode) Key Bindings
+** SQL Editing (clutch-mode) Key Bindings
 
 | Key         | Action                     |
 |-------------+----------------------------|
@@ -258,7 +258,7 @@ Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appe
 | =C-c C-o=   | Transient menu             |
 | =TAB=       | Complete table/column name |
 
-** Result Browser (data-lens-result-mode) Key Bindings
+** Result Browser (clutch-result-mode) Key Bindings
 
 | Key            | Action                                        |
 |----------------+-----------------------------------------------|
@@ -291,7 +291,7 @@ Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appe
 | =F=            | Toggle fullscreen                             |
 | =?=            | Transient menu                                |
 
-** Record View (data-lens-record-mode) Key Bindings
+** Record View (clutch-record-mode) Key Bindings
 
 | Key         | Action                        |
 |-------------+-------------------------------|
@@ -353,7 +353,7 @@ Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appe
 ** REPL Mode
 
 #+begin_src
-M-x data-lens-repl          ;; Open REPL buffer
+M-x clutch-repl          ;; Open REPL buffer
 C-c C-e                     ;; Connect to database
 mysql> SELECT * FROM users;  ;; Type SQL, auto-executes on ;
                              ;; Multi-line input supported (continuation prompt ->)
@@ -374,7 +374,7 @@ g                            ;; Refresh
 
 Requires the =transient= package (built-in since Emacs 28.1).
 
-Press =C-c C-o= in data-lens-mode or =?= in the result buffer to open the menu.
+Press =C-c C-o= in clutch-mode or =?= in the result buffer to open the menu.
 
 ** Org-Babel Integration
 

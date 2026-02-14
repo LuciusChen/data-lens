@@ -1,4 +1,4 @@
-# data-lens Development Guide
+# clutch Development Guide
 
 Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/marginalia.
 
@@ -11,16 +11,16 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Architecture
 
-- **Interface / Implementation separation**: `mysql.el` and `pg.el` (protocol layers) are pure libraries with no UI; `data-lens.el` (UI layer) depends on `data-lens-db.el` (generic interface) but never on protocol layers directly. Keep the dependency flow strictly one-directional.
+- **Interface / Implementation separation**: `mysql.el` and `pg.el` (protocol layers) are pure libraries with no UI; `clutch.el` (UI layer) depends on `clutch-db.el` (generic interface) but never on protocol layers directly. Keep the dependency flow strictly one-directional.
 - **Single responsibility per file**: Each file has one job. Don't mix protocol code with rendering code.
 - **No side effects on load**: Loading a file should not alter Emacs behavior. All behavior activation must be explicit (user calls a command or enables a mode).
 - **Reuse Emacs infrastructure**: Use `completing-read` (not framework-specific APIs), `special-mode` for read-only buffers, `text-property-search-forward` for navigation, standard hooks, etc.
 
 ## Naming
 
-- **Public API**: `data-lens-` prefix for UI layer, `mysql-` / `pg-` prefix for protocol layers. No double dash for public symbols.
-- **Internal/private**: `data-lens--`, `mysql--`, or `pg--` double-dash prefix. Never call from outside the defining file.
-- **Predicates**: multi-word names end in `-p` (e.g., `data-lens--connection-alive-p`).
+- **Public API**: `clutch-` prefix for UI layer, `mysql-` / `pg-` prefix for protocol layers. No double dash for public symbols.
+- **Internal/private**: `clutch--`, `mysql--`, or `pg--` double-dash prefix. Never call from outside the defining file.
+- **Predicates**: multi-word names end in `-p` (e.g., `clutch--connection-alive-p`).
 - **Unused args**: prefix with `_` (e.g., `(_ridx)`).
 
 ## Control Flow
@@ -45,14 +45,14 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Mode Definitions
 
-- Derive read-only UI buffers from `special-mode` (`data-lens-result-mode`, `data-lens-record-mode`, `data-lens-schema-mode`).
-- Derive editing modes from appropriate parents (`sql-mode` for `data-lens-mode`, `comint-mode` for `data-lens-repl-mode`).
+- Derive read-only UI buffers from `special-mode` (`clutch-result-mode`, `clutch-record-mode`, `clutch-schema-mode`).
+- Derive editing modes from appropriate parents (`sql-mode` for `clutch-mode`, `comint-mode` for `clutch-repl-mode`).
 - `define-derived-mode` auto-creates `-map`, `-hook`, and `-syntax-table`. Use them.
 - Register buffer-local hooks in the mode body (e.g., `post-command-hook`, `completion-at-point-functions`) with the LOCAL arg `t`.
 
 ## Rendering
 
-- **Text properties** for data-bearing annotations (`data-lens-row-idx`, `data-lens-col-idx`, `data-lens-full-value`, `data-lens-header-col`). They are fast (interval tree) and travel with the text.
+- **Text properties** for data-bearing annotations (`clutch-row-idx`, `clutch-col-idx`, `clutch-full-value`, `clutch-header-col`). They are fast (interval tree) and travel with the text.
 - **Overlays** only for ephemeral visual effects that should not be part of the text (e.g., header active-column highlight). Keep overlay count minimal (O(n) lookup).
 - Build buffer content from scratch via `erase-buffer` + `insert` (magit-section pattern). Never parse buffer text to extract data — always read from the cached data structures (`--result-rows`, `--result-columns`).
 
@@ -71,13 +71,13 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Autoloads
 
-- `;;;###autoload` only on: interactive commands (`data-lens-mode`, `data-lens-repl`, `data-lens-execute`, `data-lens-dispatch`), `auto-mode-alist` entries.
+- `;;;###autoload` only on: interactive commands (`clutch-mode`, `clutch-repl`, `clutch-execute`, `clutch-dispatch`), `auto-mode-alist` entries.
 - Never autoload internal functions, defcustom, or defvar.
 - Use `declare-function` for functions from optional dependencies to silence byte-compiler.
 
 ## Quality Checks
 
 Before releasing, ensure:
-- `(byte-compile-file "data-lens.el")` produces no warnings.
+- `(byte-compile-file "clutch.el")` produces no warnings.
 - All public functions have docstrings.
 - Every file starts with `;;; -*- lexical-binding: t; -*-` and ends with `(provide 'pkg)` / `;;; pkg.el ends here`.

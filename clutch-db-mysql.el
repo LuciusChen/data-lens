@@ -1,35 +1,35 @@
-;;; data-lens-db-mysql.el --- MySQL backend for data-lens-db -*- lexical-binding: t; -*-
+;;; clutch-db-mysql.el --- MySQL backend for clutch-db -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 Free Software Foundation, Inc.
 
-;; This file is part of data-lens.
+;; This file is part of clutch.
 
-;; data-lens is free software: you can redistribute it and/or modify
+;; clutch is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
 ;; the Free Software Foundation, either version 3 of the License, or
 ;; (at your option) any later version.
 
-;; data-lens is distributed in the hope that it will be useful,
+;; clutch is distributed in the hope that it will be useful,
 ;; but WITHOUT ANY WARRANTY; without even the implied warranty of
 ;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ;; GNU General Public License for more details.
 
 ;; You should have received a copy of the GNU General Public License
-;; along with data-lens.  If not, see <https://www.gnu.org/licenses/>.
+;; along with clutch.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
-;; MySQL backend for the data-lens generic database interface.
-;; Implements all `data-lens-db-*' generics by dispatching on `mysql-conn'.
+;; MySQL backend for the clutch generic database interface.
+;; Implements all `clutch-db-*' generics by dispatching on `mysql-conn'.
 
 ;;; Code:
 
-(require 'data-lens-db)
+(require 'clutch-db)
 (require 'mysql)
 
 ;;;; Type-category mapping
 
-(defconst data-lens-db-mysql-type-category-alist
+(defconst clutch-db-mysql-type-category-alist
   `((,mysql-type-decimal    . numeric)
     (,mysql-type-tiny       . numeric)
     (,mysql-type-short      . numeric)
@@ -51,26 +51,26 @@
     (,mysql-type-timestamp  . datetime))
   "Alist mapping MySQL type codes to type-category symbols.")
 
-(defun data-lens-db-mysql-type-category (mysql-type)
+(defun clutch-db-mysql-type-category (mysql-type)
   "Map a MySQL type code MYSQL-TYPE to a type-category symbol."
-  (or (alist-get mysql-type data-lens-db-mysql-type-category-alist)
+  (or (alist-get mysql-type clutch-db-mysql-type-category-alist)
       'text))
 
-(defun data-lens-db-mysql--convert-columns (mysql-columns)
-  "Convert MySQL column plists to data-lens-db column plists.
+(defun clutch-db-mysql--convert-columns (mysql-columns)
+  "Convert MySQL column plists to clutch-db column plists.
 Each output plist has :name and :type-category."
   (mapcar (lambda (col)
             (list :name (plist-get col :name)
-                  :type-category (data-lens-db-mysql-type-category
+                  :type-category (clutch-db-mysql-type-category
                                   (plist-get col :type))))
           mysql-columns))
 
-(defun data-lens-db-mysql--wrap-result (mysql-result)
-  "Convert a `mysql-result' to a `data-lens-db-result'."
+(defun clutch-db-mysql--wrap-result (mysql-result)
+  "Convert a `mysql-result' to a `clutch-db-result'."
   (let ((cols (mysql-result-columns mysql-result)))
-    (make-data-lens-db-result
+    (make-clutch-db-result
      :connection (mysql-result-connection mysql-result)
-     :columns (when cols (data-lens-db-mysql--convert-columns cols))
+     :columns (when cols (clutch-db-mysql--convert-columns cols))
      :rows (mysql-result-rows mysql-result)
      :affected-rows (mysql-result-affected-rows mysql-result)
      :last-insert-id (mysql-result-last-insert-id mysql-result)
@@ -78,7 +78,7 @@ Each output plist has :name and :type-category."
 
 ;;;; Connect function
 
-(defun data-lens-db-mysql-connect (params)
+(defun clutch-db-mysql-connect (params)
   "Connect to MySQL using PARAMS plist.
 PARAMS keys: :host, :port, :user, :password, :database, :tls."
   (condition-case err
@@ -87,42 +87,42 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls."
                       unless (memq k '(:sql-product :backend))
                       append (list k v)))
     (mysql-error
-     (signal 'data-lens-db-error
+     (signal 'clutch-db-error
              (list (error-message-string err))))))
 
 ;;;; Lifecycle methods
 
-(cl-defmethod data-lens-db-disconnect ((conn mysql-conn))
+(cl-defmethod clutch-db-disconnect ((conn mysql-conn))
   "Disconnect MySQL CONN."
   (condition-case nil
       (mysql-disconnect conn)
     (mysql-error nil)))
 
-(cl-defmethod data-lens-db-live-p ((conn mysql-conn))
+(cl-defmethod clutch-db-live-p ((conn mysql-conn))
   "Return non-nil if MySQL CONN is live."
   (and conn
        (mysql-conn-p conn)
        (process-live-p (mysql-conn-process conn))))
 
-(cl-defmethod data-lens-db-init-connection ((conn mysql-conn))
+(cl-defmethod clutch-db-init-connection ((conn mysql-conn))
   "Initialize MySQL CONN with utf8mb4."
   (condition-case err
       (mysql-query conn "SET NAMES utf8mb4")
     (mysql-error
-     (signal 'data-lens-db-error
+     (signal 'clutch-db-error
              (list (format "Init failed: %s" (error-message-string err)))))))
 
 ;;;; Query methods
 
-(cl-defmethod data-lens-db-query ((conn mysql-conn) sql)
-  "Execute SQL on MySQL CONN, returning a `data-lens-db-result'."
+(cl-defmethod clutch-db-query ((conn mysql-conn) sql)
+  "Execute SQL on MySQL CONN, returning a `clutch-db-result'."
   (condition-case err
-      (data-lens-db-mysql--wrap-result (mysql-query conn sql))
+      (clutch-db-mysql--wrap-result (mysql-query conn sql))
     (mysql-error
-     (signal 'data-lens-db-error
+     (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod data-lens-db-build-paged-sql ((_conn mysql-conn) base-sql
+(cl-defmethod clutch-db-build-paged-sql ((_conn mysql-conn) base-sql
                                              page-num page-size
                                              &optional order-by)
   "Build a paginated SQL query for MySQL.
@@ -142,26 +142,26 @@ Wraps BASE-SQL with LIMIT/OFFSET.  ORDER-BY is (COL . DIR) or nil."
 
 ;;;; SQL dialect methods
 
-(cl-defmethod data-lens-db-escape-identifier ((_conn mysql-conn) name)
+(cl-defmethod clutch-db-escape-identifier ((_conn mysql-conn) name)
   "Escape NAME as a MySQL identifier (backtick-quoted)."
   (mysql-escape-identifier name))
 
-(cl-defmethod data-lens-db-escape-literal ((_conn mysql-conn) value)
+(cl-defmethod clutch-db-escape-literal ((_conn mysql-conn) value)
   "Escape VALUE as a MySQL string literal."
   (mysql-escape-literal value))
 
 ;;;; Schema methods
 
-(cl-defmethod data-lens-db-list-tables ((conn mysql-conn))
+(cl-defmethod clutch-db-list-tables ((conn mysql-conn))
   "Return table names for the current MySQL database."
   (condition-case err
       (let ((result (mysql-query conn "SHOW TABLES")))
         (mapcar #'car (mysql-result-rows result)))
     (mysql-error
-     (signal 'data-lens-db-error
+     (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod data-lens-db-list-columns ((conn mysql-conn) table)
+(cl-defmethod clutch-db-list-columns ((conn mysql-conn) table)
   "Return column names for TABLE on MySQL CONN."
   (condition-case err
       (let ((result (mysql-query
@@ -170,10 +170,10 @@ Wraps BASE-SQL with LIMIT/OFFSET.  ORDER-BY is (COL . DIR) or nil."
                              (mysql-escape-identifier table)))))
         (mapcar #'car (mysql-result-rows result)))
     (mysql-error
-     (signal 'data-lens-db-error
+     (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod data-lens-db-show-create-table ((conn mysql-conn) table)
+(cl-defmethod clutch-db-show-create-table ((conn mysql-conn) table)
   "Return DDL for TABLE on MySQL CONN."
   (condition-case err
       (let* ((result (mysql-query
@@ -183,10 +183,10 @@ Wraps BASE-SQL with LIMIT/OFFSET.  ORDER-BY is (COL . DIR) or nil."
              (rows (mysql-result-rows result)))
         (nth 1 (car rows)))
     (mysql-error
-     (signal 'data-lens-db-error
+     (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod data-lens-db-primary-key-columns ((conn mysql-conn) table)
+(cl-defmethod clutch-db-primary-key-columns ((conn mysql-conn) table)
   "Return primary key column names for TABLE on MySQL CONN."
   (condition-case _err
       (let* ((result (mysql-query
@@ -200,7 +200,7 @@ Wraps BASE-SQL with LIMIT/OFFSET.  ORDER-BY is (COL . DIR) or nil."
                 rows))
     (mysql-error nil)))
 
-(cl-defmethod data-lens-db-foreign-keys ((conn mysql-conn) table)
+(cl-defmethod clutch-db-foreign-keys ((conn mysql-conn) table)
   "Return foreign key info for TABLE on MySQL CONN.
 Returns alist of (COL-NAME . (:ref-table T :ref-column C))."
   (condition-case _err
@@ -221,7 +221,7 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
 
 ;;;; Column details
 
-(cl-defmethod data-lens-db-column-details ((conn mysql-conn) table)
+(cl-defmethod clutch-db-column-details ((conn mysql-conn) table)
   "Return detailed column info for TABLE on MySQL CONN."
   (condition-case _err
       (let* ((col-result (mysql-query
@@ -229,8 +229,8 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
                           (format "SHOW COLUMNS FROM %s"
                                   (mysql-escape-identifier table))))
              (col-rows (mysql-result-rows col-result))
-             (pk-cols (data-lens-db-primary-key-columns conn table))
-             (fks (data-lens-db-foreign-keys conn table)))
+             (pk-cols (clutch-db-primary-key-columns conn table))
+             (fks (clutch-db-foreign-keys conn table)))
         (mapcar
          (lambda (row)
            (let* ((name (nth 0 row))
@@ -246,31 +246,31 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
 
 ;;;; Re-entrancy guard
 
-(cl-defmethod data-lens-db-busy-p ((conn mysql-conn))
+(cl-defmethod clutch-db-busy-p ((conn mysql-conn))
   "Return non-nil if MySQL CONN is executing a query."
   (mysql-conn-busy conn))
 
 ;;;; Metadata methods
 
-(cl-defmethod data-lens-db-user ((conn mysql-conn))
+(cl-defmethod clutch-db-user ((conn mysql-conn))
   "Return the user for MySQL CONN."
   (mysql-conn-user conn))
 
-(cl-defmethod data-lens-db-host ((conn mysql-conn))
+(cl-defmethod clutch-db-host ((conn mysql-conn))
   "Return the host for MySQL CONN."
   (mysql-conn-host conn))
 
-(cl-defmethod data-lens-db-port ((conn mysql-conn))
+(cl-defmethod clutch-db-port ((conn mysql-conn))
   "Return the port for MySQL CONN."
   (mysql-conn-port conn))
 
-(cl-defmethod data-lens-db-database ((conn mysql-conn))
+(cl-defmethod clutch-db-database ((conn mysql-conn))
   "Return the database for MySQL CONN."
   (mysql-conn-database conn))
 
-(cl-defmethod data-lens-db-display-name ((_conn mysql-conn))
+(cl-defmethod clutch-db-display-name ((_conn mysql-conn))
   "Return \"MySQL\" as the display name."
   "MySQL")
 
-(provide 'data-lens-db-mysql)
-;;; data-lens-db-mysql.el ends here
+(provide 'clutch-db-mysql)
+;;; clutch-db-mysql.el ends here

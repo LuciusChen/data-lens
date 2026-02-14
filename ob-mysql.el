@@ -33,7 +33,7 @@
 ;;   #+end_src
 ;;
 ;; Header arguments:
-;;   :connection  — name from `data-lens-connection-alist'
+;;   :connection  — name from `clutch-connection-alist'
 ;;   :host :port :user :password :database — inline connection params
 ;;
 ;; Setup:
@@ -47,7 +47,7 @@
 (require 'ob)
 (require 'mysql)
 
-(defvar data-lens-connection-alist)
+(defvar clutch-connection-alist)
 
 (defvar org-babel-default-header-args:mysql '((:results . "table"))
   "Default header arguments for MySQL source blocks.")
@@ -61,7 +61,7 @@ PARAMS is the Babel params alist."
   (let* ((conn-name (cdr (assq :connection params)))
          (conn-params
           (if conn-name
-              (or (cdr (assoc conn-name data-lens-connection-alist))
+              (or (cdr (assoc conn-name clutch-connection-alist))
                   (user-error "Unknown connection: %s" conn-name))
             (let ((host (or (cdr (assq :host params)) "127.0.0.1"))
                   (port (or (cdr (assq :port params)) 3306))
