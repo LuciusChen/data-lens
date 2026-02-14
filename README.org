@@ -33,6 +33,17 @@ PostgreSQL support is functional and compatible, but has not been tested as exte
 - Extensible type parsing via =mysql-type-parsers=
 - Proper error signaling with structured error types
 
+** Protocol Layer (pg.el)
+
+- Pure Elisp — no =libpq= or external CLI needed
+- PostgreSQL wire protocol v3
+- SCRAM-SHA-256 (SASL) and MD5 authentication
+- TLS/SSL support via Emacs built-in GnuTLS
+- OID-based type parsing (int, float, numeric, bool, date/time, json/jsonb, bytea)
+- Convenience macros: =with-pg-connection=, =with-pg-transaction=
+- Utilities: =pg-ping=, =pg-escape-identifier=, =pg-escape-literal=
+- Proper error signaling with structured error types
+
 ** Interactive UI (data-lens.el)
 
 - Column-paged result display (no horizontal scrolling)
