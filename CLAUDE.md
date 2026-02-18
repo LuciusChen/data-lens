@@ -27,7 +27,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 - Avoid deep `let` → `if` → `let` chains. Favor flat, linear control flow using `if-let*`, `when-let*`, or similar constructs whenever possible.
 - Use `pcase`/`pcase-let` for structured destructuring instead of nested `car`/`cdr`/`nth`.
-- Prefer `cl-loop` over manual `dolist` + accumulator when building lists with complex iteration logic.
+- Prefer `cl-loop` over manual `dolist` + accumulator, or `cl-reduce`, when building lists with complex iteration logic. `cl-reduce` is acceptable for simple single-operation folds (e.g., summing a list), but `cl-loop` is clearer when the logic involves multiple steps, conditionals, or accumulating into a non-trivial structure.
 
 ## Error Handling
 
