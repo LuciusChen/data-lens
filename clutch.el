@@ -71,6 +71,11 @@
   "Face for table borders (pipes and separators)."
   :group 'clutch)
 
+(defface clutch-col-page-face
+  '((t :inherit warning :weight bold))
+  "Face for column-page scroll indicators (◂ and ▸) at table edges."
+  :group 'clutch)
+
 (defface clutch-null-face
   '((t :inherit shadow :slant italic))
   "Face for NULL values."
@@ -560,14 +565,14 @@ When HAS-NEXT is non-nil, replace the last border char with `▸'."
   (when has-prev
     (let ((c (aref str 0)))
       (when (memq c '(?│ ?┌ ?├ ?└ ?┬ ?┼ ?┴))
-        (setq str (concat (propertize "◂" 'face 'clutch-border-face)
+        (setq str (concat (propertize "◂" 'face 'clutch-col-page-face)
                           (substring str 1))))))
   (when has-next
     (let* ((len (length str))
            (c (aref str (1- len))))
       (when (memq c '(?│ ?┐ ?┤ ?┘))
         (setq str (concat (substring str 0 (1- len))
-                           (propertize "▸" 'face 'clutch-border-face))))))
+                           (propertize "▸" 'face 'clutch-col-page-face))))))
   str)
 
 (defun clutch--render-separator (visible-cols widths &optional position)
