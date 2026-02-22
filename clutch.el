@@ -1514,7 +1514,7 @@ when completion triggers during an in-flight query)."
     map)
   "Keymap for `clutch-schema-mode'.")
 
-(define-derived-mode clutch-schema-mode special-mode "DB-Schema"
+(define-derived-mode clutch-schema-mode special-mode "Clutch-Schema"
   "Mode for browsing database schema.
 
 \\<clutch-schema-mode-map>
@@ -1706,7 +1706,7 @@ If EXPANDED-P, also insert column detail lines using CONN."
   "Keymap for `clutch-mode'.")
 
 ;;;###autoload
-(define-derived-mode clutch-mode sql-mode "DataLens"
+(define-derived-mode clutch-mode sql-mode "Clutch"
   "Major mode for editing and executing SQL queries.
 
 \\<clutch-mode-map>
@@ -1823,8 +1823,10 @@ Preserves the window scroll position relative to the target row."
     (define-key map "g" #'clutch-result-rerun)
     (define-key map "e" #'clutch-result-export)
     (define-key map "c" #'clutch-result-goto-column)
-    (define-key map "n" #'clutch-result-next-page)
-    (define-key map "p" #'clutch-result-prev-page)
+    (define-key map "n" #'clutch-result-down-cell)
+    (define-key map "p" #'clutch-result-up-cell)
+    (define-key map "N" #'clutch-result-next-page)
+    (define-key map "P" #'clutch-result-prev-page)
     (define-key map (kbd "M->") #'clutch-result-last-page)
     (define-key map (kbd "M-<") #'clutch-result-first-page)
     (define-key map "#" #'clutch-result-count-total)
@@ -1848,6 +1850,7 @@ Preserves the window scroll position relative to the target row."
     (define-key map (kbd "<backtab>") #'clutch-result-prev-cell)
     (define-key map (kbd "M-n") #'clutch-result-down-cell)
     (define-key map (kbd "M-p") #'clutch-result-up-cell)
+    ;; n/p are down/up cell (special-mode convention); M-n/M-p are aliases
     ;; Row marking
     (define-key map "m" #'clutch-result-toggle-mark)
     (define-key map "u" #'clutch-result-unmark-row)
@@ -1937,7 +1940,7 @@ Rebuilds `header-line-format' with the active column highlighted."
                          visible-cols widths nw
                          has-prev has-next cidx))))))))
 
-(define-derived-mode clutch-result-mode special-mode "DB-Result"
+(define-derived-mode clutch-result-mode special-mode "Clutch-Result"
   "Mode for displaying database query results with SQL pagination.
 
 \\<clutch-result-mode-map>
@@ -1955,6 +1958,9 @@ Mark:
 Pages:
   \\[clutch-result-next-page]	Next data page
   \\[clutch-result-prev-page]	Previous data page
+Navigate (row):
+  \\[clutch-result-down-cell]	Next row (same column)
+  \\[clutch-result-up-cell]	Previous row (same column)
   \\[clutch-result-first-page]	First data page
   \\[clutch-result-last-page]	Last data page
   \\[clutch-result-count-total]	Query total row count
@@ -2852,7 +2858,7 @@ previous window layout."
     map)
   "Keymap for `clutch-record-mode'.")
 
-(define-derived-mode clutch-record-mode special-mode "DB-Record"
+(define-derived-mode clutch-record-mode special-mode "Clutch-Record"
   "Mode for displaying a single database row in detail.
 
 \\<clutch-record-mode-map>
@@ -2866,15 +2872,16 @@ previous window layout."
   (setq truncate-lines nil))
 
 (defun clutch-result-open-record ()
-  "Open a Record buffer showing the row at point."
+  "Open the Record buffer showing the row at point.
+Reuses a single *clutch-record* buffer, updating it in place."
   (interactive)
   (let* ((ridx (or (clutch-result--row-idx-at-line)
-                    (user-error "No row at point")))
+                   (user-error "No row at point")))
          (result-buf (current-buffer))
-         (buf-name (format "*clutch-record: row %d*" ridx))
-         (buf (get-buffer-create buf-name)))
+         (buf (get-buffer-create "*clutch-record*")))
     (with-current-buffer buf
-      (clutch-record-mode)
+      (unless (eq major-mode 'clutch-record-mode)
+        (clutch-record-mode))
       (setq-local clutch-record--result-buffer result-buf)
       (setq-local clutch-record--row-idx ridx)
       (setq-local clutch-record--expanded-fields nil)
@@ -3069,7 +3076,7 @@ MAX-NAME-W is the label column width."
 (defvar-local clutch-repl--pending-input ""
   "Accumulated partial SQL input waiting for a semicolon.")
 
-(define-derived-mode clutch-repl-mode comint-mode "DB-REPL"
+(define-derived-mode clutch-repl-mode comint-mode "Clutch-REPL"
   "Major mode for database REPL.
 
 \\<clutch-repl-mode-map>
@@ -3184,8 +3191,8 @@ Accumulates input until a semicolon is found, then executes."
   [["Navigate"
     ("TAB" "Next cell"     clutch-result-next-cell)
     ("<backtab>" "Prev cell" clutch-result-prev-cell)
-    ("M-n" "Down cell"     clutch-result-down-cell)
-    ("M-p" "Up cell"       clutch-result-up-cell)
+    ("n" "Down row"        clutch-result-down-cell)
+    ("p" "Up row"          clutch-result-up-cell)
     ("RET" "Open record"   clutch-result-open-record)
     ("c" "Go to column"    clutch-result-goto-column)]
    ["Mark"
@@ -3193,8 +3200,8 @@ Accumulates input until a semicolon is found, then executes."
     ("u" "Unmark row"      clutch-result-unmark-row)
     ("U" "Unmark all"      clutch-result-unmark-all)]
    ["Pages"
-    ("n" "Next page"       clutch-result-next-page)
-    ("p" "Prev page"       clutch-result-prev-page)
+    ("N" "Next page"       clutch-result-next-page)
+    ("P" "Prev page"       clutch-result-prev-page)
     ("M-<" "First page"    clutch-result-first-page)
     ("M->" "Last page"     clutch-result-last-page)
     ("#" "Count total"     clutch-result-count-total)
