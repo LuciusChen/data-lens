@@ -2016,6 +2016,51 @@ Triggers a COUNT(*) query if total rows are not yet known."
           (user-error "Already on last page")
         (clutch--execute-page (truncate last-page))))))
 
+(defun clutch--sql-find-top-level-clause (sql pattern &optional start)
+  "Return the start position of PATTERN at parenthesis depth 0 in SQL.
+PATTERN is matched case-insensitively with word boundaries.  START
+defaults to 0.  Returns nil if not found."
+  (let ((pos (or start 0))
+        (depth 0)
+        (len (length sql))
+        (case-fold-search t)
+        (re (format "\\b%s\\b" pattern))
+        found)
+    (while (and (< pos len) (not found))
+      (let ((ch (aref sql pos)))
+        (cond
+         ((= ch ?\() (cl-incf depth) (cl-incf pos))
+         ((= ch ?\)) (cl-decf depth) (cl-incf pos))
+         ((and (= depth 0)
+               (string-match re sql pos)
+               (= (match-beginning 0) pos))
+          (setq found pos))
+         (t (cl-incf pos)))))
+    found))
+
+(defun clutch--build-count-sql (sql)
+  "Rewrite SQL as a COUNT(*) query.
+For SELECT queries without GROUP BY or HAVING, replaces the SELECT
+column list with COUNT(*) to avoid duplicate-column-name errors in
+derived tables.  Falls back to subquery wrapping otherwise."
+  (let* ((stripped (clutch--strip-leading-comments sql))
+         (trimmed (string-trim-right
+                   (replace-regexp-in-string ";\\s-*\\'" "" stripped)))
+         (case-fold-search t)
+         (from-pos (and (string-match-p "\\`\\s-*SELECT\\b" trimmed)
+                        (clutch--sql-find-top-level-clause trimmed "FROM"))))
+    (if (and from-pos
+             (not (clutch--sql-find-top-level-clause trimmed "GROUP\\s-+BY" from-pos))
+             (not (clutch--sql-find-top-level-clause trimmed "HAVING" from-pos)))
+        (let* ((from-onwards (substring trimmed from-pos))
+               (cut-pos (or (clutch--sql-find-top-level-clause from-onwards "ORDER\\s-+BY")
+                            (clutch--sql-find-top-level-clause from-onwards "LIMIT"))))
+          (format "SELECT COUNT(*) %s"
+                  (if cut-pos
+                      (string-trim-right (substring from-onwards 0 cut-pos))
+                    from-onwards)))
+      (format "SELECT COUNT(*) FROM (%s) AS _dl_cnt" trimmed))))
+
 (defun clutch-result-count-total ()
   "Query the total row count for the current base query."
   (interactive)
@@ -2023,9 +2068,7 @@ Triggers a COUNT(*) query if total rows are not yet known."
          (base (or clutch--base-query clutch--last-query)))
     (unless (clutch--connection-alive-p conn)
       (user-error "Not connected"))
-    (let* ((count-sql (format "SELECT COUNT(*) FROM (%s) AS _dl_cnt"
-                              (string-trim-right
-                               (replace-regexp-in-string ";\\s-*\\'" "" base))))
+    (let* ((count-sql (clutch--build-count-sql base))
            (result (condition-case err
                        (clutch-db-query conn count-sql)
                      (clutch-db-error
