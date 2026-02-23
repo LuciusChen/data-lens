@@ -366,6 +366,27 @@ Returns a live connection object or signals a `user-error'."
       (clutch-db-error
        (user-error "Connection failed: %s" (error-message-string err))))))
 
+(defun clutch--read-connection-params ()
+  "Prompt the user for connection parameters and return a params plist.
+Offers saved connections from `clutch-connection-alist' when non-empty,
+otherwise prompts for host/port/user/password/database individually.
+The password is resolved via `auth-source' before falling back to `read-passwd'."
+  (if clutch-connection-alist
+      (cdr (assoc (completing-read "Connection: "
+                                   (mapcar #'car clutch-connection-alist)
+                                   nil t)
+                  clutch-connection-alist))
+    (let* ((host          (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
+           (port          (read-number "Port (3306): " 3306))
+           (user          (read-string "User: "))
+           (manual-params (list :host host :port port :user user))
+           (pw            (or (clutch--resolve-password manual-params)
+                              (read-passwd "Password: ")))
+           (db            (read-string "Database (optional): ")))
+      (append manual-params
+              (list :password pw
+                    :database (unless (string-empty-p db) db))))))
+
 (defun clutch-connect ()
   "Connect to a database server interactively.
 If `clutch-connection-alist' is non-empty, offer saved connections via
@@ -376,24 +397,9 @@ params; see `clutch-connection-alist' for details."
   (when (clutch--connection-alive-p clutch-connection)
     (clutch-db-disconnect clutch-connection)
     (setq clutch-connection nil))
-  (let* ((conn-params
-          (if clutch-connection-alist
-              (cdr (assoc (completing-read "Connection: "
-                                          (mapcar #'car clutch-connection-alist)
-                                          nil t)
-                          clutch-connection-alist))
-            (let* ((host (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
-                   (port (read-number "Port (3306): " 3306))
-                   (user (read-string "User: "))
-                   (manual-params (list :host host :port port :user user))
-                   (pw (or (clutch--resolve-password manual-params)
-                           (read-passwd "Password: ")))
-                   (db (read-string "Database (optional): ")))
-              (append manual-params
-                      (list :password pw
-                            :database (unless (string-empty-p db) db))))))
-         (product (plist-get conn-params :sql-product))
-         (conn    (clutch--build-conn conn-params)))
+  (let* ((params  (clutch--read-connection-params))
+         (product (plist-get params :sql-product))
+         (conn    (clutch--build-conn params)))
     (setq clutch-connection conn)
     (setq clutch--conn-sql-product product)
     (clutch--update-mode-line)
@@ -2102,6 +2108,25 @@ when completion triggers during an in-flight query)."
                 (delete-dups all)))))
       (list beg end candidates :exclusive 'no))))
 
+(defun clutch--eldoc-schema-string (conn schema sym)
+  "Return an eldoc string for SYM via SCHEMA on CONN, or nil.
+Matches SYM as a table name first, then as a column in any visible table."
+  (cond
+   ((not (eq (gethash sym schema 'missing) 'missing))
+    (let* ((cols    (clutch--ensure-columns conn schema sym))
+           (n       (length cols))
+           (comment (clutch--ensure-table-comment conn sym)))
+      (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
+              (propertize sym 'face 'font-lock-type-face)
+              (propertize (format "  (%d col%s)" n (if (= n 1) "" "s")) 'face 'shadow)
+              (when comment
+                (propertize (format "  — %s" comment) 'face 'shadow)))))
+   (t
+    (cl-loop for tbl in (clutch--tables-in-buffer schema)
+             for cols = (clutch--ensure-columns conn schema tbl)
+             when (and cols (member sym cols))
+             return (clutch--eldoc-column-string conn tbl sym)))))
+
 (defun clutch--eldoc-function (&rest _)
   "Eldoc backend for `clutch-mode'.
 Returns a documentation string for the SQL identifier at point.
@@ -2109,32 +2134,15 @@ Schema-based info (tables, columns) requires an active connection.
 SQL keyword/function docs are shown even without a connection."
   (when-let* ((sym (thing-at-point 'symbol t)))
     (or
-     ;; Schema-based: table or column — requires live connection
      (when-let* ((schema (clutch--schema-for-connection))
                  (conn   clutch-connection)
                  ((not (clutch-db-busy-p conn))))
-       (cond
-        ((not (eq (gethash sym schema 'missing) 'missing))
-         (let* ((cols    (clutch--ensure-columns conn schema sym))
-                (n       (length cols))
-                (comment (clutch--ensure-table-comment conn sym)))
-           (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
-                   (propertize sym 'face 'font-lock-type-face)
-                   (propertize (format "  (%d col%s)" n (if (= n 1) "" "s")) 'face 'shadow)
-                   (when comment
-                     (propertize (format "  — %s" comment) 'face 'shadow)))))
-        (t
-         (cl-loop for tbl in (clutch--tables-in-buffer schema)
-                  for cols = (clutch--ensure-columns conn schema tbl)
-                  when (and cols (member sym cols))
-                  return (clutch--eldoc-column-string conn tbl sym)))))
-     ;; Live HELP from MySQL server — cached, MySQL-only
+       (clutch--eldoc-schema-string conn schema sym))
      (when-let* ((conn clutch-connection)
                  ((clutch--connection-alive-p conn))
                  ((not (clutch-db-busy-p conn)))
                  ((string= "MySQL" (clutch-db-display-name conn))))
        (clutch--ensure-help-doc conn sym))
-     ;; Keyword / built-in function — always available
      (clutch--eldoc-keyword-string sym))))
 
 ;;;; Schema browser
