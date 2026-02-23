@@ -1591,6 +1591,296 @@ Returns a string or nil."
     "GRANT" "REVOKE" "WITH" "RECURSIVE" "TEMPORARY" "TEMP")
   "SQL keywords for completion.")
 
+(defconst clutch--sql-function-docs
+  (let ((ht (make-hash-table :test 'equal :size 160)))
+    (dolist (entry
+             '(;; Aggregate
+               ("COUNT"        "COUNT(expr)"
+                "Non-NULL row count; COUNT(*) for all rows")
+               ("SUM"          "SUM(expr)"
+                "Sum of non-NULL values")
+               ("AVG"          "AVG(expr)"
+                "Average of non-NULL values")
+               ("MIN"          "MIN(expr)"
+                "Minimum non-NULL value")
+               ("MAX"          "MAX(expr)"
+                "Maximum non-NULL value")
+               ("GROUP_CONCAT" "GROUP_CONCAT([DISTINCT] expr [ORDER BY …] [SEPARATOR sep])"
+                "Aggregate strings into one  [MySQL]")
+               ("STRING_AGG"   "STRING_AGG(expr, sep [ORDER BY …])"
+                "Aggregate strings into one  [PG]")
+               ("ARRAY_AGG"    "ARRAY_AGG(expr [ORDER BY …])"
+                "Aggregate values into array  [PG]")
+               ("JSON_ARRAYAGG"  "JSON_ARRAYAGG(expr)"
+                "Aggregate values into JSON array  [MySQL 8+/PG]")
+               ("JSON_OBJECTAGG" "JSON_OBJECTAGG(key, val)"
+                "Aggregate key-value pairs into JSON object  [MySQL 8+/PG]")
+               ;; String
+               ("CONCAT"       "CONCAT(str1, str2, …)"
+                "Concatenate strings (NULL-safe variant: CONCAT_WS)  [MySQL]")
+               ("CONCAT_WS"    "CONCAT_WS(sep, str1, str2, …)"
+                "Concatenate with separator, skipping NULLs  [MySQL]")
+               ("SUBSTRING"    "SUBSTRING(str, pos [, len])"
+                "Extract substring; also SUBSTRING(str FROM pos FOR len)")
+               ("SUBSTR"       "SUBSTR(str, pos [, len])"
+                "Alias for SUBSTRING")
+               ("LEFT"         "LEFT(str, len)"
+                "Leftmost len characters")
+               ("RIGHT"        "RIGHT(str, len)"
+                "Rightmost len characters")
+               ("LENGTH"       "LENGTH(str)"
+                "Byte length  [MySQL]; character length in PG — use CHAR_LENGTH for characters")
+               ("CHAR_LENGTH"  "CHAR_LENGTH(str)"
+                "Number of characters in string")
+               ("UPPER"        "UPPER(str)"
+                "Convert string to uppercase")
+               ("LOWER"        "LOWER(str)"
+                "Convert string to lowercase")
+               ("TRIM"         "TRIM([[BOTH|LEADING|TRAILING] [remstr] FROM] str)"
+                "Remove leading/trailing characters (default: spaces)")
+               ("LTRIM"        "LTRIM(str)"
+                "Remove leading spaces")
+               ("RTRIM"        "RTRIM(str)"
+                "Remove trailing spaces")
+               ("REPLACE"      "REPLACE(str, from_str, to_str)"
+                "Replace all occurrences of from_str with to_str")
+               ("INSTR"        "INSTR(str, substr)"
+                "1-based position of first substr occurrence  [MySQL]")
+               ("POSITION"     "POSITION(substr IN str)"
+                "1-based position of first substr occurrence")
+               ("STRPOS"       "STRPOS(str, substr)"
+                "1-based position of first substr occurrence  [PG]")
+               ("LOCATE"       "LOCATE(substr, str [, pos])"
+                "Position of substr starting from pos  [MySQL]")
+               ("LPAD"         "LPAD(str, len [, padstr])"
+                "Left-pad string to length len")
+               ("RPAD"         "RPAD(str, len [, padstr])"
+                "Right-pad string to length len")
+               ("REPEAT"       "REPEAT(str, n)"
+                "Repeat string n times")
+               ("REVERSE"      "REVERSE(str)"
+                "Reverse a string")
+               ("SPLIT_PART"   "SPLIT_PART(str, delim, n)"
+                "n-th field after splitting on delim  [PG]")
+               ("REGEXP_REPLACE" "REGEXP_REPLACE(str, pattern, repl [, flags])"
+                "Replace regex matches in string")
+               ("REGEXP_LIKE"  "REGEXP_LIKE(str, pattern [, match_type])"
+                "TRUE if str matches regex pattern  [MySQL 8+]")
+               ("CHR"          "CHR(n)"
+                "Character from integer code point  [PG]")
+               ("ASCII"        "ASCII(str)"
+                "ASCII code of first character")
+               ("HEX"          "HEX(str_or_num)"
+                "Hexadecimal representation  [MySQL]")
+               ("UNHEX"        "UNHEX(hex_str)"
+                "Decode hex string to binary  [MySQL]")
+               ;; Date / time
+               ("NOW"          "NOW()"
+                "Current date and time")
+               ("CURRENT_TIMESTAMP" "CURRENT_TIMESTAMP"
+                "Current date and time")
+               ("CURDATE"      "CURDATE()"
+                "Current date  [MySQL]")
+               ("CURRENT_DATE" "CURRENT_DATE"
+                "Current date")
+               ("CURTIME"      "CURTIME()"
+                "Current time  [MySQL]")
+               ("DATE"         "DATE(expr)"
+                "Extract date part from datetime  [MySQL]")
+               ("TIME"         "TIME(expr)"
+                "Extract time part from datetime  [MySQL]")
+               ("DATE_FORMAT"  "DATE_FORMAT(date, format)"
+                "Format date using strftime-like format  [MySQL]")
+               ("TO_CHAR"      "TO_CHAR(val, fmt)"
+                "Format date or number as string  [PG]")
+               ("TO_DATE"      "TO_DATE(str, fmt)"
+                "Parse string to date  [PG]")
+               ("TO_TIMESTAMP" "TO_TIMESTAMP(str, fmt)"
+                "Parse string to timestamp  [PG]")
+               ("STR_TO_DATE"  "STR_TO_DATE(str, format)"
+                "Parse string to date/time  [MySQL]")
+               ("DATE_ADD"     "DATE_ADD(date, INTERVAL n unit)"
+                "Add interval to date  [MySQL]")
+               ("DATE_SUB"     "DATE_SUB(date, INTERVAL n unit)"
+                "Subtract interval from date  [MySQL]")
+               ("DATEDIFF"     "DATEDIFF(date1, date2)"
+                "Days between date1 and date2 (date1 − date2)  [MySQL]")
+               ("TIMESTAMPDIFF" "TIMESTAMPDIFF(unit, dt1, dt2)"
+                "Difference in unit between dt1 and dt2  [MySQL]")
+               ("EXTRACT"      "EXTRACT(unit FROM date)"
+                "Extract field: YEAR MONTH DAY HOUR MINUTE SECOND …")
+               ("YEAR"         "YEAR(date)"
+                "Year part of date (1000–9999)")
+               ("MONTH"        "MONTH(date)"
+                "Month part of date (1–12)")
+               ("DAY"          "DAY(date)"
+                "Day part of date (1–31)")
+               ("HOUR"         "HOUR(time)"
+                "Hour part (0–23)")
+               ("MINUTE"       "MINUTE(time)"
+                "Minute part (0–59)")
+               ("SECOND"       "SECOND(time)"
+                "Second part (0–59)")
+               ("UNIX_TIMESTAMP" "UNIX_TIMESTAMP([date])"
+                "Seconds since 1970-01-01 UTC  [MySQL]")
+               ("FROM_UNIXTIME" "FROM_UNIXTIME(ts [, format])"
+                "Convert Unix timestamp to datetime  [MySQL]")
+               ("CONVERT_TZ"   "CONVERT_TZ(dt, from_tz, to_tz)"
+                "Convert datetime between timezones  [MySQL]")
+               ("AGE"          "AGE(ts1 [, ts2])"
+                "Interval between timestamps  [PG]")
+               ;; Numeric
+               ("ABS"          "ABS(x)"
+                "Absolute value")
+               ("CEIL"         "CEIL(x)"
+                "Smallest integer ≥ x")
+               ("CEILING"      "CEILING(x)"
+                "Smallest integer ≥ x  [MySQL]")
+               ("FLOOR"        "FLOOR(x)"
+                "Largest integer ≤ x")
+               ("ROUND"        "ROUND(x [, d])"
+                "Round x to d decimal places (default 0)")
+               ("TRUNCATE"     "TRUNCATE(x, d)"
+                "Truncate x to d decimal places  [MySQL]")
+               ("TRUNC"        "TRUNC(x [, d])"
+                "Truncate x to d decimal places  [PG]")
+               ("MOD"          "MOD(x, y)"
+                "Remainder of x / y  (also: x % y)")
+               ("POWER"        "POWER(x, y)"
+                "x raised to the power y")
+               ("POW"          "POW(x, y)"
+                "x raised to the power y  [MySQL]")
+               ("SQRT"         "SQRT(x)"
+                "Square root of x")
+               ("EXP"          "EXP(x)"
+                "e raised to the power x")
+               ("LN"           "LN(x)"
+                "Natural logarithm of x")
+               ("LOG"          "LOG([base, ] x)"
+                "Logarithm of x (base e or specified base)")
+               ("LOG2"         "LOG2(x)"
+                "Base-2 logarithm  [MySQL]")
+               ("LOG10"        "LOG10(x)"
+                "Base-10 logarithm")
+               ("SIGN"         "SIGN(x)"
+                "-1, 0, or 1 depending on sign of x")
+               ("GREATEST"     "GREATEST(val1, val2, …)"
+                "Largest value among arguments")
+               ("LEAST"        "LEAST(val1, val2, …)"
+                "Smallest value among arguments")
+               ("RAND"         "RAND([seed])"
+                "Random float in [0, 1)  [MySQL]")
+               ("RANDOM"       "RANDOM()"
+                "Random float in [0, 1)  [PG]")
+               ("PI"           "PI()"
+                "Value of π (3.141593)")
+               ;; Conditional / null-handling
+               ("IF"           "IF(cond, true_val, false_val)"
+                "Return true_val if cond is true, else false_val  [MySQL]")
+               ("IFNULL"       "IFNULL(expr, alt)"
+                "Return alt if expr is NULL  [MySQL]")
+               ("NULLIF"       "NULLIF(expr1, expr2)"
+                "Return NULL if expr1 = expr2, else expr1")
+               ("COALESCE"     "COALESCE(val1, val2, …)"
+                "First non-NULL value in list")
+               ("NVL"          "NVL(expr, alt)"
+                "Return alt if expr is NULL  (Oracle-compatible)")
+               ;; Type conversion
+               ("CAST"         "CAST(expr AS type)"
+                "Explicit type conversion")
+               ("CONVERT"      "CONVERT(expr, type) or CONVERT(expr USING charset)"
+                "Convert type or character set  [MySQL]")
+               ;; Window functions
+               ("ROW_NUMBER"   "ROW_NUMBER() OVER (…)"
+                "Sequential row number within partition (no ties)")
+               ("RANK"         "RANK() OVER (…)"
+                "Rank with gaps on ties")
+               ("DENSE_RANK"   "DENSE_RANK() OVER (…)"
+                "Rank without gaps on ties")
+               ("NTILE"        "NTILE(n) OVER (…)"
+                "Divide rows into n ranked buckets")
+               ("PERCENT_RANK" "PERCENT_RANK() OVER (…)"
+                "Relative rank: (rank − 1) / (rows − 1)")
+               ("CUME_DIST"    "CUME_DIST() OVER (…)"
+                "Cumulative distribution of row within partition")
+               ("LAG"          "LAG(expr [, n [, default]]) OVER (…)"
+                "Value from n rows before current row")
+               ("LEAD"         "LEAD(expr [, n [, default]]) OVER (…)"
+                "Value from n rows after current row")
+               ("FIRST_VALUE"  "FIRST_VALUE(expr) OVER (…)"
+                "First value in window frame")
+               ("LAST_VALUE"   "LAST_VALUE(expr) OVER (…)"
+                "Last value in window frame")
+               ("NTH_VALUE"    "NTH_VALUE(expr, n) OVER (…)"
+                "n-th value in window frame  [PG/MySQL 8+]")
+               ;; JSON
+               ("JSON_EXTRACT" "JSON_EXTRACT(json, path)"
+                "Extract value at JSON path  [MySQL]  (also: json->>'$.key')")
+               ("JSON_UNQUOTE" "JSON_UNQUOTE(json_val)"
+                "Remove quoting from JSON string value  [MySQL]")
+               ("JSON_OBJECT"  "JSON_OBJECT(key, val, …)"
+                "Create JSON object  [MySQL]")
+               ("JSON_ARRAY"   "JSON_ARRAY(val, …)"
+                "Create JSON array  [MySQL]")
+               ("JSON_CONTAINS" "JSON_CONTAINS(target, candidate [, path])"
+                "TRUE if target contains candidate  [MySQL]")
+               ;; Misc / info
+               ("DATABASE"     "DATABASE()"
+                "Current database name  [MySQL]")
+               ("CURRENT_DATABASE" "CURRENT_DATABASE()"
+                "Current database name  [PG]")
+               ("USER"         "USER()"
+                "Current user as user@host  [MySQL]")
+               ("CURRENT_USER" "CURRENT_USER"
+                "Current authenticated user")
+               ("VERSION"      "VERSION()"
+                "Server version string")
+               ("LAST_INSERT_ID" "LAST_INSERT_ID([expr])"
+                "Auto-increment ID from last INSERT  [MySQL]")
+               ("ROW_COUNT"    "ROW_COUNT()"
+                "Rows affected by last DML statement  [MySQL]")
+               ("UUID"         "UUID()"
+                "Generate a version-1 UUID  [MySQL]")
+               ("SLEEP"        "SLEEP(n)"
+                "Sleep n seconds  [MySQL]")
+               ;; Clauses / keywords with syntax notes
+               ("EXPLAIN"      "EXPLAIN [ANALYZE] query"
+                "Show query execution plan")
+               ("BETWEEN"      "expr BETWEEN low AND high"
+                "Inclusive range test — equivalent to low ≤ expr ≤ high")
+               ("EXISTS"       "EXISTS (subquery)"
+                "TRUE if subquery returns at least one row")
+               ("LIKE"         "str LIKE pattern"
+                "Pattern match: % = any sequence, _ = exactly one character")
+               ("ILIKE"        "str ILIKE pattern"
+                "Case-insensitive pattern match  [PG]")
+               ("REGEXP"       "str REGEXP pattern"
+                "Regular expression match  [MySQL]")
+               ("RLIKE"        "str RLIKE pattern"
+                "Alias for REGEXP  [MySQL]")
+               ("OVER"         "OVER ([PARTITION BY …] [ORDER BY …] [ROWS|RANGE frame])"
+                "Window function clause")
+               ("PARTITION"    "PARTITION BY col1, col2, …"
+                "Divide rows into groups for window functions")
+               ("WITH"         "WITH name [(cols)] AS (subquery) SELECT …"
+                "Common Table Expression (CTE); prefix WITH RECURSIVE for recursive CTEs")
+               ("RETURNING"    "INSERT/UPDATE/DELETE … RETURNING col, …"
+                "Return values of modified rows  [PG]")))
+      (puthash (car entry)
+               (list :sig (cadr entry) :desc (caddr entry))
+               ht))
+    ht)
+  "Hash table mapping uppercase SQL function/keyword names to doc plists.
+Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
+
+(defun clutch--eldoc-keyword-string (sym)
+  "Return an eldoc string for SQL keyword/function SYM, or nil."
+  (when-let* ((doc (gethash (upcase sym) clutch--sql-function-docs))
+              (sig  (plist-get doc :sig))
+              (desc (plist-get doc :desc)))
+    (concat (propertize sig  'face 'font-lock-function-name-face)
+            (propertize (concat "  — " desc) 'face 'shadow))))
+
 (defun clutch-sql-keyword-completion-at-point ()
   "Completion-at-point function for SQL keywords.
 Works without a database connection."
@@ -1630,26 +1920,32 @@ when completion triggers during an in-flight query)."
 
 (defun clutch--eldoc-function (&rest _)
   "Eldoc backend for `clutch-mode'.
-Returns a documentation string for the SQL identifier at point."
-  (when-let* ((schema (clutch--schema-for-connection))
-              (conn clutch-connection)
-              ((not (clutch-db-busy-p conn)))
-              (sym (thing-at-point 'symbol t)))
-    (cond
-     ((not (eq (gethash sym schema 'missing) 'missing))
-      (let* ((cols    (clutch--ensure-columns conn schema sym))
-             (n       (length cols))
-             (comment (clutch--ensure-table-comment conn sym)))
-        (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
-                (propertize sym 'face 'font-lock-type-face)
-                (propertize (format "  (%d col%s)" n (if (= n 1) "" "s")) 'face 'shadow)
-                (when comment
-                  (propertize (format "  — %s" comment) 'face 'shadow)))))
-     (t
-      (cl-loop for tbl in (clutch--tables-in-buffer schema)
-               for cols = (clutch--ensure-columns conn schema tbl)
-               when (and cols (member sym cols))
-               return (clutch--eldoc-column-string conn tbl sym))))))
+Returns a documentation string for the SQL identifier at point.
+Schema-based info (tables, columns) requires an active connection.
+SQL keyword/function docs are shown even without a connection."
+  (when-let* ((sym (thing-at-point 'symbol t)))
+    (or
+     ;; Schema-based: table or column — requires live connection
+     (when-let* ((schema (clutch--schema-for-connection))
+                 (conn   clutch-connection)
+                 ((not (clutch-db-busy-p conn))))
+       (cond
+        ((not (eq (gethash sym schema 'missing) 'missing))
+         (let* ((cols    (clutch--ensure-columns conn schema sym))
+                (n       (length cols))
+                (comment (clutch--ensure-table-comment conn sym)))
+           (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
+                   (propertize sym 'face 'font-lock-type-face)
+                   (propertize (format "  (%d col%s)" n (if (= n 1) "" "s")) 'face 'shadow)
+                   (when comment
+                     (propertize (format "  — %s" comment) 'face 'shadow)))))
+        (t
+         (cl-loop for tbl in (clutch--tables-in-buffer schema)
+                  for cols = (clutch--ensure-columns conn schema tbl)
+                  when (and cols (member sym cols))
+                  return (clutch--eldoc-column-string conn tbl sym)))))
+     ;; Keyword / built-in function — always available
+     (clutch--eldoc-keyword-string sym))))
 
 ;;;; Schema browser
 
