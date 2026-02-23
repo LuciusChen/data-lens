@@ -262,26 +262,27 @@ pass insert mysql/127.0.0.1
 =auth-source-pass= searches for entries matching the host and user.
 See [[https://www.gnu.org/software/emacs/manual/html_node/auth/The-Unix-password-store.html][the auth-source manual]] for entry naming conventions.
 
-*** 2. Open a SQL editing buffer
+*** 2. Open a query console
 
 #+begin_src
-M-x clutch-mode
+M-x clutch-query-console   ;; Select a saved connection → opens *clutch: NAME*
+                            ;; and connects automatically
+                            ;; Mode-line shows MySQL[root@127.0.0.1:3306/mydb]
 #+end_src
 
-*** 3. Connect to the database
+Repeated calls with the same name switch to the existing buffer instead of
+opening a new one.  Use =clutch-switch-console= to jump between open consoles.
 
-#+begin_src
-C-c C-e                   ;; Select a connection via completing-read
-                          ;; Mode-line shows MySQL[root@127.0.0.1:3306/mydb]
-#+end_src
-
-*** 4. Write and execute SQL
+*** 3. Write and execute SQL
 
 #+begin_src sql
 SELECT * FROM users LIMIT 10;
 #+end_src
 
 Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appear in a split result buffer below.
+
+Alternatively, open a plain SQL editing buffer with =M-x clutch-mode= and
+connect manually with =C-c C-e=.
 
 ** SQL Editing (clutch-mode) Key Bindings
 
