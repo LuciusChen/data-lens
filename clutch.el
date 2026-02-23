@@ -1465,6 +1465,11 @@ as returned by `clutch-db-column-details'.")
   "Cache for table comments.  Keys are connection-key strings.
 Values are hash-tables mapping table-name → comment string or nil.")
 
+(defvar clutch--help-doc-cache (make-hash-table :test 'equal)
+  "Cache for live function docs fetched from the database server.
+Keys are connection-key strings.
+Values are hash-tables mapping UPCASE-NAME → doc plist or \\='not-found.")
+
 (defun clutch--refresh-schema-cache (conn)
   "Refresh schema cache for CONN.
 Only loads table names (fast).  Column info is loaded lazily."
@@ -1477,6 +1482,7 @@ Only loads table names (fast).  Column info is loaded lazily."
         (puthash key schema clutch--schema-cache)
         (remhash key clutch--column-details-cache)
         (remhash key clutch--table-comment-cache)
+        (remhash key clutch--help-doc-cache)
         (message "Connected — %d tables" (hash-table-count schema)))
     (clutch-db-error nil)))
 
@@ -1873,6 +1879,82 @@ Returns a string or nil."
   "Hash table mapping uppercase SQL function/keyword names to doc plists.
 Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
 
+;;;; Live function documentation via MySQL HELP
+
+(defun clutch--parse-mysql-help-text (text)
+  "Parse a MySQL HELP description TEXT into a (:sig SIG :desc DESC) plist.
+Returns nil if TEXT cannot be parsed (no Syntax: section)."
+  (let* ((lines (split-string text "\n"))
+         (pos   (cl-position-if (lambda (l) (string-match-p "\\`Syntax:" l))
+                                lines)))
+    (when pos
+      (let ((i (1+ pos)) sig desc)
+        ;; Skip blank lines immediately after the "Syntax:" header
+        (while (and (< i (length lines)) (string-empty-p (nth i lines)))
+          (cl-incf i))
+        ;; Collect signature lines (until first blank line)
+        (let (sig-lines)
+          (while (and (< i (length lines)) (not (string-empty-p (nth i lines))))
+            (push (string-trim (nth i lines)) sig-lines)
+            (cl-incf i))
+          (setq sig (string-join (nreverse sig-lines) " / ")))
+        ;; Skip blank separator between signature and description
+        (while (and (< i (length lines)) (string-empty-p (nth i lines)))
+          (cl-incf i))
+        ;; Collect first paragraph as description, stopping at URL: or blank line
+        (let (desc-lines)
+          (while (and (< i (length lines))
+                      (not (string-empty-p (nth i lines)))
+                      (not (string-prefix-p "URL:" (nth i lines))))
+            (push (nth i lines) desc-lines)
+            (cl-incf i))
+          (setq desc (string-join (nreverse desc-lines) " ")))
+        (when (and sig (not (string-empty-p sig)))
+          (list :sig sig :desc (or desc "")))))))
+
+(defun clutch--mysql-help-query (conn sym)
+  "Query MySQL HELP for SYM on CONN and return a doc plist or nil.
+Returns nil when the symbol is unrecognised or the query fails."
+  (condition-case nil
+      (let* ((result  (clutch-db-query conn (format "HELP '%s'" (upcase sym))))
+             (columns (clutch-db-result-columns result))
+             (rows    (clutch-db-result-rows result)))
+        ;; A single-topic HELP result has 3 columns: name, description, example.
+        ;; A list result has 2 columns: name, is_it_category.
+        ;; An empty result means nothing was found.
+        (when (and rows (>= (length columns) 3))
+          (pcase-let ((`(,_name ,desc ,_example) (car rows)))
+            (when (stringp desc)
+              (clutch--parse-mysql-help-text desc)))))
+    (error nil)))
+
+(defun clutch--format-help-doc (doc)
+  "Format a DOC plist (:sig SIG :desc DESC) as a propertized eldoc string."
+  (let ((sig  (plist-get doc :sig))
+        (desc (plist-get doc :desc)))
+    (concat (propertize sig 'face 'font-lock-function-name-face)
+            (when (and desc (not (string-empty-p desc)))
+              (propertize (concat "  — " desc) 'face 'shadow)))))
+
+(defun clutch--ensure-help-doc (conn sym)
+  "Return a live HELP eldoc string for SYM from CONN, with caching.
+Queries the server on first access; subsequent calls read from cache.
+Returns nil when SYM is not a known built-in on this server."
+  (let* ((key   (clutch--connection-key conn))
+         (cache (or (gethash key clutch--help-doc-cache)
+                    (let ((h (make-hash-table :test 'equal)))
+                      (puthash key h clutch--help-doc-cache)
+                      h)))
+         (uname (upcase sym))
+         (entry (gethash uname cache 'missing)))
+    (cond
+     ((eq entry 'missing)
+      (let ((doc (clutch--mysql-help-query conn sym)))
+        (puthash uname (or doc 'not-found) cache)
+        (when doc (clutch--format-help-doc doc))))
+     ((eq entry 'not-found) nil)
+     (t (clutch--format-help-doc entry)))))
+
 (defun clutch--eldoc-keyword-string (sym)
   "Return an eldoc string for SQL keyword/function SYM, or nil."
   (when-let* ((doc (gethash (upcase sym) clutch--sql-function-docs))
@@ -1944,6 +2026,12 @@ SQL keyword/function docs are shown even without a connection."
                   for cols = (clutch--ensure-columns conn schema tbl)
                   when (and cols (member sym cols))
                   return (clutch--eldoc-column-string conn tbl sym)))))
+     ;; Live HELP from MySQL server — cached, MySQL-only
+     (when-let* ((conn clutch-connection)
+                 ((clutch--connection-alive-p conn))
+                 ((not (clutch-db-busy-p conn)))
+                 ((string= "MySQL" (clutch-db-display-name conn))))
+       (clutch--ensure-help-doc conn sym))
      ;; Keyword / built-in function — always available
      (clutch--eldoc-keyword-string sym))))
 
