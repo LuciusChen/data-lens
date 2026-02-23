@@ -1872,6 +1872,7 @@ Key bindings:
   \\[clutch-list-tables]	List tables
   \\[clutch-describe-table-at-point]	Describe table at point
   \\[clutch-show-history]	Show query history"
+  (set-buffer-file-coding-system 'utf-8-unix)
   (add-hook 'completion-at-point-functions
             #'clutch-completion-at-point nil t)
   (add-hook 'completion-at-point-functions
@@ -2138,6 +2139,7 @@ Edit:
   \\[clutch-result-pin-column]	Pin column
   \\[clutch-result-unpin-column]	Unpin column
   \\[clutch-result-rerun]	Re-execute the query"
+  (set-buffer-file-coding-system 'utf-8-unix)
   (setq truncate-lines t)
   (hl-line-mode 1)
   ;; Make tab-line use default background so footer renders cleanly
