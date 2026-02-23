@@ -79,12 +79,6 @@ Clone this repository and add it to your =load-path=:
 (require 'clutch)
 #+end_src
 
-If you manage clutch via =straight.el=, run the following after pulling updates to regenerate autoloads:
-
-#+begin_src
-M-x straight-rebuild-package RET clutch RET
-#+end_src
-
 * Protocol Layer Usage (mysql.el)
 
 #+begin_src emacs-lisp
