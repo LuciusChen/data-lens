@@ -1548,29 +1548,11 @@ Returns a documentation string for the SQL identifier at point."
   \\[clutch-schema-describe-at-point]	Show DDL for table
   \\[clutch-schema-refresh]	Refresh"
   (setq truncate-lines t)
-  (setq-local revert-buffer-function #'clutch-schema--revert)
-  (setq-local imenu-create-index-function #'clutch-schema--imenu-index))
+  (setq-local revert-buffer-function #'clutch-schema--revert))
 
 (defun clutch-schema--revert (_ignore-auto _noconfirm)
   "Revert function for schema browser."
   (clutch-schema-refresh))
-
-(defun clutch-schema--imenu-index ()
-  "Build an imenu index from `clutch-schema-table' text properties."
-  (let ((index nil)
-        (seen nil))
-    (save-excursion
-      (goto-char (point-min))
-      (let (m)
-        (while (setq m (text-property-search-forward
-                        'clutch-schema-table nil
-                        (lambda (_ v) v)))
-          (let ((name (prop-match-value m)))
-            (unless (member name seen)
-              (push name seen)
-              (push (cons name (copy-marker (prop-match-beginning m)))
-                    index))))))
-    (nreverse index)))
 
 (defun clutch-schema--table-at-point ()
   "Return the table name at the current line, or nil."
