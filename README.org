@@ -225,6 +225,43 @@ Clone this repository and add it to your =load-path=:
 
 MySQL is the default backend. Add =:backend pg= for PostgreSQL connections.
 
+*** Password management
+
+=:password= is optional. When omitted (or nil), the password is looked up
+via Emacs's built-in =auth-source= library, which supports:
+
+- =~/.authinfo= / =~/.authinfo.gpg= (netrc format)
+- =pass= (the Unix password manager), when =auth-source-pass= is enabled
+
+**** ~/.authinfo example
+
+#+begin_src
+machine 127.0.0.1 login root password secret port 3306
+#+end_src
+
+Connection entry without hardcoded password:
+
+#+begin_src emacs-lisp
+("dev-mysql" . (:host "127.0.0.1" :port 3306 :user "root" :database "mydb"))
+#+end_src
+
+**** pass example
+
+#+begin_src emacs-lisp
+;; Enable auth-source-pass (built into Emacs 26+)
+(require 'auth-source-pass)
+(auth-source-pass-enable)
+#+end_src
+
+Store the password with =pass=:
+
+#+begin_src sh
+pass insert mysql/127.0.0.1
+#+end_src
+
+=auth-source-pass= searches for entries matching the host and user.
+See [[https://www.gnu.org/software/emacs/manual/html_node/auth/The-Unix-password-store.html][the auth-source manual]] for entry naming conventions.
+
 *** 2. Open a SQL editing buffer
 
 #+begin_src

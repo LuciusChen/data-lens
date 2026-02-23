@@ -40,6 +40,7 @@
 (require 'cl-lib)
 (require 'ring)
 (require 'transient)
+(require 'auth-source)
 
 (declare-function nerd-icons-mdicon "nerd-icons")
 (declare-function nerd-icons-codicon "nerd-icons")
@@ -100,11 +101,15 @@ Underlined to indicate clickable (RET to follow)."
 (defcustom clutch-connection-alist nil
   "Alist of saved database connections.
 Each entry has the form:
-  (NAME . (:host H :port P :user U :password P :database D
+  (NAME . (:host H :port P :user U [:password P] :database D
            [:backend SYM] [:sql-product SYM]))
 NAME is a string used for `completing-read'.
 :backend is a symbol (\\='mysql or \\='pg, default \\='mysql).
-:sql-product overrides `clutch-sql-product' for this connection."
+:sql-product overrides `clutch-sql-product' for this connection.
+:password is optional.  When absent or nil, the password is looked up
+via `auth-source' (supports ~/.authinfo, ~/.authinfo.gpg, and pass
+when `auth-source-pass' is enabled).  The auth-source entry should
+match :host, :user, and :port."
   :type '(alist :key-type string
                 :value-type (plist :options
                                    ((:host string)
@@ -329,10 +334,44 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
           "DB[disconnected]"))
   (force-mode-line-update))
 
+(defun clutch--resolve-password (params)
+  "Return the password for connection PARAMS.
+Uses :password from PARAMS directly when it is a non-empty string.
+Otherwise queries `auth-source' with :host, :user, and :port.
+Returns nil when nothing is found (caller should prompt if needed)."
+  (let ((pw (plist-get params :password)))
+    (if (and (stringp pw) (not (string-empty-p pw)))
+        pw
+      (when-let* ((found (car (auth-source-search
+                               :host (plist-get params :host)
+                               :user (plist-get params :user)
+                               :port (plist-get params :port)
+                               :max 1)))
+                  (secret (plist-get found :secret)))
+        (if (functionp secret) (funcall secret) secret)))))
+
+(defun clutch--build-conn (params)
+  "Connect to a database using PARAMS, resolving the password via auth-source.
+Returns a live connection object or signals a `user-error'."
+  (let* ((backend  (or (plist-get params :backend) 'mysql))
+         (password (clutch--resolve-password params))
+         (db-params (cl-loop for (k v) on params by #'cddr
+                             unless (memq k '(:sql-product :backend :password))
+                             append (list k v)))
+         (db-params (if password
+                        (append db-params (list :password password))
+                      db-params)))
+    (condition-case err
+        (clutch-db-connect backend db-params)
+      (clutch-db-error
+       (user-error "Connection failed: %s" (error-message-string err))))))
+
 (defun clutch-connect ()
   "Connect to a database server interactively.
 If `clutch-connection-alist' is non-empty, offer saved connections via
-`completing-read'.  Otherwise prompt for each parameter."
+`completing-read'.  Otherwise prompt for each parameter.
+The password is resolved via `auth-source' when not in the connection
+params; see `clutch-connection-alist' for details."
   (interactive)
   (when (clutch--connection-alive-p clutch-connection)
     (clutch-db-disconnect clutch-connection)
@@ -343,22 +382,18 @@ If `clutch-connection-alist' is non-empty, offer saved connections via
                                           (mapcar #'car clutch-connection-alist)
                                           nil t)
                           clutch-connection-alist))
-            (list :host (read-string "Host (127.0.0.1): " nil nil "127.0.0.1")
-                  :port (read-number "Port (3306): " 3306)
-                  :user (read-string "User: ")
-                  :password (read-passwd "Password: ")
-                  :database (let ((db (read-string "Database (optional): ")))
-                              (unless (string-empty-p db) db)))))
-         (backend (or (plist-get conn-params :backend) 'mysql))
+            (let* ((host (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
+                   (port (read-number "Port (3306): " 3306))
+                   (user (read-string "User: "))
+                   (manual-params (list :host host :port port :user user))
+                   (pw (or (clutch--resolve-password manual-params)
+                           (read-passwd "Password: ")))
+                   (db (read-string "Database (optional): ")))
+              (append manual-params
+                      (list :password pw
+                            :database (unless (string-empty-p db) db))))))
          (product (plist-get conn-params :sql-product))
-         (db-params (cl-loop for (k v) on conn-params by #'cddr
-                             unless (memq k '(:sql-product :backend))
-                             append (list k v)))
-         (conn (condition-case err
-                   (clutch-db-connect backend db-params)
-                 (clutch-db-error
-                  (user-error "Connection failed: %s"
-                              (error-message-string err))))))
+         (conn    (clutch--build-conn conn-params)))
     (setq clutch-connection conn)
     (setq clutch--conn-sql-product product)
     (clutch--update-mode-line)
@@ -393,16 +428,8 @@ Repeated calls with the same NAME switch to the existing buffer."
     (unless (eq major-mode 'clutch-mode)
       (clutch-mode))
     (unless (clutch--connection-alive-p clutch-connection)
-      (when-let* ((params  (cdr (assoc name clutch-connection-alist)))
-                  (backend (or (plist-get params :backend) 'mysql))
-                  (db-params (cl-loop for (k v) on params by #'cddr
-                                      unless (memq k '(:sql-product :backend))
-                                      append (list k v)))
-                  (conn (condition-case err
-                            (clutch-db-connect backend db-params)
-                          (clutch-db-error
-                           (user-error "Connection failed: %s"
-                                       (error-message-string err))))))
+      (when-let* ((params (cdr (assoc name clutch-connection-alist)))
+                  (conn   (clutch--build-conn params)))
         (setq clutch-connection conn)
         (setq clutch--conn-sql-product (plist-get params :sql-product))
         (clutch--update-mode-line)
