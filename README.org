@@ -61,7 +61,7 @@ PostgreSQL support is functional and compatible, but has not been tested as exte
 - CSV/Org export, copy as INSERT
 - Schema browser with expandable column details (=TAB= to expand/collapse)
 - SQL completion (table/column names, keywords), query history
-- Eldoc: hover over a table name shows database, column count, and table comment; hover over a column name shows =table.column=, type, nullability, PK/FK references, and column comment
+- Eldoc: hover over a table name shows database, column count, and table comment; hover over a column name shows =table.column=, type, nullability, PK/FK references, and column comment; hover over a SQL function or keyword shows its call signature and description (works without a connection; ~110 functions covered, MySQL/PG-specific ones annotated)
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=)
 - REPL mode (comint-based)
 
