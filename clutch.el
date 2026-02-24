@@ -289,28 +289,26 @@ when no connection is active."
   "Load history from the connection-specific history file."
   (unless clutch--history-loaded
     (setq clutch--history (make-ring clutch-history-length))
-    (let ((file (clutch--history-file)))
-      (when (file-readable-p file)
-        (let ((entries (split-string
-                        (let ((coding-system-for-read 'utf-8))
-                          (with-temp-buffer
-                            (insert-file-contents file)
-                            (buffer-string)))
-                        "\0" t)))
-          (dolist (entry (nreverse entries))
-            (ring-insert clutch--history entry)))))
+    (let* ((file    (clutch--history-file))
+           (content (when (file-readable-p file)
+                      (let ((coding-system-for-read 'utf-8))
+                        (with-temp-buffer
+                          (insert-file-contents file)
+                          (buffer-string))))))
+      (dolist (entry (nreverse (split-string (or content "") "\0" t)))
+        (ring-insert clutch--history entry)))
     (setq clutch--history-loaded t)))
 
 (defun clutch--save-history ()
   "Save history to the connection-specific history file."
   (when clutch--history
     (let ((entries nil)
-          (len (ring-length clutch--history)))
+          (len (ring-length clutch--history))
+          (coding-system-for-write 'utf-8-unix))
       (dotimes (i (min len clutch-history-length))
         (push (ring-ref clutch--history i) entries))
-      (let ((coding-system-for-write 'utf-8-unix))
-        (with-temp-file (clutch--history-file)
-          (insert (mapconcat #'identity entries "\0")))))))
+      (with-temp-file (clutch--history-file)
+        (insert (mapconcat #'identity entries "\0"))))))
 
 (defun clutch--add-history (sql)
   "Add SQL to history ring, avoiding duplicates at head."
