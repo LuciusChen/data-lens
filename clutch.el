@@ -387,13 +387,25 @@ when consult is unavailable."
          (t "DB[disconnected]")))
   (force-mode-line-update))
 
+(defun clutch--pass-secret-by-suffix (suffix)
+  "Return the password from the first pass entry whose path ends with SUFFIX.
+Matches e.g. \\='dev-mysql\\=' against \\='mysql/dev-mysql\\='.
+Returns nil when no matching entry is found or auth-source-pass is absent."
+  (when (and (fboundp 'auth-source-pass-entries)
+             (fboundp 'auth-source-pass-parse-entry))
+    (let* ((re    (format "\\(^\\|/\\)%s$" (regexp-quote suffix)))
+           (entry (cl-find-if (lambda (e) (string-match-p re e))
+                              (auth-source-pass-entries))))
+      (when entry
+        (cdr (assq 'secret (auth-source-pass-parse-entry entry)))))))
+
 (defun clutch--resolve-password (params)
   "Return the password for connection PARAMS.
 Checks in order:
   1. :password key (non-empty string) — used as-is.
-  2. :pass-entry key — looked up by name via `auth-source-pass-parse-entry'.
-     Automatically set to the connection name by callers; can be overridden
-     in `clutch-connection-alist'.  Falls through when the entry is absent.
+  2. :pass-entry key — suffix-matched against all pass entries, so
+     \\='dev-mysql\\=' finds \\='mysql/dev-mysql\\='.  Automatically set to the
+     connection name by callers; override in `clutch-connection-alist'.
   3. auth-source-search by :host/:user/:port (authinfo / pass).
 Returns nil when nothing is found (caller should prompt if needed)."
   (let ((pw    (plist-get params :password))
@@ -401,11 +413,7 @@ Returns nil when nothing is found (caller should prompt if needed)."
     (cond
      ((and (stringp pw) (not (string-empty-p pw))) pw)
      (t
-      (or (and entry
-               (fboundp 'auth-source-pass-parse-entry)
-               (when-let* ((data   (auth-source-pass-parse-entry entry))
-                           (secret (cdr (assq 'secret data))))
-                 secret))
+      (or (and entry (clutch--pass-secret-by-suffix entry))
           (when-let* ((found  (car (auth-source-search
                                     :host (plist-get params :host)
                                     :user (plist-get params :user)
