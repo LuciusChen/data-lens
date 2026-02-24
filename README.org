@@ -61,7 +61,9 @@ PostgreSQL support is functional and compatible, but has not been tested as exte
 - CSV/Org export, copy as INSERT
 - Schema browser with expandable column details (=TAB= to expand/collapse)
 - SQL completion (table/column names, keywords), query history
-- Eldoc: hover over a table name shows database, column count, and table comment; hover over a column name shows =table.column=, type, nullability, PK/FK references, and column comment; hover over a SQL function or keyword shows its call signature and description (works without a connection; ~110 functions covered, MySQL/PG-specific ones annotated)
+- Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
+- Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
+- Per-connection query history: each console maintains its own history ring, persisted to a connection-specific file on disk
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=)
 - REPL mode (comint-based)
 
@@ -224,43 +226,7 @@ Clone this repository and add it to your =load-path=:
 #+end_src
 
 MySQL is the default backend. Add =:backend pg= for PostgreSQL connections.
-
-*** Password management
-
-=:password= is optional. When omitted (or nil), the password is looked up
-via Emacs's built-in =auth-source= library, which supports:
-
-- =~/.authinfo= / =~/.authinfo.gpg= (netrc format)
-- =pass= (the Unix password manager), when =auth-source-pass= is enabled
-
-**** ~/.authinfo example
-
-#+begin_src
-machine 127.0.0.1 login root password secret port 3306
-#+end_src
-
-Connection entry without hardcoded password:
-
-#+begin_src emacs-lisp
-("dev-mysql" . (:host "127.0.0.1" :port 3306 :user "root" :database "mydb"))
-#+end_src
-
-**** pass example
-
-#+begin_src emacs-lisp
-;; Enable auth-source-pass (built into Emacs 26+)
-(require 'auth-source-pass)
-(auth-source-pass-enable)
-#+end_src
-
-Store the password with =pass=:
-
-#+begin_src sh
-pass insert mysql/127.0.0.1
-#+end_src
-
-=auth-source-pass= searches for entries matching the host and user.
-See [[https://www.gnu.org/software/emacs/manual/html_node/auth/The-Unix-password-store.html][the auth-source manual]] for entry naming conventions.
+=:password= is optional — see [[*Password Management]] for auth-source integration.
 
 *** 2. Open a query console
 
@@ -280,6 +246,43 @@ SELECT * FROM users LIMIT 10;
 #+end_src
 
 Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appear in a split result buffer below.
+
+** Password Management
+
+=:password= is optional in connection entries. When omitted (or nil), the
+password is looked up via Emacs's built-in =auth-source= library, which supports:
+
+- =~/.authinfo= / =~/.authinfo.gpg= (netrc format)
+- =pass= (the Unix password manager), when =auth-source-pass= is enabled
+
+*** ~/.authinfo example
+
+#+begin_src
+machine 127.0.0.1 login root password secret port 3306
+#+end_src
+
+Connection entry without hardcoded password:
+
+#+begin_src emacs-lisp
+("dev-mysql" . (:host "127.0.0.1" :port 3306 :user "root" :database "mydb"))
+#+end_src
+
+*** pass example
+
+#+begin_src emacs-lisp
+;; Enable auth-source-pass (built into Emacs 26+)
+(require 'auth-source-pass)
+(auth-source-pass-enable)
+#+end_src
+
+Store the password with =pass=:
+
+#+begin_src sh
+pass insert mysql/127.0.0.1
+#+end_src
+
+=auth-source-pass= searches for entries matching the host and user.
+See [[https://www.gnu.org/software/emacs/manual/html_node/auth/The-Unix-password-store.html][the auth-source manual]] for entry naming conventions.
 
 ** Working with SQL files
 
@@ -313,6 +316,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-t=   | List all tables            |
 | =C-c C-d=   | DESCRIBE table at point    |
 | =C-c C-l=   | Query history              |
+| =M-x clutch-consult-history= | Browse history with consult (insert selection at point) |
 | =C-c C-o=   | Transient menu             |
 | =TAB=       | Complete table/column name |
 
