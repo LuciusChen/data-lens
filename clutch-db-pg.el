@@ -274,6 +274,20 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
           (t                        "numeric")))
    (t data-type)))
 
+(defun clutch-db-pg--column-details-row (row pk-cols fks)
+  "Convert a column-details ROW to a clutch-db column plist.
+PK-COLS is a list of primary key column names.
+FKS is an alist of (column-name . fk-plist)."
+  (pcase-let ((`(,name ,dtype ,nullable-str ,max-len ,num-prec ,num-scale ,comment) row))
+    (let* ((type     (clutch-db-pg--format-type dtype max-len num-prec num-scale))
+           (nullable (string= nullable-str "YES"))
+           (pk-p     (member name pk-cols))
+           (fk       (cdr (assoc name fks))))
+      (list :name name :type type :nullable nullable
+            :primary-key (and pk-p t)
+            :foreign-key fk
+            :comment (and comment (not (string-empty-p comment)) comment)))))
+
 (cl-defmethod clutch-db-column-details ((conn pg-conn) table)
   "Return detailed column info for TABLE on PostgreSQL CONN."
   (condition-case _err
@@ -292,20 +306,10 @@ WHERE c.table_name = %s AND c.table_schema = current_schema() \
 ORDER BY c.ordinal_position"
                        (pg-escape-literal table))))
              (col-rows (pg-result-rows col-result))
-             (pk-cols (clutch-db-primary-key-columns conn table))
-             (fks (clutch-db-foreign-keys conn table)))
-        (mapcar
-         (lambda (row)
-           (pcase-let ((`(,name ,dtype ,nullable-str ,max-len ,num-prec ,num-scale ,comment) row))
-             (let* ((type     (clutch-db-pg--format-type dtype max-len num-prec num-scale))
-                    (nullable (string= nullable-str "YES"))
-                    (pk-p     (member name pk-cols))
-                    (fk       (cdr (assoc name fks))))
-               (list :name name :type type :nullable nullable
-                     :primary-key (and pk-p t)
-                     :foreign-key fk
-                     :comment (and comment (not (string-empty-p comment)) comment)))))
-         col-rows))
+             (pk-cols  (clutch-db-primary-key-columns conn table))
+             (fks      (clutch-db-foreign-keys conn table)))
+        (mapcar (lambda (row) (clutch-db-pg--column-details-row row pk-cols fks))
+                col-rows))
     (pg-error nil)))
 
 ;;;; Re-entrancy guard
