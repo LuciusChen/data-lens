@@ -4,18 +4,20 @@
 * Overview
 
 A pure Emacs Lisp database client with an interactive data browsing UI.
-Supports MySQL (primary, daily-use) and PostgreSQL (compatible, less frequently tested).
+Supports MySQL (primary, daily-use), PostgreSQL, and SQLite (Emacs 29+).
 
 - =mysql.el= — pure Elisp MySQL wire protocol implementation (no external CLI needed)
 - =pg.el= — pure Elisp PostgreSQL wire protocol v3 implementation
 - =clutch-db.el= — generic database interface (=cl-defgeneric= dispatch)
 - =clutch-db-mysql.el= — MySQL backend adapter
 - =clutch-db-pg.el= — PostgreSQL backend adapter
+- =clutch-db-sqlite.el= — SQLite backend adapter (uses Emacs 29+ built-in sqlite)
 - =clutch.el= — interactive UI layer: column-paged result browser, record view, FK navigation, editing, transient menus, REPL
 - =ob-mysql.el= — Org-Babel integration
 
 *Note:* MySQL is the primary backend — thoroughly tested and used daily.
 PostgreSQL support is functional and compatible, but has not been tested as extensively in daily use.
+SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external dependencies.
 
 * Features
 
@@ -69,8 +71,9 @@ PostgreSQL support is functional and compatible, but has not been tested as exte
 
 * Requirements
 
-- Emacs 28.1+
-- MySQL 5.7+ / 8.x, or PostgreSQL 12+
+- Emacs 28.1+ for MySQL and PostgreSQL backends
+- Emacs 29.1+ for the SQLite backend (built-in =sqlite-*= functions)
+- MySQL 5.7+ / 8.x, PostgreSQL 12+, or SQLite 3 (via Emacs built-in)
 
 * Installation
 
@@ -216,24 +219,29 @@ Clone this repository and add it to your =load-path=:
 (require 'clutch)
 
 (setq clutch-connection-alist
-      '(("dev-mysql" . (:host "127.0.0.1" :port 3306
-                         :user "root" :password "test"
-                         :database "mydb"))
-        ("dev-pg"    . (:backend pg
-                         :host "127.0.0.1" :port 5432
-                         :user "postgres" :password "test"
-                         :database "mydb"))))
+      '(("dev-mysql"  . (:host "127.0.0.1" :port 3306
+                          :user "root" :password "test"
+                          :database "mydb"))
+        ("dev-pg"     . (:backend pg
+                          :host "127.0.0.1" :port 5432
+                          :user "postgres" :password "test"
+                          :database "mydb"))
+        ("dev-sqlite" . (:backend sqlite
+                          :database "/path/to/my.db"))))
 #+end_src
 
-MySQL is the default backend. Add =:backend pg= for PostgreSQL connections.
-=:password= is optional — see [[*Password Management]] for auth-source integration.
+MySQL is the default backend. Add =:backend pg= for PostgreSQL or =:backend sqlite= for SQLite.
+SQLite connections only require =:database= (the file path); no host, port, or user.
+=:password= is optional for network backends — see [[*Password Management]] for auth-source integration.
 
 *** 2. Open a query console
 
 #+begin_src
 M-x clutch-query-console   ;; Select a saved connection → opens *clutch: NAME*
                             ;; and connects automatically
-                            ;; Mode-line shows MySQL[root@127.0.0.1:3306/mydb]
+                            ;; Mode-line: MySQL[root@127.0.0.1:3306/mydb]
+                            ;;         or PostgreSQL[postgres@127.0.0.1:5432/mydb]
+                            ;;         or SQLite[?@?:?//path/to/my.db]
 #+end_src
 
 Repeated calls with the same name switch to the existing buffer instead of
