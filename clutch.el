@@ -1789,6 +1789,27 @@ Returns a string or nil."
              when (string-match-p (regexp-quote tbl) text)
              collect tbl)))
 
+(defun clutch--tables-in-query (schema)
+  "Return known table names in FROM/JOIN/UPDATE clauses of current statement.
+Scans only the SQL statement surrounding point, bounded by semicolons or
+blank lines.  Falls back to `clutch--tables-in-buffer' when none are found."
+  (let* ((delim "\\(;\\|^[[:space:]]*$\\)")
+         (beg   (save-excursion
+                  (if (re-search-backward delim nil t)
+                      (match-end 0) (point-min))))
+         (end   (save-excursion
+                  (if (re-search-forward delim nil t)
+                      (match-beginning 0) (point-max))))
+         (text  (buffer-substring-no-properties beg end))
+         (case-fold-search t)
+         (found (cl-loop for tbl in (hash-table-keys schema)
+                         when (string-match-p
+                               (format "\\b\\(from\\|join\\|update\\|into\\)[ \t\n]+%s\\b"
+                                       (regexp-quote tbl))
+                               text)
+                         collect tbl)))
+    (or found (clutch--tables-in-buffer schema))))
+
 (defconst clutch--sql-keywords
   '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"
     "BETWEEN" "EXISTS" "CASE" "WHEN" "THEN" "ELSE" "END" "AS" "ON"
@@ -2274,9 +2295,9 @@ when completion triggers during an in-flight query)."
            (candidates
             (if (or table-context-p busy)
                 (hash-table-keys schema)
-              ;; Load columns only for tables mentioned in the buffer
+              ;; Load columns only for tables in the current statement
               (let ((all (copy-sequence (hash-table-keys schema))))
-                (dolist (tbl (clutch--tables-in-buffer schema))
+                (dolist (tbl (clutch--tables-in-query schema))
                   (when-let* ((cols (clutch--ensure-columns
                                      conn schema tbl)))
                     (setq all (nconc all (copy-sequence cols)))))
