@@ -279,6 +279,11 @@ so history is scoped to the connection that produced it.")
 (defvar-local clutch--history-loaded nil
   "Non-nil when history has been loaded from disk for this buffer.")
 
+(defvar-local clutch--connection-params nil
+  "Params plist used to establish the current connection.
+Stored at connect time so the connection can be re-established
+automatically when it drops.")
+
 (defun clutch--history-file ()
   "Return the history file path for the current buffer's connection.
 Uses a per-connection filename derived from the connection key so
@@ -367,10 +372,28 @@ when consult is unavailable."
   "Return non-nil if CONN is live."
   (and conn (clutch-db-live-p conn)))
 
+(defun clutch--try-reconnect ()
+  "Attempt to re-establish the connection using `clutch--connection-params'.
+Updates `clutch-connection' and refreshes the mode-line on success.
+Returns non-nil on success, nil on failure."
+  (when clutch--connection-params
+    (condition-case err
+        (let ((conn (clutch--build-conn clutch--connection-params)))
+          (setq clutch-connection conn)
+          (clutch--update-mode-line)
+          (message "Reconnected to %s" (clutch--connection-key conn))
+          t)
+      (error
+       (message "Reconnect failed: %s" (error-message-string err))
+       nil))))
+
 (defun clutch--ensure-connection ()
-  "Ensure current buffer has a live connection.  Signal error if not."
+  "Ensure current buffer has a live connection.
+If the connection has dropped, attempts to reconnect automatically
+using the stored params.  Signals a user-error if not recoverable."
   (unless (clutch--connection-alive-p clutch-connection)
-    (user-error "Not connected.  Use C-c C-e to connect")))
+    (unless (clutch--try-reconnect)
+      (user-error "Not connected.  Use C-c C-e to connect"))))
 
 (defun clutch--update-mode-line ()
   "Update mode-line lighter with connection status."
@@ -481,6 +504,7 @@ params; see `clutch-connection-alist' for details."
          (product (plist-get params :sql-product))
          (conn    (clutch--build-conn params)))
     (setq clutch-connection conn
+          clutch--connection-params params
           clutch--conn-sql-product product
           clutch--history nil
           clutch--history-loaded nil)
@@ -533,6 +557,7 @@ window rather than replacing the current window."
                            (cdr (assoc name clutch-connection-alist)) name))
                   (conn   (clutch--build-conn params)))
         (setq clutch-connection conn
+              clutch--connection-params params
               clutch--conn-sql-product (plist-get params :sql-product)
               clutch--history nil
               clutch--history-loaded nil)
@@ -1459,9 +1484,8 @@ Returns the query result."
 Records history, times execution, and displays results.
 For SELECT queries, applies pagination (LIMIT/OFFSET).
 Prompts for confirmation on destructive operations."
+  (clutch--ensure-connection)
   (let ((connection (or conn clutch-connection)))
-    (unless (clutch--connection-alive-p connection)
-      (user-error "Not connected.  Use C-c C-e to connect"))
     (when (clutch--destructive-query-p sql)
       (unless (yes-or-no-p
                (format "Execute destructive query?\n  %s\n"
