@@ -285,14 +285,24 @@ Connection entry without hardcoded password:
 (auth-source-pass-enable)
 #+end_src
 
-Store the password with =pass=:
+Store the password with =pass=.  =auth-source-pass= tries these path
+suffixes in order, from most to least specific:
 
-#+begin_src sh
-pass insert mysql/127.0.0.1
+#+begin_src
+root@127.0.0.1:3306      ← user@host:port  (most specific)
+127.0.0.1:3306/root      ← host:port/user
+root@127.0.0.1           ← user@host
+127.0.0.1/root           ← host/user  (recommended minimum)
+127.0.0.1:3306           ← host:port
+127.0.0.1                ← host only
 #+end_src
 
-=auth-source-pass= searches for entries matching the host and user.
-See [[https://www.gnu.org/software/emacs/manual/html_node/auth/The-Unix-password-store.html][the auth-source manual]] for entry naming conventions.
+Matching is on the path suffix, so =databases/mysql/127.0.0.1/root= also
+matches the suffix =127.0.0.1/root=.  Recommended:
+
+#+begin_src sh
+pass insert 127.0.0.1/root
+#+end_src
 
 ** Working with SQL files
 
