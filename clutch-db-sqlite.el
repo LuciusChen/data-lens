@@ -51,7 +51,8 @@
 
 (defun clutch-db-sqlite-connect (params)
   "Connect to SQLite using PARAMS plist.
-PARAMS keys: :database (file path, required)."
+PARAMS keys: :database (file path or \":memory:\", required).
+Use \":memory:\" for a transient in-memory database."
   (unless (and (fboundp 'sqlite-available-p) (sqlite-available-p))
     (signal 'clutch-db-error (list "SQLite requires Emacs 29+")))
   (let ((db (plist-get params :database)))

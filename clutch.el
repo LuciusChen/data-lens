@@ -2637,6 +2637,7 @@ Preserves the window scroll position relative to the target row."
     (define-key map "s" #'clutch-result-sort-by-column)
     (define-key map "S" #'clutch-result-sort-by-column-desc)
     (define-key map "y" #'clutch-result-yank-cell)
+    (define-key map "v" #'clutch-result-view-json)
     (define-key map "w" #'clutch-result-copy-row-as-insert)
     (define-key map "Y" #'clutch-result-copy-as-csv)
     (define-key map "W" #'clutch-result-apply-filter)
@@ -3437,6 +3438,30 @@ Prompts for a pattern; enter empty string to clear."
     (kill-new text)
     (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
 
+(defun clutch--view-json-value (val)
+  "Display VAL as formatted JSON in a pop-up buffer."
+  (unless (and (stringp val) (not (string-empty-p val)))
+    (user-error "No JSON value at point"))
+  (let ((buf (get-buffer-create "*clutch-json*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert val)
+        (condition-case nil (json-pretty-print-buffer) (error nil))
+        (cond ((fboundp 'json-ts-mode) (json-ts-mode))
+              ((fboundp 'json-mode)    (json-mode))
+              (t                       (special-mode)))
+        (goto-char (point-min))
+        (setq buffer-read-only t)))
+    (pop-to-buffer buf)))
+
+(defun clutch-result-view-json ()
+  "Display the JSON value of the cell at point in a formatted buffer."
+  (interactive)
+  (pcase-let ((`(,_ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
+                                          (user-error "No cell at point"))))
+    (clutch--view-json-value val)))
+
 (defun clutch-result--select-columns ()
   "Prompt user to select columns via `completing-read-multiple'."
   (let* ((col-names clutch--result-columns)
@@ -3665,6 +3690,7 @@ previous window layout."
     (define-key map "n" #'clutch-record-next-row)
     (define-key map "p" #'clutch-record-prev-row)
     (define-key map "y" #'clutch-record-yank-field)
+    (define-key map "v" #'clutch-record-view-json)
     (define-key map "w" #'clutch-record-copy-as-insert)
     (define-key map "q" #'quit-window)
     (define-key map "g" #'clutch-record-refresh)
@@ -3845,6 +3871,11 @@ MAX-NAME-W is the label column width."
     (cl-decf clutch-record--row-idx)
     (setq clutch-record--expanded-fields nil)
     (clutch-record--render)))
+
+(defun clutch-record-view-json ()
+  "Display the JSON field value at point in a formatted buffer."
+  (interactive)
+  (clutch--view-json-value (get-text-property (point) 'clutch-full-value)))
 
 (defun clutch-record-yank-field ()
   "Copy the field value at point to the kill ring."
