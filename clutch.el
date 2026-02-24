@@ -326,12 +326,11 @@ when consult is unavailable."
   (clutch--load-history)
   (when (ring-empty-p clutch--history)
     (user-error "No history entries"))
-  (let* ((entries (ring-elements clutch--history))
-         (choice (consult--read entries
-                                :prompt "SQL: "
-                                :sort nil
-                                :require-match t
-                                :lookup #'consult--lookup-candidate)))
+  (when-let* ((entries (ring-elements clutch--history))
+              (choice  (consult--read entries
+                                      :prompt "SQL: "
+                                      :sort nil
+                                      :require-match t)))
     (insert choice)))
 
 ;;;; Connection management
