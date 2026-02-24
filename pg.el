@@ -390,42 +390,45 @@ Returns (:nonce NONCE :salt SALT :iterations ITER)."
         (setq iterations (string-to-number (substring part 2))))))
     (list :nonce nonce :salt salt :iterations iterations)))
 
+(defun pg--scram-derive-keys (password salt iterations auth-message)
+  "Derive SCRAM-SHA-256 client proof and server signature.
+Returns (CLIENT-PROOF . SERVER-SIGNATURE)."
+  (let* ((salted-password (pg--pbkdf2-sha256
+                           (encode-coding-string password 'utf-8)
+                           salt iterations 32))
+         (client-key      (pg--hmac-sha256 salted-password
+                                           (encode-coding-string "Client Key" 'utf-8)))
+         (stored-key      (secure-hash 'sha256 client-key nil nil t))
+         (client-signature (pg--hmac-sha256
+                            stored-key
+                            (encode-coding-string auth-message 'utf-8)))
+         (server-key      (pg--hmac-sha256 salted-password
+                                           (encode-coding-string "Server Key" 'utf-8)))
+         (server-signature (pg--hmac-sha256
+                            server-key
+                            (encode-coding-string auth-message 'utf-8))))
+    (cons (pg--xor-strings client-key client-signature) server-signature)))
+
 (defun pg--scram-client-final (password client-nonce client-first-bare
                                         server-first)
   "Generate SCRAM-SHA-256 client-final-message and verify server proof.
 Returns (CLIENT-FINAL-MESSAGE . SERVER-SIGNATURE)."
-  (let* ((parsed (pg--scram-parse-server-first server-first))
+  (let* ((parsed       (pg--scram-parse-server-first server-first))
          (server-nonce (plist-get parsed :nonce))
-         (salt (plist-get parsed :salt))
-         (iterations (plist-get parsed :iterations)))
+         (salt         (plist-get parsed :salt))
+         (iterations   (plist-get parsed :iterations)))
     (unless (string-prefix-p client-nonce server-nonce)
       (signal 'pg-auth-error (list "Server nonce does not start with client nonce")))
-    (let* ((salted-password (pg--pbkdf2-sha256
-                             (encode-coding-string password 'utf-8)
-                             salt iterations 32))
-           (client-key (pg--hmac-sha256 salted-password
-                                         (encode-coding-string "Client Key" 'utf-8)))
-           (stored-key (secure-hash 'sha256 client-key nil nil t))
-           (channel-binding (base64-encode-string
+    (let* ((channel-binding (base64-encode-string
                              (encode-coding-string "n,," 'utf-8) t))
            (client-final-without-proof
             (format "c=%s,r=%s" channel-binding server-nonce))
-           (auth-message (concat client-first-bare ","
-                                 server-first ","
+           (auth-message (concat client-first-bare "," server-first ","
                                  client-final-without-proof))
-           (client-signature (pg--hmac-sha256
-                              stored-key
-                              (encode-coding-string auth-message 'utf-8)))
-           (client-proof (pg--xor-strings client-key client-signature))
-           (server-key (pg--hmac-sha256 salted-password
-                                         (encode-coding-string "Server Key" 'utf-8)))
-           (server-signature (pg--hmac-sha256
-                              server-key
-                              (encode-coding-string auth-message 'utf-8)))
-           (proof-b64 (base64-encode-string client-proof t))
-           (client-final (format "%s,p=%s"
-                                 client-final-without-proof proof-b64)))
-      (cons client-final server-signature))))
+           (keys       (pg--scram-derive-keys password salt iterations auth-message))
+           (proof-b64  (base64-encode-string (car keys) t))
+           (client-final (format "%s,p=%s" client-final-without-proof proof-b64)))
+      (cons client-final (cdr keys)))))
 
 (defun pg--parse-sasl-mechanisms (payload)
   "Parse SASL mechanism names from an AuthenticationSASL PAYLOAD.
@@ -788,6 +791,27 @@ Returns (TAG . AFFECTED-ROWS) where AFFECTED-ROWS may be nil."
     (pg--drain-until-ready conn)
     (signal 'pg-query-error (list (pg--error-fields-message fields)))))
 
+(defun pg--collect-query-result (conn)
+  "Read server messages from CONN until ReadyForQuery and return a `pg-result'.
+Handles RowDescription, DataRow, CommandComplete, and ErrorResponse."
+  (let ((columns nil) (rows nil) (affected-rows nil) (status nil) (done nil))
+    (while (not done)
+      (pcase-let ((`(,msg-type . ,payload) (pg--read-message conn)))
+        (pcase msg-type
+          (?T (setq columns (pg--parse-row-description payload)))
+          (?D (push (pg--parse-data-row payload columns) rows))
+          (?C (pcase-let ((`(,tag . ,n) (pg--parse-command-complete payload)))
+                (setq status tag affected-rows n)))
+          (?Z (setq done t))
+          (?E (pg--handle-query-error conn payload))
+          (_ nil))))
+    (make-pg-result
+     :connection conn
+     :status (or status "OK")
+     :columns columns
+     :rows (nreverse rows)
+     :affected-rows affected-rows)))
+
 (defun pg-query (conn sql)
   "Execute SQL query on CONN using the simple query protocol.
 Returns a `pg-result'.
@@ -796,33 +820,15 @@ Signals `pg-error' if the connection is busy (re-entrant call)."
     (signal 'pg-error
             (list "Connection busy — cannot send query while another is in progress")))
   ;; Flush any stale data left from previously interrupted queries.
-  (with-current-buffer (pg-conn-buf conn)
-    (erase-buffer))
+  (with-current-buffer (pg-conn-buf conn) (erase-buffer))
   (setf (pg-conn-busy conn) t)
   (unwind-protect
       ;; Bind throw-on-input to nil so that `while-no-input' (used by
-      ;; completion frameworks like corfu/company) cannot abort us
-      ;; mid-response, which would leave partial data in the buffer and
-      ;; corrupt subsequent queries.
+      ;; completion frameworks) cannot abort mid-response and corrupt
+      ;; the connection state.
       (let ((throw-on-input nil))
         (pg--send-message conn ?Q (pg--encode-string sql))
-        (let ((columns nil) (rows nil) (affected-rows nil) (status nil) (done nil))
-          (while (not done)
-            (pcase-let ((`(,msg-type . ,payload) (pg--read-message conn)))
-              (pcase msg-type
-                (?T (setq columns (pg--parse-row-description payload)))
-                (?D (push (pg--parse-data-row payload columns) rows))
-                (?C (pcase-let ((`(,tag . ,n) (pg--parse-command-complete payload)))
-                      (setq status tag affected-rows n)))
-                (?Z (setq done t))
-                (?E (pg--handle-query-error conn payload))
-                (_ nil))))
-          (make-pg-result
-           :connection conn
-           :status (or status "OK")
-           :columns columns
-           :rows (nreverse rows)
-           :affected-rows affected-rows)))
+        (pg--collect-query-result conn))
     (setf (pg-conn-busy conn) nil)))
 
 ;;;; Ping
