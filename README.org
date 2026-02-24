@@ -219,7 +219,8 @@ Clone this repository and add it to your =load-path=:
 (require 'clutch)
 
 (setq clutch-connection-alist
-      '(("dev-mysql"  . (:host "127.0.0.1" :port 3306
+      '(("dev-mysql"  . (:backend mysql
+                          :host "127.0.0.1" :port 3306
                           :user "root" :password "test"
                           :database "mydb"))
         ("dev-pg"     . (:backend pg
@@ -230,7 +231,8 @@ Clone this repository and add it to your =load-path=:
                           :database "/path/to/my.db"))))
 #+end_src
 
-MySQL is the default backend. Add =:backend pg= for PostgreSQL or =:backend sqlite= for SQLite.
+Each entry should specify =:backend= explicitly (=mysql=, =pg=, or =sqlite=).
+Omitting =:backend= defaults to =mysql=, but explicit is clearer.
 SQLite connections only require =:database= (the file path); no host, port, or user.
 =:password= is optional for network backends — see [[*Password Management]] for auth-source integration.
 
