@@ -279,9 +279,9 @@ Connection entry without hardcoded password:
 
 *** pass example — connection name as entry name (recommended)
 
-When =auth-source-pass= is loaded, clutch automatically tries a pass
-entry named after the connection (the key in =clutch-connection-alist=).
-No extra config needed:
+When =auth-source-pass= is loaded, clutch automatically looks up a pass
+entry whose path ends with the connection name.  The entry can live
+anywhere in the pass store — subdirectories are fine:
 
 #+begin_src emacs-lisp
 (require 'auth-source-pass)
@@ -292,15 +292,15 @@ No extra config needed:
                          :user "alice" :database "mydb"))))
 #+end_src
 
-Store the password (first line of the entry):
+Store the password under any path that ends with the connection name:
 
 #+begin_src sh
-pass insert dev-mysql
+pass insert mysql/dev-mysql   ;; or just: pass insert dev-mysql
 #+end_src
 
-The pass store contains only =dev-mysql= — no host or username in the
-file path.  Use =:pass-entry "other-name"= to override the entry name
-when it must differ from the connection name.
+The pass store reveals only =mysql/dev-mysql= — no host or username.
+Use =:pass-entry "other-name"= to override the suffix when the entry
+name must differ from the connection name.
 
 *** pass example — host-based entry name (standard auth-source)
 
