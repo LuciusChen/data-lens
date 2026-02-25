@@ -325,10 +325,12 @@ when no connection is active."
   (when clutch--history
     (let ((entries nil)
           (len (ring-length clutch--history))
+          (file (clutch--history-file))
           (coding-system-for-write 'utf-8-unix))
       (dotimes (i (min len clutch-history-length))
         (push (ring-ref clutch--history i) entries))
-      (with-temp-file (clutch--history-file)
+      (make-directory (file-name-directory file) t)
+      (with-temp-file file
         (insert (mapconcat #'identity entries "\0"))))))
 
 (defun clutch--add-history (sql)
