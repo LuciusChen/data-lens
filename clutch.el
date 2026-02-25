@@ -363,6 +363,15 @@ when no connection is active."
                           nil 'silent)))
       (error nil))))
 
+(defun clutch--save-all-consoles ()
+  "Save content of all open query console buffers.
+Run from `kill-emacs-hook' to persist consoles on Emacs exit."
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (clutch--save-console))))
+
+(add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
+
 (defun clutch-show-history ()
   "Select a query from history and insert it at point."
   (interactive)
