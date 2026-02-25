@@ -352,11 +352,14 @@ when no connection is active."
 (defun clutch--save-console ()
   "Save console buffer content to its persistence file."
   (when clutch--console-name
-    (make-directory clutch-console-directory t)
-    (let ((coding-system-for-write 'utf-8-unix))
-      (write-region (point-min) (point-max)
-                    (clutch--console-file clutch--console-name)
-                    nil 'silent))))
+    (condition-case nil
+        (progn
+          (make-directory clutch-console-directory t)
+          (let ((coding-system-for-write 'utf-8-unix))
+            (write-region (point-min) (point-max)
+                          (clutch--console-file clutch--console-name)
+                          nil 'silent)))
+      (error nil))))
 
 (defun clutch-show-history ()
   "Select a query from history and insert it at point."
