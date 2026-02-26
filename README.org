@@ -258,7 +258,7 @@ opening a new one.  Use =clutch-switch-console= to jump between open consoles.
 SELECT * FROM users LIMIT 10;
 #+end_src
 
-Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appear in a split result buffer below.
+Press =C-c C-c= to execute.  If a region is selected, the selected SQL runs; otherwise the statement at point runs.  Results appear in a split result buffer below.
 
 ** Password Management
 
@@ -337,8 +337,8 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 
 | Key         | Action                     |
 |-------------+----------------------------|
-| =C-c C-c=   | Execute SQL at point       |
-| =C-c C-r=   | Execute selected region    |
+| =C-c C-c=   | Execute region or query at point |
+| =C-c C-r=   | Execute selected region          |
 | =C-c C-b=   | Execute entire buffer      |
 | =C-c C-e=   | Connect / reconnect        |
 | =C-c C-t=   | List all tables            |
