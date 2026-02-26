@@ -1578,12 +1578,74 @@ Queries are delimited by semicolons or blank lines."
   (clutch--ensure-connection)
   (clutch--execute (clutch--query-at-point)))
 
+(defun clutch--split-statements (sql)
+  "Split SQL into individual statements on unquoted semicolons.
+Skips semicolons inside single-quoted strings, -- line comments,
+and /* */ block comments."
+  (let ((stmts nil) (start 0) (in-string nil) (i 0) (len (length sql)))
+    (while (< i len)
+      (let ((ch (aref sql i)))
+        (cond
+         (in-string
+          (when (= ch in-string)
+            (setq in-string nil)))
+         ((= ch ?')  (setq in-string ?'))
+         ((= ch ?\") (setq in-string ?\"))
+         ((and (= ch ?-) (< (1+ i) len) (= (aref sql (1+ i)) ?-))
+          (while (and (< i len) (/= (aref sql i) ?\n)) (cl-incf i)))
+         ((and (= ch ?/) (< (1+ i) len) (= (aref sql (1+ i)) ?*))
+          (cl-incf i 2)
+          (while (and (< (1+ i) len)
+                      (not (and (= (aref sql i) ?*) (= (aref sql (1+ i)) ?/))))
+            (cl-incf i))
+          (cl-incf i))
+         ((= ch ?\;)
+          (let ((stmt (string-trim (substring sql start i))))
+            (unless (string-empty-p stmt) (push stmt stmts)))
+          (setq start (1+ i)))))
+      (cl-incf i))
+    (let ((tail (string-trim (substring sql start))))
+      (unless (string-empty-p tail) (push tail stmts)))
+    (nreverse stmts)))
+
+(defun clutch--execute-statements (stmts)
+  "Execute STMTS sequentially.
+DML/DDL statements run silently; the final SELECT (if any) opens a
+result buffer.  Stops and reports on the first error."
+  (let* ((last (car (last stmts)))
+         (before-last (butlast stmts))
+         (done 0))
+    (dolist (stmt before-last)
+      (condition-case err
+          (progn (clutch-db-query clutch-connection stmt) (cl-incf done))
+        (clutch-db-error
+         (user-error "Statement %d failed: %s" (1+ done)
+                     (error-message-string err)))))
+    (if (clutch--select-query-p last)
+        (progn
+          (when (> done 0)
+            (message "%d statement%s executed" done (if (= done 1) "" "s")))
+          (clutch--execute last))
+      (condition-case err
+          (progn (clutch-db-query clutch-connection last) (cl-incf done)
+                 (message "%d statement%s executed"
+                          done (if (= done 1) "" "s")))
+        (clutch-db-error
+         (user-error "Statement %d failed: %s" (1+ done)
+                     (error-message-string err)))))))
+
 (defun clutch-execute-dwim (beg end)
-  "Execute region if active, otherwise execute query at point."
+  "Execute region if active, otherwise execute query at point.
+When the region contains multiple semicolon-separated statements,
+they are executed sequentially."
   (interactive "r")
   (clutch--ensure-connection)
   (if (use-region-p)
-      (clutch--execute (string-trim (buffer-substring-no-properties beg end)))
+      (let* ((sql   (string-trim (buffer-substring-no-properties beg end)))
+             (stmts (clutch--split-statements sql)))
+        (if (cdr stmts)
+            (clutch--execute-statements stmts)
+          (clutch--execute sql)))
     (clutch--execute (clutch--query-at-point))))
 
 (defun clutch-execute-region (beg end)
