@@ -85,8 +85,12 @@
   :group 'clutch)
 
 (defface clutch-modified-face
-  '((t :inherit warning))
-  "Face for modified cell values."
+  '((((class color) (background light))
+     :inherit warning :background "#fff3cd")
+    (((class color) (background dark))
+     :inherit warning :background "#3d2b00")
+    (t :inherit warning))
+  "Face for pending-edit cell values."
   :group 'clutch)
 
 (defface clutch-fk-face
