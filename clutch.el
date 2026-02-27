@@ -3174,28 +3174,53 @@ defaults to 0.  Returns nil if not found."
          (t (cl-incf pos)))))
     found))
 
+(defun clutch--sql-normalize-for-rewrite (sql)
+  "Return SQL trimmed for rewrite operations."
+  (string-trim-right
+   (replace-regexp-in-string ";\\s-*\\'" ""
+                             (clutch--strip-leading-comments sql))))
+
+(defun clutch--sql-strip-top-level-tail (sql)
+  "Strip top-level ORDER/LIMIT/OFFSET tail clauses from SQL."
+  (let* ((order-pos (clutch--sql-find-top-level-clause sql "ORDER\\s-+BY"))
+         (limit-pos (clutch--sql-find-top-level-clause sql "LIMIT"))
+         (offset-pos (clutch--sql-find-top-level-clause sql "OFFSET"))
+         (cut-pos (car (sort (delq nil (list order-pos limit-pos offset-pos)) #'<))))
+    (if cut-pos
+        (string-trim-right (substring sql 0 cut-pos))
+      sql)))
+
+(defun clutch--sql-rewrite-fallback (sql op arg)
+  "Fallback SQL rewrite for OP with ARG when structured rewrite fails."
+  (let ((trimmed (string-trim-right
+                  (replace-regexp-in-string ";\\s-*\\'" "" sql))))
+    (pcase op
+      ('where (format "SELECT * FROM (%s) AS _clutch_filter WHERE %s" trimmed arg))
+      ('count (format "SELECT COUNT(*) FROM (%s) AS _clutch_count"
+                      (clutch--sql-strip-top-level-tail trimmed)))
+      (_ (error "Unsupported rewrite op: %s" op)))))
+
+(defun clutch--sql-rewrite (sql op &optional arg)
+  "Rewrite SQL for OP with optional ARG.
+Current implementation uses top-level clause awareness and keeps a
+fallback path; AST-based rewrite can replace this later."
+  (condition-case nil
+      (let ((normalized (clutch--sql-normalize-for-rewrite sql)))
+        (pcase op
+          ('where
+           (format "SELECT * FROM (%s) AS _clutch_filter WHERE %s"
+                   normalized arg))
+          ('count
+           (format "SELECT COUNT(*) FROM (%s) AS _clutch_count"
+                   (clutch--sql-strip-top-level-tail normalized)))
+          (_ (error "Unsupported rewrite op: %s" op))))
+    (error
+     (clutch--sql-rewrite-fallback sql op arg))))
+
 (defun clutch--build-count-sql (sql)
   "Rewrite SQL as a COUNT(*) query.
-For SELECT queries without GROUP BY or HAVING, replaces the SELECT
-column list with COUNT(*) to avoid duplicate-column-name errors in
-derived tables.  Falls back to subquery wrapping otherwise."
-  (let* ((stripped (clutch--strip-leading-comments sql))
-         (trimmed (string-trim-right
-                   (replace-regexp-in-string ";\\s-*\\'" "" stripped)))
-         (case-fold-search t)
-         (from-pos (and (string-match-p "\\`\\s-*SELECT\\b" trimmed)
-                        (clutch--sql-find-top-level-clause trimmed "FROM"))))
-    (if (and from-pos
-             (not (clutch--sql-find-top-level-clause trimmed "GROUP\\s-+BY" from-pos))
-             (not (clutch--sql-find-top-level-clause trimmed "HAVING" from-pos)))
-        (let* ((from-onwards (substring trimmed from-pos))
-               (cut-pos (or (clutch--sql-find-top-level-clause from-onwards "ORDER\\s-+BY")
-                            (clutch--sql-find-top-level-clause from-onwards "LIMIT"))))
-          (format "SELECT COUNT(*) %s"
-                  (if cut-pos
-                      (string-trim-right (substring from-onwards 0 cut-pos))
-                    from-onwards)))
-      (format "SELECT COUNT(*) FROM (%s) AS _dl_cnt" trimmed))))
+Uses the rewrite layer so complex SQL is handled via derived-table count."
+  (clutch--sql-rewrite sql 'count))
 
 (defun clutch-result-count-total ()
   "Query the total row count for the current base query."
@@ -3688,10 +3713,7 @@ If the column is already sorted, toggle the direction."
   "Apply WHERE FILTER to SQL query string.
 Wraps SQL as a derived table and applies FILTER in an outer WHERE.
 This avoids brittle clause injection for CTE/UNION/subquery-heavy SQL."
-  (let* ((trimmed (string-trim-right
-                   (replace-regexp-in-string ";\\s-*\\'" "" sql))))
-    (format "SELECT * FROM (%s) AS _clutch_filter WHERE %s"
-            trimmed filter)))
+  (clutch--sql-rewrite sql 'where filter))
 
 (defun clutch-result-apply-filter ()
   "Apply or clear a WHERE filter on the current result query.

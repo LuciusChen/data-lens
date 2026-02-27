@@ -297,6 +297,30 @@
     (should (string-match-p "^SELECT \\* FROM (.*UNION ALL.*) AS _clutch_filter" result))
     (should (string-match-p "WHERE id > 10\\'" result))))
 
+(ert-deftest clutch-test-build-count-sql-strips-order-and-limit ()
+  "Count SQL should strip top-level ORDER BY / LIMIT / OFFSET clauses."
+  (let ((result (clutch--build-count-sql
+                 "SELECT id, name FROM users ORDER BY created_at DESC LIMIT 10 OFFSET 20")))
+    (should (string-match-p
+             "^SELECT COUNT(\\*) FROM (SELECT id, name FROM users) AS _clutch_count\\'"
+             result))))
+
+(ert-deftest clutch-test-build-count-sql-with-cte ()
+  "Count SQL should wrap CTE query safely."
+  (let* ((sql "WITH x AS (SELECT id FROM t ORDER BY id) SELECT * FROM x ORDER BY id")
+         (result (clutch--build-count-sql sql)))
+    (should (string-match-p "^SELECT COUNT(\\*) FROM (WITH x AS" result))
+    (should (string-match-p ") AS _clutch_count\\'" result))
+    (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
+
+(ert-deftest clutch-test-build-count-sql-with-distinct ()
+  "Count SQL should preserve DISTINCT semantics via derived-table wrapping."
+  (let* ((sql "SELECT DISTINCT user_id FROM visits ORDER BY user_id")
+         (result (clutch--build-count-sql sql)))
+    (should (string-match-p
+             "^SELECT COUNT(\\*) FROM (SELECT DISTINCT user_id FROM visits) AS _clutch_count\\'"
+             result))))
+
 ;;;; Unit tests — separator rendering
 
 (ert-deftest clutch-test-render-separator ()
