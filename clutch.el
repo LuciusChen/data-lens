@@ -709,6 +709,12 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
             (concat spaces str)
           (concat str spaces))))))
 
+(defun clutch--center-padding-widths (content-width width)
+  "Return (LEFT . RIGHT) padding widths to center CONTENT-WIDTH in WIDTH."
+  (let* ((extra (max 0 (- width content-width)))
+         (left (/ extra 2)))
+    (cons left (- extra left))))
+
 ;;;; Column width computation and paging
 
 (defun clutch--numeric-type-p (col-def)
@@ -933,17 +939,21 @@ the real rendered width, preventing column misalignment."
   "Build the display label for column NAME at index CIDX.
 Prepends sort indicator and pin marker before the name."
   (let* ((hi 'font-lock-keyword-face)
+         (pin-face 'clutch-col-page-face)
          (sort (when (and clutch--sort-column
                           (string= name clutch--sort-column))
-                 (clutch--fixed-width-icon
-                  (if clutch--sort-descending
-                      '(codicon . "nf-cod-arrow_down")
-                    '(codicon . "nf-cod-arrow_up"))
-                  (if clutch--sort-descending "▼" "▲")
-                  hi)))
+                 (let ((s (clutch--fixed-width-icon
+                           (if clutch--sort-descending
+                               '(codicon . "nf-cod-arrow_down")
+                             '(codicon . "nf-cod-arrow_up"))
+                           (if clutch--sort-descending "▼" "▲")
+                           hi)))
+                   (when s
+                     (propertize s 'clutch-header-icon t)))))
          (pin (when (memq cidx clutch--pinned-columns)
-                (clutch--fixed-width-icon
-                 '(mdicon . "nf-md-pin") "∎" hi))))
+                (let ((s (clutch--icon '(mdicon . "nf-md-pin") "∎")))
+                  (add-face-text-property 0 (length s) pin-face 'append s)
+                  (propertize s 'clutch-header-icon t)))))
     (if (or sort pin)
         (concat (or sort "") (or pin "") (if (or sort pin) " " "") name)
       name)))
@@ -958,19 +968,22 @@ so the active-column overlay can find it."
       (let* ((name (nth cidx clutch--result-columns))
              (w (aref widths cidx))
              (label (clutch--header-label name cidx))
-             (padded (clutch--string-pad
-                      (if (> (string-width label) w)
-                          (truncate-string-to-width label w)
-                        label)
-                      w))
+             (truncated (if (> (string-width label) w)
+                            (truncate-string-to-width label w)
+                          label))
+             (pads (clutch--center-padding-widths (string-width truncated) w))
+             (lead (make-string (car pads) ?\s))
+             (trail (make-string (cdr pads) ?\s))
+             (cell (concat lead truncated trail))
              (face (if (memq cidx clutch--pinned-columns)
                        'clutch-pinned-header-face
                      'clutch-header-face))
              (pad-str (make-string padding ?\s)))
+        ;; Append base face so icon-specific face (e.g. pin color) is preserved.
+        (add-face-text-property 0 (length cell) face 'append cell)
         (push (concat (propertize "│" 'face 'clutch-border-face)
                       pad-str
-                      (propertize padded
-                                  'face face
+                      (propertize cell
                                   'clutch-header-col cidx)
                       pad-str)
               parts)))
@@ -1127,16 +1140,31 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (truncated (if (> (string-width label) w)
                         (truncate-string-to-width label w)
                       label))
-         (trail (make-string (max 0 (- w (string-width truncated))) ?\s))
+         (pads (clutch--center-padding-widths (string-width truncated) w))
+         (lead (make-string (car pads) ?\s))
+         (trail (make-string (cdr pads) ?\s))
+         (label (copy-sequence truncated))
          (face (cond
                 ((eql cidx active-cidx) 'clutch-header-active-face)
                 ((memq cidx clutch--pinned-columns)
                  'clutch-pinned-header-face)
                 (t 'clutch-header-face)))
          (pad-str (make-string clutch-column-padding ?\s)))
+    ;; Append base/underline style without overwriting icon-specific face.
+    (add-face-text-property 0 (length label)
+                            (list :inherit face :underline t)
+                            'append label)
+    ;; Keep sort/pin icons un-underlined for cleaner visual hierarchy.
+    (dotimes (i (length label))
+      (when (get-text-property i 'clutch-header-icon label)
+        (let ((icon-face (or (get-text-property i 'face label) face)))
+          (put-text-property i (1+ i) 'face
+                             (list '(:underline nil) icon-face)
+                             label))))
     (concat (propertize "│" 'face 'clutch-border-face)
             pad-str
-            (propertize truncated 'face (list :inherit face :underline t)
+            (propertize lead 'face face)
+            (propertize label
                         'clutch-header-col cidx)
             (propertize trail 'face face)
             pad-str)))
