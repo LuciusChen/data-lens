@@ -587,6 +587,13 @@ emacs --batch -L . -l test/pg-test.el
 Unit tests (message encoding, type parsing, auth) run without a server.
 Live tests require the Docker instance above.
 
+* Roadmap
+
+- SQL rewrite engine (AST-based) for safer, semantics-aware transformations
+  across complex queries (CTE/UNION/nested SELECT) and dialect differences.
+  Current filtering uses a safe derived-table wrapper; full AST rewriting is
+  planned for future iterations.
+
 * License
 
 GPL-3.0-or-later. See [[file:LICENSE][LICENSE]].

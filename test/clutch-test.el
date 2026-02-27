@@ -274,13 +274,28 @@
 
 (ert-deftest clutch-test-apply-where ()
   "Test WHERE filter application to SQL."
-  ;; Simple case
-  (should (string-match-p "WHERE.*id = 1"
-                          (clutch--apply-where "SELECT * FROM t" "id = 1")))
-  ;; Query already has WHERE
+  ;; Simple case wraps query and applies outer WHERE
+  (should (string-match-p
+           "SELECT \\* FROM (SELECT \\* FROM t) AS _clutch_filter WHERE id = 1"
+           (clutch--apply-where "SELECT * FROM t" "id = 1")))
+  ;; Query with existing WHERE is wrapped safely
   (let ((result (clutch--apply-where "SELECT * FROM t WHERE x > 0" "id = 1")))
-    (should (string-match-p "WHERE" result))
-    (should (string-match-p "id = 1" result))))
+    (should (string-match-p "FROM (SELECT \\* FROM t WHERE x > 0)" result))
+    (should (string-match-p "WHERE id = 1\\'" result))))
+
+(ert-deftest clutch-test-apply-where-with-cte ()
+  "Test WHERE filter wrapping for CTE SQL."
+  (let* ((sql "WITH x AS (SELECT id FROM t) SELECT * FROM x")
+         (result (clutch--apply-where sql "id > 10")))
+    (should (string-match-p "^SELECT \\* FROM (WITH x AS" result))
+    (should (string-match-p "WHERE id > 10\\'" result))))
+
+(ert-deftest clutch-test-apply-where-with-union ()
+  "Test WHERE filter wrapping for UNION SQL."
+  (let* ((sql "(SELECT id FROM a) UNION ALL (SELECT id FROM b)")
+         (result (clutch--apply-where sql "id > 10")))
+    (should (string-match-p "^SELECT \\* FROM (.*UNION ALL.*) AS _clutch_filter" result))
+    (should (string-match-p "WHERE id > 10\\'" result))))
 
 ;;;; Unit tests — separator rendering
 

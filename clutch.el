@@ -3686,20 +3686,12 @@ If the column is already sorted, toggle the direction."
 
 (defun clutch--apply-where (sql filter)
   "Apply WHERE FILTER to SQL query string.
-If SQL already has a WHERE clause, appends FILTER with AND.
-Otherwise inserts WHERE before ORDER BY/GROUP BY/HAVING/LIMIT or at end."
+Wraps SQL as a derived table and applies FILTER in an outer WHERE.
+This avoids brittle clause injection for CTE/UNION/subquery-heavy SQL."
   (let* ((trimmed (string-trim-right
-                   (replace-regexp-in-string ";\\s-*\\'" "" sql)))
-         (case-fold-search t)
-         (has-where (string-match-p "\\bWHERE\\b" trimmed))
-         (clause (if has-where
-                     (format "AND (%s) " filter)
-                   (format "WHERE %s " filter)))
-         (tail-re "\\b\\(ORDER[[:space:]]+BY\\|GROUP[[:space:]]+BY\\|HAVING\\|LIMIT\\)\\b"))
-    (if (string-match tail-re trimmed)
-        (let ((pos (match-beginning 0)))
-          (concat (substring trimmed 0 pos) clause (substring trimmed pos)))
-      (concat trimmed " " (string-trim-right clause)))))
+                   (replace-regexp-in-string ";\\s-*\\'" "" sql))))
+    (format "SELECT * FROM (%s) AS _clutch_filter WHERE %s"
+            trimmed filter)))
 
 (defun clutch-result-apply-filter ()
   "Apply or clear a WHERE filter on the current result query.
