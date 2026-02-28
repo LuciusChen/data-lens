@@ -259,6 +259,33 @@
   ;; Only comments
   (should (equal (clutch--strip-leading-comments "-- nothing") "")))
 
+(ert-deftest clutch-test-selected-row-indices-priority ()
+  "Selection priority should be marked > region > current row."
+  (with-temp-buffer
+    (setq-local clutch--marked-rows '(7 9))
+    (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+              ((symbol-function 'clutch-result--rows-in-region)
+               (lambda (_beg _end) '(2 3)))
+              ((symbol-function 'clutch-result--row-idx-at-line)
+               (lambda () 1)))
+      (should (equal (clutch-result--selected-row-indices) '(7 9)))))
+  (with-temp-buffer
+    (setq-local clutch--marked-rows nil)
+    (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+              ((symbol-function 'clutch-result--rows-in-region)
+               (lambda (_beg _end) '(2 3)))
+              ((symbol-function 'clutch-result--row-idx-at-line)
+               (lambda () 1))
+              ((symbol-function 'region-beginning) (lambda () 10))
+              ((symbol-function 'region-end) (lambda () 20)))
+      (should (equal (clutch-result--selected-row-indices) '(2 3)))))
+  (with-temp-buffer
+    (setq-local clutch--marked-rows nil)
+    (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
+              ((symbol-function 'clutch-result--row-idx-at-line)
+               (lambda () 4)))
+      (should (equal (clutch-result--selected-row-indices) '(4))))))
+
 (ert-deftest clutch-test-destructive-query-p ()
   "Test destructive query detection."
   (should (clutch--destructive-query-p "DROP TABLE users"))

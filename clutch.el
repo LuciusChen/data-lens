@@ -2901,23 +2901,41 @@ Key bindings:
 ;;;; Row marking (dired-style)
 
 (defun clutch-result--marked-row-indices ()
-  "Return the effective row indices for batch operations.
-Priority: marked rows > current row."
-  (or clutch--marked-rows
+  "Return explicitly marked row indices, or nil when no marks."
+  clutch--marked-rows)
+
+(defun clutch-result--selected-row-indices ()
+  "Return row indices for row-oriented batch operations.
+Priority: marked rows > region rows > current row."
+  (or (clutch-result--marked-row-indices)
+      (when (use-region-p)
+        (clutch-result--rows-in-region (region-beginning) (region-end)))
       (when-let* ((ridx (clutch-result--row-idx-at-line)))
         (list ridx))))
 
-(defun clutch-result--rerender-and-goto (ridx cidx)
-  "Re-render the result buffer and move to cell at RIDX, CIDX.
-Preserves the window scroll position relative to the target row."
-  (let ((win (selected-window))
-        (line-offset (count-lines (window-start) (point))))
-    (clutch--render-result)
-    (clutch--goto-cell ridx cidx)
-    (set-window-start win (save-excursion
-                            (forward-line (- line-offset))
-                            (point))
-                       t)))
+(defun clutch-result--set-row-mark-visual (ridx marked-p)
+  "Update visual mark for row RIDX based on MARKED-P without full re-render."
+  (save-excursion
+    (goto-char (point-min))
+    (when-let* ((m (text-property-search-forward 'clutch-row-idx ridx #'eq)))
+      (let* ((inhibit-read-only t)
+             (bol (save-excursion
+                    (goto-char (prop-match-beginning m))
+                    (line-beginning-position)))
+             (mark-pos (1+ bol))
+             (num-start (1+ mark-pos))
+             (num-end (+ num-start (clutch--row-number-digits)))
+             (face (if marked-p 'clutch-marked-face 'shadow)))
+        (delete-region mark-pos (1+ mark-pos))
+        (insert (propertize (if marked-p "*" " ") 'face face))
+        (put-text-property num-start num-end 'face face)))))
+
+(defun clutch-result--move-to-next-row-same-col (ridx cidx)
+  "Move to row RIDX+1 at column CIDX when available."
+  (let* ((rows (or clutch--filtered-rows clutch--result-rows))
+         (next-ridx (1+ ridx)))
+    (when (< next-ridx (length rows))
+      (clutch--goto-cell next-ridx cidx))))
 
 (defun clutch-result-toggle-mark ()
   "Toggle mark on the row at point and move to next row."
@@ -2925,9 +2943,12 @@ Preserves the window scroll position relative to the target row."
   (when-let* ((ridx (clutch-result--row-idx-at-line))
               (cidx (or (clutch--col-idx-at-point) 0)))
     (if (memq ridx clutch--marked-rows)
-        (setq clutch--marked-rows (delq ridx clutch--marked-rows))
-      (push ridx clutch--marked-rows))
-    (clutch-result--rerender-and-goto (1+ ridx) cidx)))
+        (progn
+          (setq clutch--marked-rows (delq ridx clutch--marked-rows))
+          (clutch-result--set-row-mark-visual ridx nil))
+      (push ridx clutch--marked-rows)
+      (clutch-result--set-row-mark-visual ridx t))
+    (clutch-result--move-to-next-row-same-col ridx cidx)))
 
 (defun clutch-result-unmark-row ()
   "Unmark the row at point and move to next row."
@@ -2935,14 +2956,16 @@ Preserves the window scroll position relative to the target row."
   (when-let* ((ridx (clutch-result--row-idx-at-line))
               (cidx (or (clutch--col-idx-at-point) 0)))
     (setq clutch--marked-rows (delq ridx clutch--marked-rows))
-    (clutch-result--rerender-and-goto (1+ ridx) cidx)))
+    (clutch-result--set-row-mark-visual ridx nil)
+    (clutch-result--move-to-next-row-same-col ridx cidx)))
 
 (defun clutch-result-unmark-all ()
   "Remove all row marks."
   (interactive)
   (when clutch--marked-rows
-    (setq clutch--marked-rows nil)
-    (clutch--render-result)))
+    (dolist (ridx clutch--marked-rows)
+      (clutch-result--set-row-mark-visual ridx nil))
+    (setq clutch--marked-rows nil)))
 
 ;;;; clutch-result-mode
 
@@ -2975,6 +2998,7 @@ Preserves the window scroll position relative to the target row."
     (define-key map "-" #'clutch-result-narrow-column)
     (define-key map (kbd "C-c p") #'clutch-result-pin-column)
     (define-key map (kbd "C-c P") #'clutch-result-unpin-column)
+    (define-key map "f" #'clutch-result-fullscreen-toggle)
     (define-key map "F" #'clutch-result-fullscreen-toggle)
     (define-key map "?" #'clutch-result-dispatch)
     ;; Cell navigation
@@ -3531,11 +3555,12 @@ PK-INDICES are primary key column indices."
       (clutch--execute clutch--last-query clutch-connection))))
 
 (defun clutch-result-delete-rows ()
-  "Delete marked rows (or current row) from the database.
+  "Delete selected rows from the database.
+Selection priority: marked rows > region rows > current row.
 Detects table and primary key, builds DELETE statements,
 and prompts for confirmation before executing."
   (interactive)
-  (let* ((indices (or (clutch-result--marked-row-indices)
+  (let* ((indices (or (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (table (or (clutch-result--detect-table)
                     (user-error "Cannot detect source table")))
@@ -3836,10 +3861,7 @@ Prompts for a pattern; enter empty string to clear."
 Rows: marked > region > current.
 With prefix arg SELECT-COLS, prompt to choose columns."
   (interactive "P")
-  (let* ((indices (or (clutch-result--marked-row-indices)
-                      (when (use-region-p)
-                        (clutch-result--rows-in-region
-                         (region-beginning) (region-end)))
+  (let* ((indices (or (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (col-indices (if select-cols
                           (clutch-result--select-columns)
@@ -3872,10 +3894,7 @@ Rows: marked > region > current.
 With prefix arg SELECT-COLS, prompt to choose columns.
 Includes a header row with column names."
   (interactive "P")
-  (let* ((indices (or (clutch-result--marked-row-indices)
-                      (when (use-region-p)
-                        (clutch-result--rows-in-region
-                         (region-beginning) (region-end)))
+  (let* ((indices (or (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (col-indices (if select-cols
                           (clutch-result--select-columns)
@@ -4525,10 +4544,11 @@ Accumulates input until a semicolon is found, then executes."
     ("e" "Export"           clutch-result-export)]
    ["Other"
     ("=" "Widen column"    clutch-result-widen-column)
-    ("-" "Narrow column"   clutch-result-narrow-column)
-    ("C-c p" "Pin column"  clutch-result-pin-column)
-    ("C-c P" "Unpin column" clutch-result-unpin-column)
-    ("g" "Re-execute"      clutch-result-rerun)
+   ("-" "Narrow column"   clutch-result-narrow-column)
+   ("C-c p" "Pin column"  clutch-result-pin-column)
+   ("C-c P" "Unpin column" clutch-result-unpin-column)
+   ("g" "Re-execute"      clutch-result-rerun)
+    ("f" "Fullscreen"      clutch-result-fullscreen-toggle)
     ("F" "Fullscreen"      clutch-result-fullscreen-toggle)]])
 
 (transient-define-prefix clutch-record-dispatch ()

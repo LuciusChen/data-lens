@@ -399,9 +399,9 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =S=            | Sort descending                               |
 | =c=            | Jump to column                                |
 | =g=            | Re-execute query                              |
-| =e=            | Edit cell value                               |
+| =C-c '=       | Edit cell value                               |
 | =o=            | Insert new row                                |
-| =d=            | Delete row(s) (supports marks)                |
+| =d=            | Delete row(s) (supports marks / region)       |
 | =m=            | Toggle mark on row                            |
 | =u=            | Unmark row                                    |
 | =C-c C-c=     | Commit edits (generates UPDATE)               |
@@ -410,7 +410,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =w=            | Copy row(s) as INSERT (supports region)       |
 | =Y=            | Copy row(s) as CSV (supports region)          |
 | =e=            | Export (csv / csv-all / csv-file / csv-all-file / copy) |
-| =F=            | Toggle fullscreen                             |
+| =f= / =F=      | Toggle fullscreen                             |
 | =?=            | Transient menu                                |
 
 ** Record View (clutch-record-mode) Key Bindings
