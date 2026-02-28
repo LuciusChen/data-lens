@@ -2927,10 +2927,10 @@ Priority: region rows > current row."
     (define-key map "#" #'clutch-result-count-total)
     (define-key map "s" #'clutch-result-sort-by-column)
     (define-key map "S" #'clutch-result-sort-by-column-desc)
-    (define-key map "y" #'clutch-result-yank-cell)
+    (define-key map "Y" #'clutch-result-yank-cell)
     (define-key map "v" #'clutch-result-view-json)
     (define-key map "w" #'clutch-result-copy-row-as-insert)
-    (define-key map "Y" #'clutch-result-copy-as-csv)
+    (define-key map "y" #'clutch-result-copy-as-csv)
     (define-key map "W" #'clutch-result-apply-filter)
     (define-key map (kbd "RET") #'clutch-result-open-record)
     (define-key map "]" #'clutch-result-next-col-page)
@@ -3764,10 +3764,50 @@ Prompts for a pattern; enter empty string to clear."
     (clutch--view-json-value val)))
 
 (defun clutch-result--select-columns ()
-  "Prompt user to select columns via `completing-read-multiple'."
+  "Prompt user to select columns one by one with shrinking candidates.
+Finish with empty input (RET)."
   (let* ((col-names clutch--result-columns)
-         (chosen (completing-read-multiple "Columns: " col-names nil t)))
-    (or (cl-loop for name in chosen
+         (details-by-name
+          (when-let* ((conn clutch-connection)
+                      (table (clutch-result--detect-table))
+                      ((clutch--connection-alive-p conn))
+                      (details (clutch--ensure-column-details conn table)))
+            (let ((ht (make-hash-table :test 'equal)))
+              (dolist (col details)
+                (puthash (plist-get col :name) col ht))
+              ht)))
+         (annotation-fn
+          (lambda (candidate)
+            (let* ((idx (cl-position candidate col-names :test #'string=))
+                   (col-def (and idx (nth idx clutch--result-column-defs)))
+                   (detail (and details-by-name
+                                (gethash candidate details-by-name)))
+                   (type (or (plist-get detail :type)
+                             (when-let* ((cat (plist-get col-def :type-category)))
+                               (symbol-name cat))))
+                   (comment (plist-get detail :comment))
+                   (parts (delq nil (list type comment))))
+              (if parts
+                  (propertize (format "  %s" (string-join parts " | "))
+                              'face 'shadow)
+                ""))))
+         (remaining (copy-sequence col-names))
+         selected done)
+    (while (and remaining (not done))
+      (let* ((completion-extra-properties
+              `(:annotation-function ,annotation-fn))
+             (choice (string-trim
+                      (completing-read "Columns (RET to finish): "
+                                       remaining nil nil))))
+        (cond
+         ((string-empty-p choice)
+          (setq done t))
+         ((member choice remaining)
+          (push choice selected)
+          (setq remaining (delete choice remaining)))
+         (t
+          (user-error "Choose a column from completion list")))))
+    (or (cl-loop for name in (nreverse selected)
                  for idx = (cl-position name col-names :test #'string=)
                  when idx collect idx)
         (user-error "No valid columns selected"))))
@@ -3789,7 +3829,7 @@ Prompts for a pattern; enter empty string to clear."
 
 (defun clutch-result-copy-row-as-insert (&optional select-cols)
   "Copy row(s) as INSERT statement(s) to the kill ring.
-Rows: marked > region > current.
+Rows: region > current.
 With prefix arg SELECT-COLS, prompt to choose columns."
   (interactive "P")
   (let* ((indices (or (clutch-result--selected-row-indices)
@@ -3821,7 +3861,7 @@ With prefix arg SELECT-COLS, prompt to choose columns."
 
 (defun clutch-result-copy-as-csv (&optional select-cols)
   "Copy row(s) as CSV to the kill ring.
-Rows: marked > region > current.
+Rows: region > current.
 With prefix arg SELECT-COLS, prompt to choose columns.
 Includes a header row with column names."
   (interactive "P")
@@ -4464,10 +4504,10 @@ Accumulates input until a semicolon is found, then executes."
     ("C-c C-c" "Commit"    clutch-result-commit)
     ("i" "Insert row"      clutch-result-insert-row)
     ("d" "Delete row(s)"   clutch-result-delete-rows)]
-   ["Copy (C-u = select cols)"
-    ("y" "Yank cell"       clutch-result-yank-cell)
-    ("w" "Row(s) INSERT"   clutch-result-copy-row-as-insert)
-    ("Y" "Row(s) CSV"      clutch-result-copy-as-csv)
+   ["Copy (rows: point/region; cols: all/C-u)"
+    ("Y" "Yank cell"       clutch-result-yank-cell)
+    ("w" "Rows -> INSERT"  clutch-result-copy-row-as-insert)
+    ("y" "Rows -> CSV"     clutch-result-copy-as-csv)
     ("e" "Export"           clutch-result-export)]
    ["Other"
     ("=" "Widen column"    clutch-result-widen-column)

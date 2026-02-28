@@ -280,6 +280,59 @@
                (lambda () 4)))
       (should (equal (clutch-result--selected-row-indices) '(4))))))
 
+(ert-deftest clutch-test-select-columns-shrinks-candidates ()
+  "Column picker should remove already selected columns from candidates."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name" "age"))
+    (let ((inputs '("name" "age" ""))
+          collections)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _args)
+                   (push (copy-sequence collection) collections)
+                   (pop inputs))))
+        (should (equal (clutch-result--select-columns) '(1 2))))
+      (setq collections (nreverse collections))
+      (should (equal (nth 0 collections) '("id" "name" "age")))
+      (should (equal (nth 1 collections) '("id" "age")))
+      (should (equal (nth 2 collections) '("id"))))))
+
+(ert-deftest clutch-test-select-columns-empty-selection-errors ()
+  "Column picker should error when user finishes without selecting any column."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name"))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _args) "")))
+      (should-error (clutch-result--select-columns)
+                    :type 'user-error))))
+
+(ert-deftest clutch-test-select-columns-annotation-shows-type-and-comment ()
+  "Column picker annotation should include type and comment when available."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--result-column-defs
+                '((:name "id" :type-category numeric)
+                  (:name "name" :type-category text)))
+    (let ((clutch-connection 'fake-conn)
+          annotation)
+      (cl-letf (((symbol-function 'clutch-result--detect-table)
+                 (lambda () "users"))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--ensure-column-details)
+                 (lambda (_conn _table)
+                   '((:name "id" :type "bigint" :comment "primary key")
+                     (:name "name" :type "varchar" :comment "user name"))))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt _collection &rest _args)
+                   (setq annotation
+                         (funcall (plist-get completion-extra-properties
+                                             :annotation-function)
+                                  "name"))
+                   "")))
+        (should-error (clutch-result--select-columns) :type 'user-error))
+      (should (string-match-p "varchar" annotation))
+      (should (string-match-p "user name" annotation)))))
+
 (ert-deftest clutch-test-destructive-query-p ()
   "Test destructive query detection."
   (should (clutch--destructive-query-p "DROP TABLE users"))
