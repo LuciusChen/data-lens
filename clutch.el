@@ -3809,10 +3809,10 @@ Finish with empty input (RET)."
     (while (and remaining (not done))
       (let* ((completion-extra-properties
               `(:annotation-function ,annotation-fn))
-             (prompt (if selected
-                         (format "Columns [%s] (RET to finish): "
-                                 (string-join (reverse selected) ", "))
-                       "Columns (RET to finish): "))
+             (chosen (if selected
+                         (string-join (reverse selected) ", ")
+                       "none"))
+             (prompt (format "Columns [selected: %s] (RET to finish): " chosen))
              (choice (string-trim
                       (completing-read prompt
                                        remaining nil nil))))
@@ -3821,7 +3821,9 @@ Finish with empty input (RET)."
           (setq done t))
          ((member choice remaining)
           (push choice selected)
-          (setq remaining (delete choice remaining)))
+          (setq remaining (delete choice remaining))
+          (message "Selected columns: %s"
+                   (string-join (reverse selected) ", ")))
          (t
           (user-error "Choose a column from completion list")))))
     (or (cl-loop for name in (reverse selected)
