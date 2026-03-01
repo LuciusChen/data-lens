@@ -419,8 +419,6 @@ Tip: =c= supports both regular region and rectangular selection
 |-------------+-------------------------------|
 | =RET=       | Expand long field / follow FK |
 | =n= / =p=  | Next row / previous row       |
-| =C-c '=    | Edit field                    |
-| =c=         | Copy... (field / insert)      |
 | =v=         | View JSON field               |
 | =g=         | Refresh                       |
 | =q=         | Quit                          |

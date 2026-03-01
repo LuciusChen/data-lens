@@ -4179,10 +4179,8 @@ previous window layout."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "RET") #'clutch-record-toggle-expand)
-    (define-key map (kbd "C-c '") #'clutch-record-edit-field)
     (define-key map "n" #'clutch-record-next-row)
     (define-key map "p" #'clutch-record-prev-row)
-    (define-key map "c" #'clutch-record-copy-command)
     (define-key map "v" #'clutch-record-view-json)
     (define-key map "q" #'quit-window)
     (define-key map "g" #'clutch-record-refresh)
@@ -4195,10 +4193,8 @@ previous window layout."
 
 \\<clutch-record-mode-map>
   \\[clutch-record-toggle-expand]	Expand/collapse field or follow FK
-  \\[clutch-record-edit-field]	Edit field
   \\[clutch-record-next-row]	Next row
   \\[clutch-record-prev-row]	Previous row
-  \\[clutch-record-copy-command]	Copy... (field/insert)
   \\[clutch-record-refresh]	Refresh"
   (setq truncate-lines nil))
 
@@ -4313,37 +4309,6 @@ MAX-NAME-W is the label column width."
           (message "%s" (clutch--format-value val)))))
     (user-error "No field at point")))
 
-(defun clutch-record-edit-field ()
-  "Edit the field at point in a dedicated buffer."
-  (interactive)
-  (if-let* ((cidx (get-text-property (point) 'clutch-col-idx)))
-      (let* ((ridx clutch-record--row-idx)
-             (result-buf clutch-record--result-buffer)
-             (col-names (buffer-local-value 'clutch--result-columns result-buf))
-             (col-name (nth cidx col-names))
-             (val (get-text-property (point) 'clutch-full-value))
-             (record-buf (current-buffer))
-             (edit-buf (get-buffer-create
-                        (format "*clutch-edit: [%d].%s*" ridx col-name))))
-        (with-current-buffer edit-buf
-          (erase-buffer)
-          (insert (clutch--format-value val))
-          (goto-char (point-min))
-          (clutch-result-edit-mode 1)
-          (setq-local header-line-format
-                      (format " Editing row %d, column \"%s\"  |  C-c C-c: stage  C-c C-k: cancel"
-                              ridx col-name))
-          (setq-local clutch-result--edit-callback
-                      (lambda (new-value)
-                        (with-current-buffer result-buf
-                          (clutch-result--apply-edit ridx cidx new-value))
-                        (when (buffer-live-p record-buf)
-                          (with-current-buffer record-buf
-                            (clutch-record--render)))))
-          (setq-local clutch-result--edit-result-buffer result-buf))
-        (pop-to-buffer edit-buf))
-    (user-error "No field at point")))
-
 (defun clutch-record-next-row ()
   "Show the next row in the Record buffer."
   (interactive)
@@ -4370,41 +4335,6 @@ MAX-NAME-W is the label column width."
   (clutch--view-json-value
    (or (get-text-property (point) 'clutch-full-value)
        (user-error "No field at point"))))
-
-(defun clutch-record-yank-field ()
-  "Copy the field value at point to the kill ring."
-  (interactive)
-  (if-let* ((val (get-text-property (point) 'clutch-full-value)))
-      (let ((text (clutch--format-value val)))
-        (kill-new text)
-        (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…")))
-    (user-error "No field at point")))
-
-(defun clutch-record-copy-as-insert ()
-  "Copy the current record row as an INSERT statement."
-  (interactive)
-  (let ((ridx clutch-record--row-idx)
-        (result-buf clutch-record--result-buffer))
-    (with-current-buffer result-buf
-      (let* ((table (or (clutch-result--detect-table) "TABLE"))
-             (col-names clutch--result-columns)
-             (row (nth ridx clutch--result-rows))
-             (conn (buffer-local-value 'clutch-connection result-buf))
-             (cols (mapconcat (lambda (c)
-                                (clutch-db-escape-identifier conn c))
-                              col-names ", "))
-             (vals (mapconcat #'clutch--value-to-literal row ", ")))
-        (kill-new (format "INSERT INTO %s (%s) VALUES (%s);"
-                          (clutch-db-escape-identifier conn table) cols vals))
-        (message "Copied INSERT statement")))))
-
-(defun clutch-record-copy-command ()
-  "Unified copy entry point for Record view."
-  (interactive)
-  (pcase (completing-read "Copy format: " '("field" "insert") nil t nil nil "field")
-    ("field" (clutch-record-yank-field))
-    ("insert" (clutch-record-copy-as-insert))
-    (_ (user-error "Unsupported copy format"))))
 
 (defun clutch-record-refresh ()
   "Refresh the Record buffer."
@@ -4579,11 +4509,8 @@ Accumulates input until a semicolon is found, then executes."
     ("n" "Next row"     clutch-record-next-row)
     ("p" "Prev row"     clutch-record-prev-row)
     ("RET" "Expand/FK"  clutch-record-toggle-expand)]
-   ["Edit"
-    ("C-c '" "Edit field" clutch-record-edit-field)]
-   ["Copy"
-    ("c" "Copy..."         clutch-record-copy-command)]
    ["Other"
+    ("v" "View JSON" clutch-record-view-json)
     ("g" "Refresh" clutch-record-refresh)
     ("q" "Quit"    quit-window)]])
 
