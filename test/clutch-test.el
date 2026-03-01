@@ -318,10 +318,9 @@
         (clutch-result-aggregate)
         (let ((summary (current-kill 0)))
           (should (string-match-p "Aggregate \\[score\\]" summary))
-          (should (string-match-p "total=1" summary))
-          (should (string-match-p "numeric=1" summary))
           (should (string-match-p "sum=2.5" summary))
-          (should (string-match-p "avg=2.5" summary)))))))
+          (should (string-match-p "avg=2.5" summary))
+          (should (string-match-p "\\[total=1 numeric=1 skipped=0\\]" summary)))))))
 
 (ert-deftest clutch-test-aggregate-region-requires-single-column ()
   "Aggregate should fail when region spans multiple columns."
@@ -346,7 +345,24 @@
         (let ((summary (current-kill 0)))
           (should (string-match-p "Aggregate \\[score\\]" summary))
           (should (string-match-p "sum=4" summary))
-          (should (string-match-p "avg=2" summary)))))))
+          (should (string-match-p "avg=2" summary))
+          (should (string-match-p "\\[total=2 numeric=2 skipped=0\\]" summary)))))))
+
+(ert-deftest clutch-test-aggregate-with-prefix-refines-region ()
+  "C-u aggregate should use refined rectangle selection."
+  (with-temp-buffer
+    (let (kill-ring kill-ring-yank-pointer)
+      (setq-local clutch--result-columns '("id" "score"))
+      (setq-local clutch--result-rows '((1 "1") (2 "2") (3 "3")))
+      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+                ((symbol-function 'clutch-result--region-rectangle-indices)
+                 (lambda () '((0 1 2) 1)))
+                ((symbol-function 'clutch-result--refine-region-rectangle)
+                 (lambda (_rect) '((0 2) 1))))
+        (clutch-result-aggregate t)
+        (let ((summary (current-kill 0)))
+          (should (string-match-p "sum=4" summary))
+          (should (string-match-p "\\[total=2 numeric=2 skipped=0\\]" summary)))))))
 
 (ert-deftest clutch-test-down-cell-keeps-region-active ()
   "Row navigation should keep region active for selection workflows."
@@ -420,10 +436,10 @@
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (&rest _args) "csv"))
                 ((symbol-function 'clutch-result-copy)
-                 (lambda (fmt)
-                   (setq called fmt))))
+                 (lambda (fmt rect)
+                   (setq called (list fmt rect)))))
         (clutch-result-copy-command)
-        (should (equal called 'csv))))))
+        (should (equal called '(csv nil)))))))
 
 (ert-deftest clutch-test-copy-command-defaults-to-tsv ()
   "Copy command should default to TSV format."
@@ -432,10 +448,27 @@
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (&rest _args) "tsv"))
                 ((symbol-function 'clutch-result-copy)
-                 (lambda (fmt)
-                   (setq called fmt))))
+                 (lambda (fmt rect)
+                   (setq called (list fmt rect)))))
         (clutch-result-copy-command)
-        (should (equal called 'tsv))))))
+        (should (equal called '(tsv nil)))))))
+
+(ert-deftest clutch-test-copy-command-with-prefix-refines-region-rectangle ()
+  "C-u copy should refine rectangle and pass it into copy dispatcher."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _args) "csv"))
+                ((symbol-function 'clutch-result--region-rectangle-indices)
+                 (lambda () '((0 1 2) 1 2)))
+                ((symbol-function 'clutch-result--refine-region-rectangle)
+                 (lambda (_rect) '((0 2) 2)))
+                ((symbol-function 'clutch-result-copy)
+                 (lambda (fmt rect)
+                   (setq called (list fmt rect)))))
+        (clutch-result-copy-command t)
+        (should (equal called '(csv ((0 2) . (2)))))))))
 
 (ert-deftest clutch-test-copy-csv-via-unified-entry-uses-region-rectangle ()
   "Unified CSV copy should use rectangle row/column bounds when region is active."

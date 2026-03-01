@@ -3830,36 +3830,88 @@ Prompts for a pattern; enter empty string to clear."
 
 ;;;; Yank cell / Copy row as INSERT
 
-(defun clutch-result-copy (format)
+(defun clutch-result--read-excluded-rows (row-indices)
+  "Read excluded rows from ROW-INDICES (0-based)."
+  (let* ((cands (mapcar (lambda (ridx) (number-to-string (1+ ridx))) row-indices))
+         (picked (completing-read-multiple
+                  "Exclude rows (1-based, comma-separated): "
+                  cands nil t)))
+    (mapcar (lambda (s) (1- (string-to-number s))) picked)))
+
+(defun clutch-result--read-excluded-cols (col-indices)
+  "Read excluded columns from COL-INDICES (0-based)."
+  (let* ((cand-alist
+          (mapcar (lambda (cidx)
+                    (cons (format "%d:%s" (1+ cidx) (nth cidx clutch--result-columns))
+                          cidx))
+                  col-indices))
+         (picked (completing-read-multiple
+                  "Exclude columns: "
+                  (mapcar #'car cand-alist) nil t)))
+    (delq nil (mapcar (lambda (s) (cdr (assoc s cand-alist))) picked))))
+
+(defun clutch-result--refine-region-rectangle (rect)
+  "Refine RECT (ROW-INDICES . COL-INDICES) by excluding rows/columns."
+  (pcase-let* ((`(,row-indices . ,col-indices) rect)
+               (mode (completing-read
+                      "Refine selection: "
+                      '("exclude rows" "exclude columns" "exclude both")
+                      nil t nil nil "exclude rows"))
+               (excluded-rows (if (member mode '("exclude rows" "exclude both"))
+                                  (clutch-result--read-excluded-rows row-indices)
+                                nil))
+               (excluded-cols (if (member mode '("exclude columns" "exclude both"))
+                                  (clutch-result--read-excluded-cols col-indices)
+                                nil))
+               (rows (cl-loop for ridx in row-indices
+                              unless (memq ridx excluded-rows)
+                              collect ridx))
+               (cols (cl-loop for cidx in col-indices
+                              unless (memq cidx excluded-cols)
+                              collect cidx)))
+    (unless rows
+      (user-error "No rows left after exclusion"))
+    (unless cols
+      (user-error "No columns left after exclusion"))
+    (cons rows cols)))
+
+(defun clutch-result-copy (format &optional rect)
   "Unified copy entry point for result buffer.
 FORMAT is one of symbols: `tsv', `csv', `insert'.
 If region is active, copy rectangle bounds from region endpoints.
 Otherwise, copy the current cell."
   (pcase format
     ('tsv
-     (if (use-region-p)
-         (clutch-result--yank-region-cells)
+     (if rect
+         (clutch-result--yank-rectangle-cells rect)
+       (if (use-region-p)
+           (clutch-result--yank-region-cells)
          (pcase-let* ((`(,_ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
                                                (user-error "No cell at point"))))
-           (clutch-result--yank-cell-value val))))
+           (clutch-result--yank-cell-value val)))))
     ('csv
-     (clutch-result--copy-rows-as-csv))
+     (clutch-result--copy-rows-as-csv rect))
     ('insert
-     (clutch-result--copy-rows-as-insert))
+     (clutch-result--copy-rows-as-insert rect))
     (_
      (user-error "Unsupported copy format: %s" format))))
 
-(defun clutch-result-copy-command ()
+(defun clutch-result-copy-command (&optional refine)
   "Prompt for copy FORMAT and dispatch to `clutch-result-copy'."
-  (interactive)
+  (interactive "P")
   (let* ((choice (completing-read "Copy format: " '("tsv" "csv" "insert")
                                   nil t nil nil "tsv"))
          (format (pcase choice
                    ("tsv" 'tsv)
                    ("csv" 'csv)
                    ("insert" 'insert)
-                   (_ 'tsv))))
-    (clutch-result-copy format)))
+                   (_ 'tsv)))
+         (rect (when refine
+                 (unless (use-region-p)
+                   (user-error "Set a region before using C-u"))
+                 (clutch-result--refine-region-rectangle
+                  (clutch-result--region-rectangle-indices)))))
+    (clutch-result-copy format rect)))
 
 (defun clutch-result-yank-cell ()
   "Copy value at point to the kill ring.
@@ -3947,13 +3999,42 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
                (length cells)
                (if (= (length cells) 1) "" "s")))))
 
-(defun clutch-result--aggregate-target ()
+(defun clutch-result--yank-rectangle-cells (rect)
+  "Copy cells from RECT as TSV-like text."
+  (pcase-let* ((`(,row-indices . ,col-indices) rect)
+               (cells
+                (cl-loop for ridx in row-indices
+                         append
+                         (let ((row (nth ridx clutch--result-rows)))
+                           (cl-loop for cidx in col-indices
+                                    collect (list ridx cidx (nth cidx row)))))))
+    (let ((lines nil)
+          (current-row nil)
+          current-values)
+      (dolist (cell cells)
+        (pcase-let ((`(,ridx ,_cidx ,val) cell))
+          (if (or (null current-row) (= ridx current-row))
+              (progn
+                (setq current-row ridx)
+                (push (clutch--format-value val) current-values))
+            (push (string-join (nreverse current-values) "\t") lines)
+            (setq current-row ridx
+                  current-values (list (clutch--format-value val))))))
+      (when current-values
+        (push (string-join (nreverse current-values) "\t") lines))
+      (let ((text (string-join (nreverse lines) "\n")))
+        (kill-new text)
+        (message "Copied %d cell%s from region"
+                 (length cells)
+                 (if (= (length cells) 1) "" "s"))))))
+
+(defun clutch-result--aggregate-target (&optional rect)
   "Return aggregate target as (ROW-INDICES COL-INDEX COL-NAME).
 With region: use rectangle selection and require one selected column.
 Without region: use current cell."
-  (if (use-region-p)
+  (if (or rect (use-region-p))
       (pcase-let* ((`(,row-indices . ,col-indices)
-                    (clutch-result--region-rectangle-indices)))
+                    (or rect (clutch-result--region-rectangle-indices))))
         (unless (= (length col-indices) 1)
           (user-error "Select exactly one column for aggregate"))
         (let ((cidx (car col-indices)))
@@ -4001,24 +4082,27 @@ Without region: use current cell."
 
 (defun clutch-result--format-aggregate-summary (col-name stats)
   "Return aggregate summary string for COL-NAME with STATS."
-  (format "Aggregate [%s]: total=%d numeric=%d skipped=%d sum=%g avg=%g min=%g max=%g"
+  (format "Aggregate [%s]: sum=%g avg=%g min=%g max=%g [total=%d numeric=%d skipped=%d]"
           col-name
-          (plist-get stats :total)
-          (plist-get stats :count)
-          (plist-get stats :skipped)
           (plist-get stats :sum)
           (plist-get stats :avg)
           (plist-get stats :min)
-          (plist-get stats :max)))
+          (plist-get stats :max)
+          (plist-get stats :total)
+          (plist-get stats :count)
+          (plist-get stats :skipped)))
 
-(defun clutch-result-aggregate ()
+(defun clutch-result-aggregate (&optional refine)
   "Aggregate numeric values in one column from region or current column."
-  (interactive)
-  (pcase-let* ((`(,row-indices ,cidx ,col-name) (clutch-result--aggregate-target))
+  (interactive "P")
+  (let ((rect (when (and refine (use-region-p))
+                (clutch-result--refine-region-rectangle
+                 (clutch-result--region-rectangle-indices)))))
+    (pcase-let* ((`(,row-indices ,cidx ,col-name) (clutch-result--aggregate-target rect))
                (stats (clutch-result--compute-aggregate row-indices cidx))
                (summary (clutch-result--format-aggregate-summary col-name stats)))
-    (kill-new summary)
-    (message "%s" summary)))
+      (kill-new summary)
+      (message "%s" summary))))
 
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
@@ -4059,15 +4143,16 @@ Without region: use current cell."
                              cols
                              (mapconcat #'clutch--value-to-literal vals ", ")))))
 
-(defun clutch-result--copy-rows-as-insert ()
+(defun clutch-result--copy-rows-as-insert (&optional rect)
   "Copy row(s) as INSERT statement(s) to the kill ring.
 Rows/columns: region rectangle > current cell."
-  (let* ((rect (if (use-region-p)
-                   (clutch-result--region-rectangle-indices)
+  (let* ((rect (or rect
+                   (if (use-region-p)
+                       (clutch-result--region-rectangle-indices)
                  (pcase-let ((`(,ridx ,cidx ,_v)
                               (or (clutch-result--cell-at-point)
                                   (user-error "No cell at point"))))
-                   (cons (list ridx) (list cidx)))))
+                     (cons (list ridx) (list cidx))))))
          (indices (or (car-safe rect)
                       (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
@@ -4096,16 +4181,17 @@ Rows/columns: region rectangle > current cell."
                    for vals = (mapcar (lambda (i) (nth i row)) col-indices)
                    collect (mapconcat csv-escape vals ",")))))
 
-(defun clutch-result--copy-rows-as-csv ()
+(defun clutch-result--copy-rows-as-csv (&optional rect)
   "Copy row(s) as CSV to the kill ring.
 Rows/columns: region rectangle > current cell.
 Includes a header row with column names."
-  (let* ((rect (if (use-region-p)
-                   (clutch-result--region-rectangle-indices)
+  (let* ((rect (or rect
+                   (if (use-region-p)
+                       (clutch-result--region-rectangle-indices)
                  (pcase-let ((`(,ridx ,cidx ,_v)
                               (or (clutch-result--cell-at-point)
                                   (user-error "No cell at point"))))
-                   (cons (list ridx) (list cidx)))))
+                     (cons (list ridx) (list cidx))))))
          (indices (or (car-safe rect)
                       (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
