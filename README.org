@@ -67,10 +67,9 @@ SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external d
 - Pin/unpin columns, adjust column widths
 - CSV/Org export, copy as INSERT
 - Schema browser with expandable column details (=TAB= to expand/collapse)
-- SQL completion: table/column names scoped to the FROM clause of the current statement, plus keywords; query history
+- SQL completion: table/column names scoped to the FROM clause of the current statement, plus keywords
 - Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
-- Per-connection query history: each console maintains its own history ring, persisted to a connection-specific file on disk
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
 - JSON cell viewer (=v=): pretty-prints JSON/JSONB cell values in a dedicated buffer with =json-ts-mode=
@@ -377,9 +376,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-e=   | Connect / reconnect        |
 | =C-c C-t=   | List all tables            |
 | =C-c C-d=   | DESCRIBE table at point    |
-| =C-c C-l=   | Query history              |
 | =C-c C-p=   | Preview SQL (dry-run)      |
-| =M-x clutch-consult-history= | Browse history with consult (insert selection at point) |
 | =C-c ?=     | Transient menu             |
 | =TAB=       | Complete table/column name |
 
@@ -492,7 +489,6 @@ M-x clutch-repl          ;; Open REPL buffer
 C-c C-e                     ;; Connect to database
 mysql> SELECT * FROM users;  ;; Type SQL, auto-executes on ;
                              ;; Multi-line input supported (continuation prompt ->)
-                             ;; M-p / M-n to browse history
 #+end_src
 
 ** Query Console

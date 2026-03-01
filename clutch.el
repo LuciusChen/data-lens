@@ -38,14 +38,11 @@
 (require 'sql)
 (require 'comint)
 (require 'cl-lib)
-(require 'ring)
 (require 'transient)
 (require 'auth-source)
 
 (declare-function nerd-icons-mdicon "nerd-icons")
 (declare-function nerd-icons-codicon "nerd-icons")
-(declare-function consult--read "consult")
-(declare-function consult--lookup-candidate "consult")
 
 ;;;; Customization
 
@@ -142,17 +139,6 @@ Password resolution order:
                                     (:sql-product symbol)
                                     (:pass-entry string)
                                     (:read-timeout natnum))))
-  :group 'clutch)
-
-(defcustom clutch-history-file
-  (expand-file-name "clutch/history" user-emacs-directory)
-  "File for persisting SQL query history."
-  :type 'file
-  :group 'clutch)
-
-(defcustom clutch-history-length 500
-  "Maximum number of history entries to keep."
-  :type 'natnum
   :group 'clutch)
 
 (defcustom clutch-console-directory
@@ -318,16 +304,6 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (defvar-local clutch-record--expanded-fields nil
   "List of column indices with expanded long fields (Record buffer local).")
 
-;;;; History
-
-(defvar-local clutch--history nil
-  "Ring buffer of SQL queries for this buffer's connection.
-Nil until first loaded.  Each console buffer maintains its own ring
-so history is scoped to the connection that produced it.")
-
-(defvar-local clutch--history-loaded nil
-  "Non-nil when history has been loaded from disk for this buffer.")
-
 (defvar-local clutch--connection-params nil
   "Params plist used to establish the current connection.
 Stored at connect time so the connection can be re-established
@@ -336,55 +312,6 @@ automatically when it drops.")
 (defvar-local clutch--console-name nil
   "Connection name if this buffer is a query console, nil otherwise.
 Set by `clutch-query-console'; used to save/restore buffer content.")
-
-(defun clutch--history-file ()
-  "Return the history file path for the current buffer's connection.
-Uses a per-connection filename derived from the connection key so
-each console has isolated history.  Falls back to `clutch-history-file'
-when no connection is active."
-  (if (clutch--connection-alive-p clutch-connection)
-      (let* ((key      (clutch--connection-key clutch-connection))
-             (safe-key (replace-regexp-in-string "[/:*?\"<>|\\\\]" "-" key))
-             (dir      (file-name-directory (expand-file-name clutch-history-file))))
-        (expand-file-name (concat "clutch-history-" safe-key) dir))
-    clutch-history-file))
-
-(defun clutch--load-history ()
-  "Load history from the connection-specific history file."
-  (unless clutch--history-loaded
-    (setq clutch--history (make-ring clutch-history-length))
-    (let* ((file    (clutch--history-file))
-           (content (when (file-readable-p file)
-                      (let ((coding-system-for-read 'utf-8))
-                        (with-temp-buffer
-                          (insert-file-contents file)
-                          (buffer-string))))))
-      (dolist (entry (nreverse (split-string (or content "") "\0" t)))
-        (ring-insert clutch--history entry)))
-    (setq clutch--history-loaded t)))
-
-(defun clutch--save-history ()
-  "Save history to the connection-specific history file."
-  (when clutch--history
-    (let ((entries nil)
-          (len (ring-length clutch--history))
-          (file (clutch--history-file))
-          (coding-system-for-write 'utf-8-unix))
-      (dotimes (i (min len clutch-history-length))
-        (push (ring-ref clutch--history i) entries))
-      (make-directory (file-name-directory file) t)
-      (with-temp-file file
-        (insert (mapconcat #'identity entries "\0"))))))
-
-(defun clutch--add-history (sql)
-  "Add SQL to history ring, avoiding duplicates at head."
-  (clutch--load-history)
-  (let ((trimmed (string-trim sql)))
-    (unless (string-empty-p trimmed)
-      (when (or (ring-empty-p clutch--history)
-                (not (string= trimmed (ring-ref clutch--history 0))))
-        (ring-insert clutch--history trimmed))
-      (clutch--save-history))))
 
 ;;;; Console persistence
 
@@ -414,33 +341,6 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
       (clutch--save-console))))
 
 (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
-
-(defun clutch-show-history ()
-  "Select a query from history and insert it at point."
-  (interactive)
-  (clutch--load-history)
-  (when (ring-empty-p clutch--history)
-    (user-error "No history entries"))
-  (let* ((entries (ring-elements clutch--history))
-         (choice (completing-read "SQL history: " entries nil t)))
-    (insert choice)))
-
-(defun clutch-consult-history ()
-  "Browse SQL history with consult and insert the selection at point.
-Requires the `consult' package.  Falls back to `clutch-show-history'
-when consult is unavailable."
-  (interactive)
-  (unless (require 'consult nil t)
-    (user-error "consult is not available; use `clutch-show-history' instead"))
-  (clutch--load-history)
-  (when (ring-empty-p clutch--history)
-    (user-error "No history entries"))
-  (when-let* ((entries (ring-elements clutch--history))
-              (choice  (consult--read entries
-                                      :prompt "SQL: "
-                                      :sort nil
-                                      :require-match t)))
-    (insert choice)))
 
 ;;;; Connection management
 
@@ -593,9 +493,7 @@ params; see `clutch-connection-alist' for details."
          (conn    (clutch--build-conn params)))
     (setq clutch-connection conn
           clutch--connection-params params
-          clutch--conn-sql-product product
-          clutch--history nil
-          clutch--history-loaded nil)
+          clutch--conn-sql-product product)
     (clutch--update-mode-line)
     (clutch--refresh-schema-cache conn)
     (message "Connected to %s" (clutch--connection-key conn))))
@@ -653,9 +551,7 @@ window rather than replacing the current window."
                   (conn   (clutch--build-conn params)))
         (setq clutch-connection conn
               clutch--connection-params params
-              clutch--conn-sql-product (plist-get params :sql-product)
-              clutch--history nil
-              clutch--history-loaded nil)
+              clutch--conn-sql-product (plist-get params :sql-product))
         (clutch--update-mode-line)
         (clutch--refresh-schema-cache conn)))))
 
@@ -1690,7 +1586,7 @@ Returns the query result."
 
 (defun clutch--execute (sql &optional conn)
   "Execute SQL on CONN (or current buffer connection).
-Records history, times execution, and displays results.
+Times execution and displays results.
 For SELECT queries, applies pagination (LIMIT/OFFSET).
 Prompts for confirmation on destructive operations."
   (clutch--ensure-connection)
@@ -1702,7 +1598,6 @@ Prompts for confirmation on destructive operations."
                        (truncate-string-to-width (string-trim sql) 80)))
         (user-error "Query cancelled")))
     (clutch--require-risky-dml-confirmation sql)
-    (clutch--add-history sql)
     (setq clutch--executing-p t)
     (clutch--update-mode-line)
     (redisplay t)
@@ -2929,7 +2824,6 @@ If EXPANDED-P, also insert column detail lines using CONN."
     (define-key map (kbd "C-c C-e") #'clutch-connect)
     (define-key map (kbd "C-c C-t") #'clutch-list-tables)
     (define-key map (kbd "C-c C-d") #'clutch-describe-table-at-point)
-    (define-key map (kbd "C-c C-l") #'clutch-show-history)
     (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
     (define-key map (kbd "C-c ?") #'clutch-dispatch)
     map)
@@ -2947,7 +2841,6 @@ Key bindings:
   \\[clutch-connect]	Connect to server
   \\[clutch-list-tables]	List tables
   \\[clutch-describe-table-at-point]	Describe table at point
-  \\[clutch-show-history]	Show query history
   \\[clutch-preview-execution-sql]	Preview SQL to execute"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
   (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
@@ -4719,7 +4612,6 @@ Accumulates input until a semicolon is found, then executes."
   "Execute SQL and print results inline in the REPL."
   (if (not (clutch--connection-alive-p clutch-connection))
       (clutch-repl--output "ERROR: Not connected.  Use C-c C-e to connect.\ndb> ")
-    (clutch--add-history sql)
     (setq clutch--last-query sql)
     (condition-case err
         (let* ((start (float-time))
@@ -4769,10 +4661,9 @@ Accumulates input until a semicolon is found, then executes."
     ("x" "Query at point" clutch-execute-query-at-point)
     ("r" "Region"         clutch-execute-region)
     ("b" "Buffer"         clutch-execute-buffer)
-    ("p" "Preview SQL"    clutch-preview-execution-sql)]
-   ["Edit / History"
-    ("'" "Indirect edit"  clutch-edit-indirect)
-    ("l" "History"        clutch-show-history)]
+   ("p" "Preview SQL"    clutch-preview-execution-sql)]
+   ["Edit"
+    ("'" "Indirect edit"  clutch-edit-indirect)]
    ["Schema"
     ("t" "List tables"    clutch-list-tables)
     ("D" "Describe table" clutch-describe-table-at-point)]])
