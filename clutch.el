@@ -3876,71 +3876,6 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
                                           (user-error "No cell at point"))))
     (clutch--view-json-value val)))
 
-(defun clutch-result--column-details-by-name ()
-  "Return hash table mapping column name to detail plist, or nil."
-  (when-let* ((conn clutch-connection)
-              (table (clutch-result--detect-table))
-              ((clutch--connection-alive-p conn))
-              (details (clutch--ensure-column-details conn table)))
-    (let ((ht (make-hash-table :test 'equal)))
-      (dolist (col details)
-        (puthash (plist-get col :name) col ht))
-      ht)))
-
-(defun clutch-result--column-annotation-function (col-names details-by-name)
-  "Return completion annotation function for COL-NAMES and DETAILS-BY-NAME."
-  (lambda (candidate)
-    (let* ((idx (cl-position candidate col-names :test #'string=))
-           (col-def (and idx (nth idx clutch--result-column-defs)))
-           (detail (and details-by-name
-                        (gethash candidate details-by-name)))
-           (type (or (plist-get detail :type)
-                     (when-let* ((cat (plist-get col-def :type-category)))
-                       (symbol-name cat))))
-           (comment (plist-get detail :comment))
-           (parts (delq nil (list type comment))))
-      (if parts
-          (propertize (format "  %s" (string-join parts " | "))
-                      'face 'shadow)
-        ""))))
-
-(defun clutch-result--read-one-column (remaining selected annotation-fn)
-  "Read one column from REMAINING with SELECTED state and ANNOTATION-FN."
-  (let* ((completion-extra-properties
-          `(:annotation-function ,annotation-fn))
-         (chosen (if selected
-                     (string-join (reverse selected) ", ")
-                   "none"))
-         (prompt (format "Columns [selected: %s] (RET to finish): " chosen)))
-    (string-trim (completing-read prompt remaining nil nil))))
-
-(defun clutch-result--select-columns ()
-  "Prompt user to select columns one by one with shrinking candidates.
-Finish with empty input (RET)."
-  (let* ((col-names clutch--result-columns)
-         (details-by-name (clutch-result--column-details-by-name))
-         (annotation-fn (clutch-result--column-annotation-function
-                         col-names details-by-name))
-         (remaining (copy-sequence col-names))
-         selected done)
-    (while (and remaining (not done))
-      (let ((choice (clutch-result--read-one-column
-                     remaining selected annotation-fn)))
-        (cond
-         ((string-empty-p choice)
-          (setq done t))
-         ((member choice remaining)
-          (push choice selected)
-          (setq remaining (delete choice remaining))
-          (message "Selected columns: %s"
-                   (string-join (reverse selected) ", ")))
-         (t
-          (user-error "Choose a column from completion list")))))
-    (or (cl-loop for name in (reverse selected)
-                 for idx = (cl-position name col-names :test #'string=)
-                 when idx collect idx)
-        (user-error "No valid columns selected"))))
-
 (defun clutch-result--build-insert-statements (indices col-indices table)
   "Return INSERT statement strings for INDICES rows using COL-INDICES into TABLE."
   (let* ((conn      clutch-connection)
@@ -3958,16 +3893,16 @@ Finish with empty input (RET)."
 
 (defun clutch-result--copy-rows-as-insert (&optional select-cols)
   "Copy row(s) as INSERT statement(s) to the kill ring.
-Rows: region > current.  With SELECT-COLS, prompt to choose columns."
+Rows: region > current.  With SELECT-COLS, require region rectangle."
+  (when (and select-cols (not (use-region-p)))
+    (user-error "Set a region to choose rows and columns"))
   (let* ((rect (when (use-region-p) (clutch-result--region-rectangle-indices)))
          (indices (or (car-safe rect)
                       (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (col-indices (or (cdr-safe rect)
-                          (if select-cols
-                              (clutch-result--select-columns)
-                            (cl-loop for i below (length clutch--result-columns)
-                                     collect i))))
+                          (cl-loop for i below (length clutch--result-columns)
+                                   collect i)))
          (table (or (clutch-result--detect-table) "TABLE"))
          (stmts (clutch-result--build-insert-statements indices col-indices table)))
     (kill-new (mapconcat #'identity stmts "\n"))
@@ -3992,17 +3927,17 @@ Rows: region > current.  With SELECT-COLS, prompt to choose columns."
 
 (defun clutch-result--copy-rows-as-csv (&optional select-cols)
   "Copy row(s) as CSV to the kill ring.
-Rows: region > current.  With SELECT-COLS, prompt to choose columns.
+Rows: region > current.  With SELECT-COLS, require region rectangle.
 Includes a header row with column names."
+  (when (and select-cols (not (use-region-p)))
+    (user-error "Set a region to choose rows and columns"))
   (let* ((rect (when (use-region-p) (clutch-result--region-rectangle-indices)))
          (indices (or (car-safe rect)
                       (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (col-indices (or (cdr-safe rect)
-                          (if select-cols
-                              (clutch-result--select-columns)
-                            (cl-loop for i below (length clutch--result-columns)
-                                     collect i))))
+                          (cl-loop for i below (length clutch--result-columns)
+                                   collect i)))
          (lines (clutch-result--build-csv-lines indices col-indices)))
     (kill-new (mapconcat #'identity lines "\n"))
     (message "Copied %d row%s as CSV (%d col%s)"
