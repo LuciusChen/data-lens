@@ -3790,7 +3790,7 @@ Region output is TAB-separated within a row and newline-separated across rows."
               (cl-loop for p from (min eol (1+ pos)) to eol
                        thereis (clutch-result--cell-at p)))))))
 
-(defun clutch-result--region-cells (_beg _end)
+(defun clutch-result--region-cells ()
   "Return cells in active region as a rectangle of (ROW-IDX COL-IDX VALUE)."
   (pcase-let* ((`(,r1 ,c1 ,_v1) (or (clutch-result--cell-at-or-near (region-beginning))
                                     (user-error "No cell at region start")))
@@ -3829,8 +3829,7 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
   "Copy cell values from region as TSV-like text."
   (unless (use-region-p)
     (user-error "Set a region to copy multiple cells"))
-  (let* ((cells (clutch-result--region-cells
-                 (region-beginning) (region-end)))
+  (let* ((cells (clutch-result--region-cells))
          (lines nil)
          (current-row nil)
          current-values)
@@ -3976,13 +3975,6 @@ Rows: region > current.  With SELECT-COLS, prompt to choose columns."
              (length stmts) (if (= (length stmts) 1) "" "s")
              (length col-indices) (if (= (length col-indices) 1) "" "s"))))
 
-(defun clutch-result-copy-row-as-insert (&optional select-cols)
-  "Copy row(s) as INSERT statement(s) to the kill ring.
-Rows: region > current.
-With prefix arg SELECT-COLS, prompt to choose columns."
-  (interactive "P")
-  (clutch-result-copy 'insert select-cols))
-
 (defun clutch-result--build-csv-lines (indices col-indices)
   "Return CSV lines (header + data) for INDICES rows using COL-INDICES columns."
   (let* ((col-names  (mapcar (lambda (i) (nth i clutch--result-columns)) col-indices))
@@ -4016,14 +4008,6 @@ Includes a header row with column names."
     (message "Copied %d row%s as CSV (%d col%s)"
              (length indices) (if (= (length indices) 1) "" "s")
              (length col-indices) (if (= (length col-indices) 1) "" "s"))))
-
-(defun clutch-result-copy-as-csv (&optional select-cols)
-  "Copy row(s) as CSV to the kill ring.
-Rows: region > current.
-With prefix arg SELECT-COLS, prompt to choose columns.
-Includes a header row with column names."
-  (interactive "P")
-  (clutch-result-copy 'csv select-cols))
 
 (defun clutch-result--goto-col-idx (col-idx)
   "Move point to the first data cell matching COL-IDX in the buffer."

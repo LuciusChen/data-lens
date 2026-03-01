@@ -304,7 +304,7 @@
               ((symbol-function 'clutch-result--cell-at-or-near)
                (lambda (pos)
                  (if (= pos 10) '(0 1 nil) '(2 1 nil)))))
-      (should (equal (clutch-result--region-cells 10 20)
+      (should (equal (clutch-result--region-cells)
                      '((0 1 r0c1)
                        (1 1 r1c1)
                        (2 1 r2c1)))))))
@@ -394,7 +394,7 @@
                 ((symbol-function 'region-end)
                  (lambda () 20))
                 ((symbol-function 'clutch-result--region-cells)
-                 (lambda (_beg _end)
+                 (lambda ()
                    '((0 0 1) (0 2 "shanghai") (1 1 "bob")))))
         (clutch-result-yank-cell t)
         (should (equal (current-kill 0) "1\tshanghai\nbob"))))))
@@ -423,8 +423,8 @@
         (clutch-result-copy-command nil)
         (should (equal called '(tsv nil)))))))
 
-(ert-deftest clutch-test-copy-csv-uses-region-rectangle ()
-  "CSV copy should use rectangle row/column bounds when region is active."
+(ert-deftest clutch-test-copy-csv-via-unified-entry-uses-region-rectangle ()
+  "Unified CSV copy should use rectangle row/column bounds when region is active."
   (with-temp-buffer
     (let (kill-ring kill-ring-yank-pointer)
       (setq-local clutch--result-columns '("c0" "c1" "c2"))
@@ -432,11 +432,11 @@
       (cl-letf (((symbol-function 'use-region-p) (lambda () t))
                 ((symbol-function 'clutch-result--region-rectangle-indices)
                  (lambda () '((0 1) 1 2))))
-        (clutch-result-copy-as-csv nil)
+        (clutch-result-copy 'csv nil)
         (should (equal (current-kill 0) "c1,c2\na1,a2\nb1,b2"))))))
 
-(ert-deftest clutch-test-copy-insert-uses-region-rectangle ()
-  "INSERT copy should use rectangle row/column bounds when region is active."
+(ert-deftest clutch-test-copy-insert-via-unified-entry-uses-region-rectangle ()
+  "Unified INSERT copy should use rectangle row/column bounds when region is active."
   (with-temp-buffer
     (let (kill-ring kill-ring-yank-pointer)
       (setq-local clutch-connection 'fake-conn)
@@ -451,7 +451,7 @@
                  (lambda (_conn s) (format "\"%s\"" s)))
                 ((symbol-function 'clutch--value-to-literal)
                  (lambda (v) (format "'%s'" v))))
-        (clutch-result-copy-row-as-insert nil)
+        (clutch-result-copy 'insert nil)
         (should (string-match-p "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('1', 'a');"
                                 (current-kill 0)))
         (should (string-match-p "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('2', 'b');"
