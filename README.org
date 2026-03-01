@@ -53,7 +53,7 @@ SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external d
 
 - Column-paged result display (no horizontal scrolling)
 - SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
-  - =tab-line=: row count, page, elapsed time, SQL query (with =nerd-icons=, Unicode fallback)
+  - =tab-line=: row count, page, elapsed time, aggregate status, and active filters (with =nerd-icons=, Unicode fallback)
   - =header-line=: column names with =│= borders and underlined labels
 - After execution, focus stays in the SQL buffer while results refresh below
 - Last successfully executed SQL region is highlighted in the editor
@@ -392,7 +392,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =N= / =P=     | Next page / previous page (SQL pagination)    |
 | =M->= / =M-<= | Last page / first page                       |
 | =#=            | Query total row count                         |
-| =A=            | Aggregate numeric values (region/current cell; =C-u= refine rows/cols in region) |
+| =A=            | Aggregate numeric values (region/current cell; one summary over selected cells; =C-u= refine rows/cols in region) |
 | =]=            | Next column page                              |
 | =[=            | Previous column page                          |
 | ===            | Widen current column                          |
@@ -418,7 +418,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 
 Tip: =c= supports both regular region and rectangular selection
 (=C-x SPC=, =rectangle-mark-mode=).
-Tip: use =A= after =C-x SPC= to aggregate one selected numeric column quickly.
+Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
 Tip: with active region, =C-u c= / =C-u A= can exclude rows/columns from current selection.
 
 ** Record View (clutch-record-mode) Key Bindings
@@ -439,7 +439,7 @@ Tip: with active region, =C-u c= / =C-u A= can exclude rows/columns from current
 #+begin_src
 1. Write SQL:  SELECT * FROM orders;
 2. C-c C-c    Execute → results displayed with pagination (default 500 rows/page)
-              → tab-line shows: Σ 500 of ? rows • 1 / 1 • ⏱ 42ms • select * from orders
+              → tab-line shows: Σ 500 of ? rows • 1 / 1 • ⏱ 42ms
 3. N / P      Next page / previous page
 4. #          Query total rows → tab-line shows "Σ 500 of 1234 rows"
 5. ] / [      Move across column pages when result has many columns
@@ -448,7 +448,9 @@ Tip: with active region, =C-u c= / =C-u A= can exclude rows/columns from current
               → Appends WHERE clause, re-queries from page 1
 7. /          Client-side filter: type a pattern to narrow visible rows instantly
 8. s          Sort by current column (SQL ORDER BY), re-queries from page 1
-9. W          Enter empty string → clears filter, restores original query
+9. A          Aggregate selected cells/current cell
+              → tab-line adds aggregate status (sum/avg/min/max + [rows/cells/skipped])
+10. W         Enter empty string → clears filter, restores original query
 #+end_src
 
 *** Foreign Key Navigation
