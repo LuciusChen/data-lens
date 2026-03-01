@@ -4029,19 +4029,18 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
                  (if (= (length cells) 1) "" "s"))))))
 
 (defun clutch-result--aggregate-target (&optional rect)
-  "Return aggregate target as (ROW-INDICES COL-INDEX COL-NAME).
-With region: use rectangle selection and require one selected column.
+  "Return aggregate target as (ROW-INDICES COL-INDICES).
+With region: use all selected columns.
 Without region: use current cell."
   (if (or rect (use-region-p))
       (pcase-let* ((`(,row-indices . ,col-indices)
                     (or rect (clutch-result--region-rectangle-indices))))
-        (unless (= (length col-indices) 1)
-          (user-error "Select exactly one column for aggregate"))
-        (let ((cidx (car col-indices)))
-          (list row-indices cidx (nth cidx clutch--result-columns))))
+        (unless col-indices
+          (user-error "No columns selected for aggregate"))
+        (list row-indices col-indices))
     (pcase-let* ((`(,ridx ,cidx ,_val) (or (clutch-result--cell-at-point)
                                            (user-error "No cell at point"))))
-      (list (list ridx) cidx (nth cidx clutch--result-columns)))))
+      (list (list ridx) (list cidx)))))
 
 (defun clutch-result--parse-number (val)
   "Parse VAL into a number or return nil."
@@ -4070,39 +4069,50 @@ Without region: use current cell."
                 sum (+ sum num))
           (setq min-val (if min-val (min min-val num) num))
           (setq max-val (if max-val (max max-val num) num)))))
-    (unless (> count 0)
-      (user-error "No numeric values in selection"))
     (list :total total
           :count count
           :skipped (- total count)
           :sum sum
-          :avg (/ sum count)
+          :avg (if (> count 0) (/ sum count) 0)
           :min min-val
           :max max-val)))
 
 (defun clutch-result--format-aggregate-summary (col-name stats)
   "Return aggregate summary string for COL-NAME with STATS."
-  (format "Aggregate [%s]: sum=%g avg=%g min=%g max=%g [total=%d numeric=%d skipped=%d]"
-          col-name
-          (plist-get stats :sum)
-          (plist-get stats :avg)
-          (plist-get stats :min)
-          (plist-get stats :max)
-          (plist-get stats :total)
-          (plist-get stats :count)
-          (plist-get stats :skipped)))
+  (let ((count (plist-get stats :count)))
+    (if (> count 0)
+        (format "Aggregate [%s]: sum=%g avg=%g min=%g max=%g [total=%d numeric=%d skipped=%d]"
+                col-name
+                (plist-get stats :sum)
+                (plist-get stats :avg)
+                (plist-get stats :min)
+                (plist-get stats :max)
+                (plist-get stats :total)
+                count
+                (plist-get stats :skipped))
+      (format "Aggregate [%s]: n/a [total=%d numeric=0 skipped=%d]"
+              col-name
+              (plist-get stats :total)
+              (plist-get stats :skipped)))))
 
 (defun clutch-result-aggregate (&optional refine)
-  "Aggregate numeric values in one column from region or current column."
+  "Aggregate numeric values from selected columns or current cell."
   (interactive "P")
   (let ((rect (when (and refine (use-region-p))
                 (clutch-result--refine-region-rectangle
                  (clutch-result--region-rectangle-indices)))))
-    (pcase-let* ((`(,row-indices ,cidx ,col-name) (clutch-result--aggregate-target rect))
-               (stats (clutch-result--compute-aggregate row-indices cidx))
-               (summary (clutch-result--format-aggregate-summary col-name stats)))
-      (kill-new summary)
-      (message "%s" summary))))
+    (pcase-let* ((`(,row-indices ,col-indices) (clutch-result--aggregate-target rect))
+                 (summaries
+                  (cl-loop for cidx in col-indices
+                           for col-name = (nth cidx clutch--result-columns)
+                           for stats = (clutch-result--compute-aggregate row-indices cidx)
+                           collect (clutch-result--format-aggregate-summary col-name stats)))
+                 (text (string-join summaries "\n")))
+      (kill-new text)
+      (if (= (length summaries) 1)
+          (message "%s" (car summaries))
+        (message "Aggregated %d columns (copied %d summaries)"
+                 (length summaries) (length summaries))))))
 
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
