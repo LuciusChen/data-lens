@@ -4157,8 +4157,7 @@ Without region: use current cell."
                         :max (plist-get stats :max)
                         :count (plist-get stats :count)))
       (clutch--refresh-display)
-      (kill-new summary)
-      (message "%s" summary))))
+      (kill-new summary))))
 
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
