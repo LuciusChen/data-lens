@@ -2869,7 +2869,9 @@ Key bindings:
     (if-let* ((m (text-property-search-forward 'clutch-col-idx nil
                                                (lambda (_val cur) cur))))
         (goto-char (prop-match-beginning m))
-      (goto-char start))))
+      (goto-char start)))
+  (when (use-region-p)
+    (setq deactivate-mark nil)))
 
 (defun clutch-result-prev-cell ()
   "Move point to the previous cell (left, then wrap to prev row)."
@@ -2881,14 +2883,18 @@ Key bindings:
     (if-let* ((m (text-property-search-backward 'clutch-col-idx nil
                                                 (lambda (_val cur) cur))))
         (goto-char (prop-match-beginning m))
-      (goto-char start))))
+      (goto-char start)))
+  (when (use-region-p)
+    (setq deactivate-mark nil)))
 
 (defun clutch-result-down-cell ()
   "Move to the same column in the next row."
   (interactive)
   (when-let* ((cidx (clutch--col-idx-at-point))
               (ridx (get-text-property (point) 'clutch-row-idx)))
-    (clutch--goto-cell (1+ ridx) cidx)))
+    (clutch--goto-cell (1+ ridx) cidx))
+  (when (use-region-p)
+    (setq deactivate-mark nil)))
 
 (defun clutch-result-up-cell ()
   "Move to the same column in the previous row."
@@ -2896,7 +2902,9 @@ Key bindings:
   (when-let* ((cidx (clutch--col-idx-at-point))
               (ridx (get-text-property (point) 'clutch-row-idx))
               ((> ridx 0)))
-    (clutch--goto-cell (1- ridx) cidx)))
+    (clutch--goto-cell (1- ridx) cidx))
+  (when (use-region-p)
+    (setq deactivate-mark nil)))
 
 ;;;; Row selection (region-based)
 
@@ -3776,24 +3784,35 @@ Region output is TAB-separated within a row and newline-separated across rows."
     (kill-new text)
     (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
 
-(defun clutch-result--region-cells (beg end)
-  "Return unique cells in region BEG..END as (ROW-IDX COL-IDX VALUE) list."
-  (let ((pos beg)
-        (seen (make-hash-table :test 'equal))
-        cells)
-    (while (< pos end)
-      (let ((ridx (get-text-property pos 'clutch-row-idx))
-            (cidx (get-text-property pos 'clutch-col-idx)))
-        (when (and ridx cidx)
-          (let ((key (cons ridx cidx)))
-            (unless (gethash key seen)
-              (puthash key t seen)
-              (push (list ridx cidx
-                          (get-text-property pos 'clutch-full-value))
-                    cells)))))
-      (setq pos (or (next-single-property-change pos 'clutch-col-idx nil end)
-                    end)))
-    (nreverse cells)))
+(defun clutch-result--cell-at-or-near (pos)
+  "Return cell triple at POS, or nearest cell on the same line."
+  (or (clutch-result--cell-at pos)
+      (save-excursion
+        (goto-char pos)
+        (let ((bol (line-beginning-position))
+              (eol (line-end-position)))
+          (or (cl-loop for p downfrom (max bol (1- pos)) to bol
+                       thereis (clutch-result--cell-at p))
+              (cl-loop for p from (min eol (1+ pos)) to eol
+                       thereis (clutch-result--cell-at p)))))))
+
+(defun clutch-result--region-cells (_beg _end)
+  "Return cells in active region as a rectangle of (ROW-IDX COL-IDX VALUE)."
+  (pcase-let* ((`(,r1 ,c1 ,_v1) (or (clutch-result--cell-at-or-near (region-beginning))
+                                    (user-error "No cell at region start")))
+               (`(,r2 ,c2 ,_v2) (or (clutch-result--cell-at-or-near (max (point-min)
+                                                                       (1- (region-end))))
+                                    (user-error "No cell at region end")))
+               (row-min (min r1 r2))
+               (row-max (max r1 r2))
+               (col-min (min c1 c2))
+               (col-max (max c1 c2))
+               (rows clutch--result-rows))
+    (cl-loop for ridx from row-min to row-max
+             append
+             (let ((row (nth ridx rows)))
+               (cl-loop for cidx from col-min to col-max
+                        collect (list ridx cidx (nth cidx row)))))))
 
 (defun clutch-result--yank-region-cells ()
   "Copy cell values from region as TSV-like text."

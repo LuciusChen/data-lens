@@ -280,6 +280,35 @@
                (lambda () 4)))
       (should (equal (clutch-result--selected-row-indices) '(4))))))
 
+(ert-deftest clutch-test-down-cell-keeps-region-active ()
+  "Row navigation should keep region active for selection workflows."
+  (with-temp-buffer
+    (let ((deactivate-mark t))
+      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+                ((symbol-function 'clutch--col-idx-at-point) (lambda () 1))
+                ((symbol-function 'get-text-property)
+                 (lambda (_pos prop) (when (eq prop 'clutch-row-idx) 2)))
+                ((symbol-function 'clutch--goto-cell) (lambda (&rest _args) nil)))
+        (clutch-result-down-cell)
+        (should-not deactivate-mark)))))
+
+(ert-deftest clutch-test-region-cells-rectangle ()
+  "Region cell extraction should use rectangular cell bounds."
+  (with-temp-buffer
+    (setq-local clutch--result-rows
+                '((r0c0 r0c1 r0c2)
+                  (r1c0 r1c1 r1c2)
+                  (r2c0 r2c1 r2c2)))
+    (cl-letf (((symbol-function 'region-beginning) (lambda () 10))
+              ((symbol-function 'region-end) (lambda () 20))
+              ((symbol-function 'clutch-result--cell-at-or-near)
+               (lambda (pos)
+                 (if (= pos 10) '(0 1 nil) '(2 1 nil)))))
+      (should (equal (clutch-result--region-cells 10 20)
+                     '((0 1 r0c1)
+                       (1 1 r1c1)
+                       (2 1 r2c1)))))))
+
 (ert-deftest clutch-test-select-columns-shrinks-candidates ()
   "Column picker should remove already selected columns from candidates."
   (with-temp-buffer
