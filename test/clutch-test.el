@@ -307,19 +307,21 @@
       (should (equal (clutch-result--selected-row-indices) '(4))))))
 
 (ert-deftest clutch-test-aggregate-current-column-without-region ()
-  "Aggregate should use current column over visible rows when region is inactive."
+  "Aggregate should use current cell when region is inactive."
   (with-temp-buffer
     (let (kill-ring kill-ring-yank-pointer)
       (setq-local clutch--result-columns '("id" "score"))
       (setq-local clutch--result-rows '((1 "1.5") (2 "2.5") (3 "x") (4 4)))
       (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-                ((symbol-function 'clutch--col-idx-at-point) (lambda () 1)))
+                ((symbol-function 'clutch-result--cell-at-point)
+                 (lambda () '(1 1 "2.5"))))
         (clutch-result-aggregate)
         (let ((summary (current-kill 0)))
           (should (string-match-p "Aggregate \\[score\\]" summary))
-          (should (string-match-p "numeric=3" summary))
-          (should (string-match-p "skipped=1" summary))
-          (should (string-match-p "sum=8" summary)))))))
+          (should (string-match-p "total=1" summary))
+          (should (string-match-p "numeric=1" summary))
+          (should (string-match-p "sum=2.5" summary))
+          (should (string-match-p "avg=2.5" summary)))))))
 
 (ert-deftest clutch-test-aggregate-region-requires-single-column ()
   "Aggregate should fail when region spans multiple columns."
@@ -516,8 +518,11 @@
   "Risky DML should detect UPDATE/DELETE without top-level WHERE."
   (should (clutch--risky-dml-p "UPDATE users SET name='x'"))
   (should (clutch--risky-dml-p "DELETE FROM users"))
+  (should (clutch--risky-dml-p "WITH x AS (SELECT 1) UPDATE users SET name='x'"))
   (should-not (clutch--risky-dml-p "UPDATE users SET name='x' WHERE id=1"))
   (should-not (clutch--risky-dml-p "DELETE FROM users WHERE id=1"))
+  (should-not (clutch--risky-dml-p "WITH x AS (SELECT 1) UPDATE users SET name='x' WHERE id=1"))
+  (should-not (clutch--risky-dml-p "WITH x AS (SELECT 1) SELECT * FROM x"))
   (should-not (clutch--risky-dml-p "SELECT * FROM users")))
 
 (ert-deftest clutch-test-require-risky-dml-confirmation-cancels ()

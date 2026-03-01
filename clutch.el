@@ -1558,11 +1558,21 @@ Leading SQL comments are stripped before checking."
     (string-match-p "\\`\\(?:DELETE\\|DROP\\|TRUNCATE\\|ALTER\\)\\b"
                     (upcase trimmed))))
 
+(defun clutch--sql-main-op-keyword (sql)
+  "Return main top-level operation keyword for SQL, or nil."
+  (let* ((normalized (clutch--sql-normalize-for-rewrite sql))
+         (candidates
+          (cl-loop for kw in '("UPDATE" "DELETE" "SELECT" "INSERT" "REPLACE" "MERGE")
+                   for pos = (clutch--sql-find-top-level-clause normalized kw)
+                   when pos collect (cons kw pos)))
+         (first (car (sort candidates (lambda (a b) (< (cdr a) (cdr b)))))))
+    (car-safe first)))
+
 (defun clutch--risky-dml-p (sql)
   "Return non-nil for top-level UPDATE/DELETE statements without WHERE."
-  (let* ((normalized (clutch--sql-normalize-for-rewrite sql))
-         (upper (upcase normalized)))
-    (and (string-match-p "\\`\\(?:UPDATE\\|DELETE\\)\\b" upper)
+  (let ((normalized (clutch--sql-normalize-for-rewrite sql))
+        (main-op (clutch--sql-main-op-keyword sql)))
+    (and (member main-op '("UPDATE" "DELETE"))
          (not (clutch--sql-find-top-level-clause normalized "WHERE")))))
 
 (defun clutch--require-risky-dml-confirmation (sql)
@@ -3940,7 +3950,7 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
 (defun clutch-result--aggregate-target ()
   "Return aggregate target as (ROW-INDICES COL-INDEX COL-NAME).
 With region: use rectangle selection and require one selected column.
-Without region: use current column over visible rows."
+Without region: use current cell."
   (if (use-region-p)
       (pcase-let* ((`(,row-indices . ,col-indices)
                     (clutch-result--region-rectangle-indices)))
@@ -3948,11 +3958,9 @@ Without region: use current column over visible rows."
           (user-error "Select exactly one column for aggregate"))
         (let ((cidx (car col-indices)))
           (list row-indices cidx (nth cidx clutch--result-columns))))
-    (if-let* ((cidx (clutch--col-idx-at-point)))
-        (let ((row-indices
-               (cl-loop for ridx below (length clutch--result-rows) collect ridx)))
-          (list row-indices cidx (nth cidx clutch--result-columns)))
-      (user-error "No column at point"))))
+    (pcase-let* ((`(,ridx ,cidx ,_val) (or (clutch-result--cell-at-point)
+                                           (user-error "No cell at point"))))
+      (list (list ridx) cidx (nth cidx clutch--result-columns)))))
 
 (defun clutch-result--parse-number (val)
   "Parse VAL into a number or return nil."
