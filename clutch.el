@@ -1558,6 +1558,20 @@ Leading SQL comments are stripped before checking."
     (string-match-p "\\`\\(?:DELETE\\|DROP\\|TRUNCATE\\|ALTER\\)\\b"
                     (upcase trimmed))))
 
+(defun clutch--risky-dml-p (sql)
+  "Return non-nil for top-level UPDATE/DELETE statements without WHERE."
+  (let* ((normalized (clutch--sql-normalize-for-rewrite sql))
+         (upper (upcase normalized)))
+    (and (string-match-p "\\`\\(?:UPDATE\\|DELETE\\)\\b" upper)
+         (not (clutch--sql-find-top-level-clause normalized "WHERE")))))
+
+(defun clutch--require-risky-dml-confirmation (sql)
+  "Require explicit typed confirmation for risky DML SQL."
+  (when (clutch--risky-dml-p sql)
+    (let ((token (read-string "High-risk DML (no WHERE). Type YES to continue: ")))
+      (unless (string= token "YES")
+        (user-error "Query cancelled")))))
+
 (defun clutch--select-query-p (sql)
   "Return non-nil if SQL is a SELECT query.
 Leading SQL comments are stripped before checking."
@@ -1642,6 +1656,7 @@ Prompts for confirmation on destructive operations."
                (format "Execute destructive query?\n  %s\n"
                        (truncate-string-to-width (string-trim sql) 80)))
         (user-error "Query cancelled")))
+    (clutch--require-risky-dml-confirmation sql)
     (clutch--add-history sql)
     (setq clutch--executing-p t)
     (clutch--update-mode-line)
@@ -1707,6 +1722,48 @@ Prompts for confirmation on destructive operations."
             (if (re-search-forward delimiter nil t)
                 (match-beginning 0)
               (point-max))))))
+
+(defun clutch--preview-sql-buffer (sql)
+  "Display SQL in the *clutch-preview* buffer."
+  (let ((buf (get-buffer-create "*clutch-preview*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert sql)
+        (goto-char (point-min))
+        (if (derived-mode-p 'sql-mode)
+            (setq buffer-read-only t)
+          (when (fboundp 'sql-mode)
+            (sql-mode))
+          (setq buffer-read-only t))))
+    (pop-to-buffer buf)))
+
+(defun clutch-preview-execution-sql ()
+  "Preview SQL that would execute in the current workflow."
+  (interactive)
+  (let ((sql
+         (cond
+          ((derived-mode-p 'clutch-result-mode)
+           (cond
+            (clutch--pending-edits
+             (mapconcat (lambda (s) (concat s ";"))
+                        (nreverse (clutch-result--build-update-statements))
+                        "\n"))
+            ((use-region-p)
+             (mapconcat (lambda (s) (concat s ";"))
+                        (clutch-result--build-delete-statements)
+                        "\n"))
+            (clutch--last-query
+             clutch--last-query)))
+          ((use-region-p)
+           (string-trim (buffer-substring-no-properties
+                         (region-beginning) (region-end))))
+          (t
+           (pcase-let* ((`(,beg . ,end) (clutch--query-bounds-at-point)))
+             (string-trim (buffer-substring-no-properties beg end)))))))
+    (when (or (null sql) (string-empty-p sql))
+      (user-error "No SQL to preview"))
+    (clutch--preview-sql-buffer sql)))
 
 ;;;; Interactive commands
 
@@ -2828,6 +2885,7 @@ If EXPANDED-P, also insert column detail lines using CONN."
     (define-key map (kbd "C-c C-t") #'clutch-list-tables)
     (define-key map (kbd "C-c C-d") #'clutch-describe-table-at-point)
     (define-key map (kbd "C-c C-l") #'clutch-show-history)
+    (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
     (define-key map (kbd "C-c ?") #'clutch-dispatch)
     map)
   "Keymap for `clutch-mode'.")
@@ -2844,7 +2902,8 @@ Key bindings:
   \\[clutch-connect]	Connect to server
   \\[clutch-list-tables]	List tables
   \\[clutch-describe-table-at-point]	Describe table at point
-  \\[clutch-show-history]	Show query history"
+  \\[clutch-show-history]	Show query history
+  \\[clutch-preview-execution-sql]	Preview SQL to execute"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
   (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
   (add-hook 'completion-at-point-functions
@@ -2933,6 +2992,7 @@ Priority: region rows > current row."
     (define-key map (kbd "M->") #'clutch-result-last-page)
     (define-key map (kbd "M-<") #'clutch-result-first-page)
     (define-key map "#" #'clutch-result-count-total)
+    (define-key map "A" #'clutch-result-aggregate)
     (define-key map "s" #'clutch-result-sort-by-column)
     (define-key map "S" #'clutch-result-sort-by-column-desc)
     (define-key map "c" #'clutch-result-copy-command)
@@ -2945,6 +3005,7 @@ Priority: region rows > current row."
     (define-key map "-" #'clutch-result-narrow-column)
     (define-key map (kbd "C-c p") #'clutch-result-pin-column)
     (define-key map (kbd "C-c P") #'clutch-result-unpin-column)
+    (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
     (define-key map "f" #'clutch-result-fullscreen-toggle)
     (define-key map (kbd "C-c ?") #'clutch-result-dispatch)
     ;; Cell navigation
@@ -3054,11 +3115,13 @@ Navigate (row):
   \\[clutch-result-first-page]	First data page
   \\[clutch-result-last-page]	Last data page
   \\[clutch-result-count-total]	Query total row count
+  \\[clutch-result-aggregate]	Aggregate current/selected column values
   \\[clutch-result-next-col-page]	Next column page
   \\[clutch-result-prev-col-page]	Previous column page
 Copy:
   \\[clutch-result-copy-command]	Copy... (tsv/csv/insert)
   \\[clutch-result-export]	Export all rows (copy/file)
+  \\[clutch-preview-execution-sql]	Preview SQL to execute
 Edit:
   \\[clutch-result-edit-cell]	Edit cell value
   \\[clutch-result-commit]	Commit edits as UPDATE
@@ -3379,6 +3442,19 @@ Returns hash-table mapping ridx → list of (cidx . value)."
       (push (cons cidx val) (gethash ridx ht)))
     ht))
 
+(defun clutch--sql-has-top-level-where-p (sql)
+  "Return non-nil if SQL has a top-level WHERE clause."
+  (not (null (clutch--sql-find-top-level-clause
+              (clutch--sql-normalize-for-rewrite sql) "WHERE"))))
+
+(defun clutch-result--ensure-where-guard (statements op-name)
+  "Ensure every statement in STATEMENTS has a top-level WHERE."
+  (dolist (stmt statements)
+    (unless (clutch--sql-has-top-level-where-p stmt)
+      (user-error "%s blocked: statement without WHERE: %s"
+                  op-name
+                  (truncate-string-to-width (string-trim stmt) 120 nil nil "…")))))
+
 (defun clutch-result--build-update-stmt (table row _ridx edits col-names pk-indices)
   "Build an UPDATE statement for TABLE.
 ROW is the original row data at _RIDX, EDITS is a list of (cidx . value),
@@ -3409,6 +3485,7 @@ COL-NAMES are column names, PK-INDICES are primary key column indices."
 (defun clutch-result--confirm-and-run-updates (statements)
   "Prompt for confirmation and execute UPDATE STATEMENTS.
 Clear pending edits and re-run the last query if confirmed."
+  (clutch-result--ensure-where-guard statements "UPDATE")
   (let ((sql-text (mapconcat (lambda (s) (concat s ";"))
                              (nreverse statements) "\n")))
     (when (yes-or-no-p
@@ -3427,9 +3504,8 @@ Clear pending edits and re-run the last query if confirmed."
                (if (= (length statements) 1) "" "s"))
       (clutch--execute clutch--last-query clutch-connection))))
 
-(defun clutch-result-commit ()
-  "Generate and execute UPDATE statements for pending edits."
-  (interactive)
+(defun clutch-result--build-update-statements ()
+  "Build UPDATE statements from `clutch--pending-edits'."
   (unless clutch--pending-edits
     (user-error "No pending edits"))
   (let* ((table (or (clutch-result--detect-table)
@@ -3439,13 +3515,19 @@ Clear pending edits and re-run the last query if confirmed."
          (col-names clutch--result-columns)
          (rows clutch--result-rows)
          (by-row (clutch-result--group-edits-by-row clutch--pending-edits))
-         (statements nil))
+         statements)
     (maphash
      (lambda (ridx edits)
        (push (clutch-result--build-update-stmt
               table (nth ridx rows) ridx edits col-names pk-indices)
              statements))
      by-row)
+    statements))
+
+(defun clutch-result-commit ()
+  "Generate and execute UPDATE statements for pending edits."
+  (interactive)
+  (let ((statements (clutch-result--build-update-statements)))
     (clutch-result--confirm-and-run-updates statements)))
 
 ;;;; Delete rows
@@ -3471,6 +3553,7 @@ PK-INDICES are primary key column indices."
 
 (defun clutch-result--confirm-and-run-deletes (statements)
   "Prompt for confirmation, execute DELETE STATEMENTS, clear marks, refresh."
+  (clutch-result--ensure-where-guard statements "DELETE")
   (let ((sql-text (mapconcat (lambda (s) (concat s ";")) statements "\n")))
     (when (yes-or-no-p
            (format "Execute %d DELETE statement%s?\n\n%s\n\n"
@@ -3488,12 +3571,8 @@ PK-INDICES are primary key column indices."
                (if (= (length statements) 1) "" "s"))
       (clutch--execute clutch--last-query clutch-connection))))
 
-(defun clutch-result-delete-rows ()
-  "Delete selected rows from the database.
-Selection priority: region rows > current row.
-Detects table and primary key, builds DELETE statements,
-and prompts for confirmation before executing."
-  (interactive)
+(defun clutch-result--build-delete-statements ()
+  "Build DELETE statements from selected rows."
   (let* ((indices (or (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (table (or (clutch-result--detect-table)
@@ -3501,11 +3580,19 @@ and prompts for confirmation before executing."
          (pk-indices (or (clutch-result--detect-primary-key)
                          (user-error "Cannot detect primary key for %s" table)))
          (col-names clutch--result-columns)
-         (rows clutch--result-rows)
-         (statements (mapcar (lambda (ridx)
-                               (clutch-result--build-delete-stmt
-                                table (nth ridx rows) col-names pk-indices))
-                             indices)))
+         (rows clutch--result-rows))
+    (mapcar (lambda (ridx)
+              (clutch-result--build-delete-stmt
+               table (nth ridx rows) col-names pk-indices))
+            indices)))
+
+(defun clutch-result-delete-rows ()
+  "Delete selected rows from the database.
+Selection priority: region rows > current row.
+Detects table and primary key, builds DELETE statements,
+and prompts for confirmation before executing."
+  (interactive)
+  (let ((statements (clutch-result--build-delete-statements)))
     (clutch-result--confirm-and-run-deletes statements)))
 
 ;;;; Insert row
@@ -3849,6 +3936,81 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
       (message "Copied %d cell%s from region"
                (length cells)
                (if (= (length cells) 1) "" "s")))))
+
+(defun clutch-result--aggregate-target ()
+  "Return aggregate target as (ROW-INDICES COL-INDEX COL-NAME).
+With region: use rectangle selection and require one selected column.
+Without region: use current column over visible rows."
+  (if (use-region-p)
+      (pcase-let* ((`(,row-indices . ,col-indices)
+                    (clutch-result--region-rectangle-indices)))
+        (unless (= (length col-indices) 1)
+          (user-error "Select exactly one column for aggregate"))
+        (let ((cidx (car col-indices)))
+          (list row-indices cidx (nth cidx clutch--result-columns))))
+    (if-let* ((cidx (clutch--col-idx-at-point)))
+        (let ((row-indices
+               (cl-loop for ridx below (length clutch--result-rows) collect ridx)))
+          (list row-indices cidx (nth cidx clutch--result-columns)))
+      (user-error "No column at point"))))
+
+(defun clutch-result--parse-number (val)
+  "Parse VAL into a number or return nil."
+  (cond
+   ((numberp val) val)
+   ((stringp val)
+    (let ((s (string-trim val)))
+      (when (and (not (string-empty-p s))
+                 (string-match-p
+                  "\\`[+-]?\\(?:[0-9]+\\(?:\\.[0-9]*\\)?\\|\\.[0-9]+\\)\\'" s))
+        (string-to-number s))))
+   (t nil)))
+
+(defun clutch-result--compute-aggregate (row-indices cidx)
+  "Compute aggregate stats for ROW-INDICES and column CIDX."
+  (let ((count 0)
+        (sum 0.0)
+        min-val
+        max-val
+        (total (length row-indices)))
+    (dolist (ridx row-indices)
+      (let* ((row (nth ridx clutch--result-rows))
+             (num (clutch-result--parse-number (nth cidx row))))
+        (when num
+          (setq count (1+ count)
+                sum (+ sum num))
+          (setq min-val (if min-val (min min-val num) num))
+          (setq max-val (if max-val (max max-val num) num)))))
+    (unless (> count 0)
+      (user-error "No numeric values in selection"))
+    (list :total total
+          :count count
+          :skipped (- total count)
+          :sum sum
+          :avg (/ sum count)
+          :min min-val
+          :max max-val)))
+
+(defun clutch-result--format-aggregate-summary (col-name stats)
+  "Return aggregate summary string for COL-NAME with STATS."
+  (format "Aggregate [%s]: total=%d numeric=%d skipped=%d sum=%g avg=%g min=%g max=%g"
+          col-name
+          (plist-get stats :total)
+          (plist-get stats :count)
+          (plist-get stats :skipped)
+          (plist-get stats :sum)
+          (plist-get stats :avg)
+          (plist-get stats :min)
+          (plist-get stats :max)))
+
+(defun clutch-result-aggregate ()
+  "Aggregate numeric values in one column from region or current column."
+  (interactive)
+  (pcase-let* ((`(,row-indices ,cidx ,col-name) (clutch-result--aggregate-target))
+               (stats (clutch-result--compute-aggregate row-indices cidx))
+               (summary (clutch-result--format-aggregate-summary col-name stats)))
+    (kill-new summary)
+    (message "%s" summary)))
 
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
@@ -4457,7 +4619,8 @@ Accumulates input until a semicolon is found, then executes."
    ["Execute"
     ("x" "Query at point" clutch-execute-query-at-point)
     ("r" "Region"         clutch-execute-region)
-    ("b" "Buffer"         clutch-execute-buffer)]
+    ("b" "Buffer"         clutch-execute-buffer)
+    ("p" "Preview SQL"    clutch-preview-execution-sql)]
    ["Edit / History"
     ("'" "Indirect edit"  clutch-edit-indirect)
     ("l" "History"        clutch-show-history)]
@@ -4485,6 +4648,7 @@ Accumulates input until a semicolon is found, then executes."
    ["Filter / Sort"
     ("/" "Filter rows"     clutch-result-filter)
     ("W" "WHERE filter"    clutch-result-apply-filter)
+    ("A" "Aggregate"       clutch-result-aggregate)
     ("s" "Sort ASC"        clutch-result-sort-by-column)
     ("S" "Sort DESC"       clutch-result-sort-by-column-desc)]]
   [["Edit"
@@ -4501,6 +4665,7 @@ Accumulates input until a semicolon is found, then executes."
    ("C-c p" "Pin column"  clutch-result-pin-column)
    ("C-c P" "Unpin column" clutch-result-unpin-column)
    ("g" "Re-execute"      clutch-result-rerun)
+    ("x" "Preview SQL"     clutch-preview-execution-sql)
     ("f" "Fullscreen"      clutch-result-fullscreen-toggle)]])
 
 (transient-define-prefix clutch-record-dispatch ()

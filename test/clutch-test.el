@@ -306,6 +306,46 @@
                (lambda () 4)))
       (should (equal (clutch-result--selected-row-indices) '(4))))))
 
+(ert-deftest clutch-test-aggregate-current-column-without-region ()
+  "Aggregate should use current column over visible rows when region is inactive."
+  (with-temp-buffer
+    (let (kill-ring kill-ring-yank-pointer)
+      (setq-local clutch--result-columns '("id" "score"))
+      (setq-local clutch--result-rows '((1 "1.5") (2 "2.5") (3 "x") (4 4)))
+      (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
+                ((symbol-function 'clutch--col-idx-at-point) (lambda () 1)))
+        (clutch-result-aggregate)
+        (let ((summary (current-kill 0)))
+          (should (string-match-p "Aggregate \\[score\\]" summary))
+          (should (string-match-p "numeric=3" summary))
+          (should (string-match-p "skipped=1" summary))
+          (should (string-match-p "sum=8" summary)))))))
+
+(ert-deftest clutch-test-aggregate-region-requires-single-column ()
+  "Aggregate should fail when region spans multiple columns."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "a" "b"))
+    (setq-local clutch--result-rows '((1 10 20) (2 11 21)))
+    (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+              ((symbol-function 'clutch-result--region-rectangle-indices)
+               (lambda () '((0 1) 1 2))))
+      (should-error (clutch-result-aggregate) :type 'user-error))))
+
+(ert-deftest clutch-test-aggregate-region-single-column ()
+  "Aggregate should support rectangular region for one selected column."
+  (with-temp-buffer
+    (let (kill-ring kill-ring-yank-pointer)
+      (setq-local clutch--result-columns '("id" "score"))
+      (setq-local clutch--result-rows '((1 "1") (2 "2") (3 "3")))
+      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+                ((symbol-function 'clutch-result--region-rectangle-indices)
+                 (lambda () '((0 2) 1))))
+        (clutch-result-aggregate)
+        (let ((summary (current-kill 0)))
+          (should (string-match-p "Aggregate \\[score\\]" summary))
+          (should (string-match-p "sum=4" summary))
+          (should (string-match-p "avg=2" summary)))))))
+
 (ert-deftest clutch-test-down-cell-keeps-region-active ()
   "Row navigation should keep region active for selection workflows."
   (with-temp-buffer
@@ -471,6 +511,52 @@
   (should (clutch--destructive-query-p "-- cleanup\nDROP TABLE users"))
   (should-not (clutch--destructive-query-p "SELECT * FROM users"))
   (should-not (clutch--destructive-query-p "UPDATE users SET name='x'")))
+
+(ert-deftest clutch-test-risky-dml-p ()
+  "Risky DML should detect UPDATE/DELETE without top-level WHERE."
+  (should (clutch--risky-dml-p "UPDATE users SET name='x'"))
+  (should (clutch--risky-dml-p "DELETE FROM users"))
+  (should-not (clutch--risky-dml-p "UPDATE users SET name='x' WHERE id=1"))
+  (should-not (clutch--risky-dml-p "DELETE FROM users WHERE id=1"))
+  (should-not (clutch--risky-dml-p "SELECT * FROM users")))
+
+(ert-deftest clutch-test-require-risky-dml-confirmation-cancels ()
+  "Risky DML should be cancelled unless user types YES."
+  (cl-letf (((symbol-function 'clutch--risky-dml-p) (lambda (_sql) t))
+            ((symbol-function 'read-string) (lambda (&rest _args) "NO")))
+    (should-error (clutch--require-risky-dml-confirmation "UPDATE users SET x=1")
+                  :type 'user-error)))
+
+(ert-deftest clutch-test-require-risky-dml-confirmation-accepts-yes ()
+  "Risky DML should proceed when user types YES."
+  (cl-letf (((symbol-function 'clutch--risky-dml-p) (lambda (_sql) t))
+            ((symbol-function 'read-string) (lambda (&rest _args) "YES")))
+    (should (null (clutch--require-risky-dml-confirmation "UPDATE users SET x=1")))))
+
+(ert-deftest clutch-test-ensure-where-guard-blocks-missing-where ()
+  "Generated DML statements must contain top-level WHERE."
+  (should-error
+   (clutch-result--ensure-where-guard '("UPDATE t SET x=1") "UPDATE")
+   :type 'user-error)
+  (should-error
+   (clutch-result--ensure-where-guard '("DELETE FROM t") "DELETE")
+   :type 'user-error)
+  (should (null (clutch-result--ensure-where-guard
+                 '("UPDATE t SET x=1 WHERE id=1" "DELETE FROM t WHERE id=1")
+                 "UPDATE"))))
+
+(ert-deftest clutch-test-preview-execution-sql-prefers-pending-edits-in-result-mode ()
+  "Preview in result mode should show generated UPDATE SQL when edits exist."
+  (with-temp-buffer
+    (let (captured)
+      (setq-local clutch--pending-edits '(((0 . 1) . "v")))
+      (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _modes) t))
+                ((symbol-function 'clutch-result--build-update-statements)
+                 (lambda () '("UPDATE t SET name='v' WHERE id=1")))
+                ((symbol-function 'clutch--preview-sql-buffer)
+                 (lambda (sql) (setq captured sql))))
+        (clutch-preview-execution-sql)
+        (should (string-match-p "UPDATE t SET name='v' WHERE id=1;" captured))))))
 
 (ert-deftest clutch-test-select-query-p ()
   "Test SELECT query detection."
@@ -689,6 +775,21 @@
       (should disconnected)
       (should-not clutch-connection)
       (should-not clutch--executing-p))))
+
+(ert-deftest clutch-test-execute-runs-risky-dml-confirmation ()
+  "Execute should run risky DML confirmation before dispatch."
+  (let ((called nil)
+        (clutch-connection 'fake-conn))
+    (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
+              ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
+              ((symbol-function 'clutch--require-risky-dml-confirmation)
+               (lambda (_sql) (setq called t)))
+              ((symbol-function 'clutch--add-history) (lambda (_sql) nil))
+              ((symbol-function 'clutch--update-mode-line) (lambda () nil))
+              ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
+              ((symbol-function 'clutch--execute-select) (lambda (&rest _args) 'ok)))
+      (clutch--execute "UPDATE users SET x=1" clutch-connection)
+      (should called))))
 
 
 ;;;; Unit tests — SQL keyword completion
