@@ -897,6 +897,67 @@
     (let ((result (clutch-sql-keyword-completion-at-point)))
       (should-not result))))
 
+;;;; Unit tests — REPL
+
+(ert-deftest clutch-test-repl-input-sender-accumulates-until-semicolon ()
+  "REPL input sender should accumulate partial SQL and show continuation prompt."
+  (with-temp-buffer
+    (let ((clutch-repl--pending-input "")
+          output)
+      (cl-letf (((symbol-function 'clutch-repl--output)
+                 (lambda (text) (push text output)))
+                ((symbol-function 'clutch-repl--execute-and-print)
+                 (lambda (_sql) (error "should not execute"))))
+        (clutch-repl--input-sender nil "SELECT 1")
+        (should (equal clutch-repl--pending-input "SELECT 1"))
+        (should (equal (car output) "    -> "))))))
+
+(ert-deftest clutch-test-repl-input-sender-executes-on-semicolon ()
+  "REPL input sender should execute when statement ends with semicolon."
+  (with-temp-buffer
+    (let ((clutch-repl--pending-input "SELECT")
+          sent)
+      (cl-letf (((symbol-function 'clutch-repl--execute-and-print)
+                 (lambda (sql) (setq sent sql)))
+                ((symbol-function 'clutch-repl--output)
+                 (lambda (_text) (error "should not output continuation"))))
+        (clutch-repl--input-sender nil " 1;")
+        (should (equal sent "SELECT\n 1;"))
+        (should (equal clutch-repl--pending-input ""))))))
+
+(ert-deftest clutch-test-repl-execute-and-print-not-connected ()
+  "REPL should print not-connected message when no live connection."
+  (with-temp-buffer
+    (let (captured)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) nil))
+                ((symbol-function 'clutch-repl--output)
+                 (lambda (text) (setq captured text))))
+        (clutch-repl--execute-and-print "SELECT 1")
+        (should (string-match-p "Not connected" captured))
+        (should (string-match-p "db> $" captured))))))
+
+(ert-deftest clutch-test-repl-execute-and-print-select-result ()
+  "REPL should print table summary for SELECT results."
+  (with-temp-buffer
+    (let ((clutch-connection 'fake-conn)
+          output)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (_conn _sql)
+                   (make-clutch-db-result
+                    :columns '((:name "id"))
+                    :rows '((1)))))
+                ((symbol-function 'clutch--column-names)
+                 (lambda (_columns) '("id")))
+                ((symbol-function 'clutch--render-static-table)
+                 (lambda (_col-names _rows _columns) "| id |\n| 1 |"))
+                ((symbol-function 'clutch-repl--output)
+                 (lambda (text) (setq output text))))
+        (clutch-repl--execute-and-print "SELECT 1;")
+        (should (string-match-p "| id |" output))
+        (should (string-match-p "1 row" output))
+        (should (string-match-p "db> $" output))))))
+
 ;;;; Live integration tests
 
 (defmacro clutch-test--with-conn (var &rest body)

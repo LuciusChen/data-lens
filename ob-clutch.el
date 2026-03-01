@@ -41,7 +41,7 @@
 (require 'cl-lib)
 (require 'clutch-db)
 
-(defvar clutch-connection-alist)
+(defvar clutch-connection-alist nil)
 
 (defvar org-babel-default-header-args:clutch '((:results . "table"))
   "Default header arguments for clutch source blocks.")
