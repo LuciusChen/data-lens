@@ -2946,7 +2946,6 @@ Priority: region rows > current row."
     (define-key map (kbd "C-c p") #'clutch-result-pin-column)
     (define-key map (kbd "C-c P") #'clutch-result-unpin-column)
     (define-key map "f" #'clutch-result-fullscreen-toggle)
-    (define-key map "F" #'clutch-result-fullscreen-toggle)
     (define-key map "?" #'clutch-result-dispatch)
     ;; Cell navigation
     (define-key map (kbd "TAB") #'clutch-result-next-cell)
@@ -3059,7 +3058,7 @@ Navigate (row):
   \\[clutch-result-prev-col-page]	Previous column page
 Copy:
   \\[clutch-result-copy-command]	Copy... (tsv/csv/insert)
-  \\[clutch-result-export]	Export results
+  \\[clutch-result-export]	Export all rows (copy/file)
 Edit:
   \\[clutch-result-edit-cell]	Edit cell value
   \\[clutch-result-commit]	Commit edits as UPDATE
@@ -4172,7 +4171,7 @@ previous window layout."
           (current-window-configuration))
     (delete-other-windows)
     (clutch--refresh-display)
-    (message "Fullscreen (press F again to restore)")))
+    (message "Fullscreen (press f again to restore)")))
 
 ;;;; Record buffer
 
@@ -4183,9 +4182,8 @@ previous window layout."
     (define-key map (kbd "C-c '") #'clutch-record-edit-field)
     (define-key map "n" #'clutch-record-next-row)
     (define-key map "p" #'clutch-record-prev-row)
-    (define-key map "y" #'clutch-record-yank-field)
+    (define-key map "c" #'clutch-record-copy-command)
     (define-key map "v" #'clutch-record-view-json)
-    (define-key map "w" #'clutch-record-copy-as-insert)
     (define-key map "q" #'quit-window)
     (define-key map "g" #'clutch-record-refresh)
     (define-key map "?" #'clutch-record-dispatch)
@@ -4200,8 +4198,7 @@ previous window layout."
   \\[clutch-record-edit-field]	Edit field
   \\[clutch-record-next-row]	Next row
   \\[clutch-record-prev-row]	Previous row
-  \\[clutch-record-yank-field]	Copy field value
-  \\[clutch-record-copy-as-insert]	Copy row as INSERT
+  \\[clutch-record-copy-command]	Copy... (field/insert)
   \\[clutch-record-refresh]	Refresh"
   (setq truncate-lines nil))
 
@@ -4401,6 +4398,14 @@ MAX-NAME-W is the label column width."
                           (clutch-db-escape-identifier conn table) cols vals))
         (message "Copied INSERT statement")))))
 
+(defun clutch-record-copy-command ()
+  "Unified copy entry point for Record view."
+  (interactive)
+  (pcase (completing-read "Copy format: " '("field" "insert") nil t nil nil "field")
+    ("field" (clutch-record-yank-field))
+    ("insert" (clutch-record-copy-as-insert))
+    (_ (user-error "Unsupported copy format"))))
+
 (defun clutch-record-refresh ()
   "Refresh the Record buffer."
   (interactive)
@@ -4566,8 +4571,7 @@ Accumulates input until a semicolon is found, then executes."
    ("C-c p" "Pin column"  clutch-result-pin-column)
    ("C-c P" "Unpin column" clutch-result-unpin-column)
    ("g" "Re-execute"      clutch-result-rerun)
-    ("f" "Fullscreen"      clutch-result-fullscreen-toggle)
-    ("F" "Fullscreen"      clutch-result-fullscreen-toggle)]])
+    ("f" "Fullscreen"      clutch-result-fullscreen-toggle)]])
 
 (transient-define-prefix clutch-record-dispatch ()
   "Dispatch menu for clutch record buffer."
@@ -4578,8 +4582,7 @@ Accumulates input until a semicolon is found, then executes."
    ["Edit"
     ("C-c '" "Edit field" clutch-record-edit-field)]
    ["Copy"
-    ("y" "Yank field"      clutch-record-yank-field)
-    ("w" "Row as INSERT"   clutch-record-copy-as-insert)]
+    ("c" "Copy..."         clutch-record-copy-command)]
    ["Other"
     ("g" "Refresh" clutch-record-refresh)
     ("q" "Quit"    quit-window)]])

@@ -384,12 +384,13 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | Key            | Action                                        |
 |----------------+-----------------------------------------------|
 | =RET=          | Open record view                              |
-| =n= / =p=     | Next page / previous page (SQL pagination)    |
+| =n= / =p=     | Next row / previous row (same column)         |
+| =N= / =P=     | Next page / previous page (SQL pagination)    |
 | =M->= / =M-<= | Last page / first page                       |
 | =#=            | Query total row count                         |
 | =]=            | Next column page                              |
 | =[=            | Previous column page                          |
-| =+=            | Widen current column                          |
+| ===            | Widen current column                          |
 | =-=            | Narrow current column                         |
 | =C-c p=        | Pin current column                            |
 | =C-c P=        | Unpin column                                  |
@@ -406,7 +407,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =c=            | Copy... (choose format: tsv / csv / insert; region = selected block, no region = current cell) |
 | =v=            | View JSON cell (pretty-printed in new buffer) |
 | =e=            | Export all rows (copy / file)                     |
-| =f= / =F=      | Toggle fullscreen                             |
+| =f=            | Toggle fullscreen                             |
 | =?=            | Transient menu                                |
 
 Tip: =c= supports both regular region and rectangular selection
@@ -419,9 +420,8 @@ Tip: =c= supports both regular region and rectangular selection
 | =RET=       | Expand long field / follow FK |
 | =n= / =p=  | Next row / previous row       |
 | =C-c '=    | Edit field                    |
-| =y=         | Copy field value              |
+| =c=         | Copy... (field / insert)      |
 | =v=         | View JSON field               |
-| =w=         | Copy row as INSERT            |
 | =g=         | Refresh                       |
 | =q=         | Quit                          |
 
@@ -433,7 +433,7 @@ Tip: =c= supports both regular region and rectangular selection
 1. Write SQL:  SELECT * FROM orders;
 2. C-c C-c    Execute → results displayed with pagination (default 500 rows/page)
               → tab-line shows: Σ 500 of ? rows • 1 / 1 • ⏱ 42ms • select * from orders
-3. n / p      Next page / previous page
+3. N / P      Next page / previous page
 4. #          Query total rows → tab-line shows "Σ 500 of 1234 rows"
 5. W          Enter filter: status = 'pending'
               → Appends WHERE clause, re-queries from page 1

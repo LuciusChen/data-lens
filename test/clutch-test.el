@@ -395,6 +395,32 @@
         (clutch-result-copy-command)
         (should (equal called 'tsv))))))
 
+(ert-deftest clutch-test-record-copy-command-dispatches-to-field ()
+  "Record copy command should dispatch to field copier."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "field"))
+                ((symbol-function 'clutch-record-yank-field)
+                 (lambda () (setq called 'field)))
+                ((symbol-function 'clutch-record-copy-as-insert)
+                 (lambda () (setq called 'insert))))
+        (clutch-record-copy-command)
+        (should (eq called 'field))))))
+
+(ert-deftest clutch-test-record-copy-command-dispatches-to-insert ()
+  "Record copy command should dispatch to INSERT copier."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "insert"))
+                ((symbol-function 'clutch-record-yank-field)
+                 (lambda () (setq called 'field)))
+                ((symbol-function 'clutch-record-copy-as-insert)
+                 (lambda () (setq called 'insert))))
+        (clutch-record-copy-command)
+        (should (eq called 'insert))))))
+
 (ert-deftest clutch-test-copy-csv-via-unified-entry-uses-region-rectangle ()
   "Unified CSV copy should use rectangle row/column bounds when region is active."
   (with-temp-buffer
