@@ -235,6 +235,24 @@
         (should (equal (clutch-result--collect-all-export-rows) '((1) (2))))
         (should (= calls 1))))))
 
+(ert-deftest clutch-test-footer-filter-parts-omits-sql-preview ()
+  "Footer filter parts should no longer include last SQL preview text."
+  (with-temp-buffer
+    (setq-local clutch--last-query "SELECT id FROM t")
+    (should (equal (clutch--footer-filter-parts) nil))))
+
+(ert-deftest clutch-test-footer-filter-parts-includes-aggregate-summary ()
+  "Footer filter parts should include aggregate summary segment."
+  (with-temp-buffer
+    (setq-local clutch--aggregate-summary
+                '(:label "selection" :rows 2 :cells 4 :skipped 0
+                         :sum 62 :avg 15.5 :min 10 :max 21 :count 4))
+    (let ((parts (clutch--footer-filter-parts)))
+      (should (= (length parts) 1))
+      (should-not (string-match-p "selection" (car parts)))
+      (should (string-match-p "sum=62" (car parts)))
+      (should (string-match-p "\\[r2 c4 s0\\]" (car parts))))))
+
 (ert-deftest clutch-test-export-command-dispatches-copy ()
   "Export command should dispatch to all-rows clipboard export."
   (with-temp-buffer
@@ -320,10 +338,10 @@
           (should (string-match-p "Aggregate \\[score\\]" summary))
           (should (string-match-p "sum=2.5" summary))
           (should (string-match-p "avg=2.5" summary))
-          (should (string-match-p "\\[total=1 numeric=1 skipped=0\\]" summary)))))))
+          (should (string-match-p "\\[rows=1 cells=1 skipped=0\\]" summary)))))))
 
 (ert-deftest clutch-test-aggregate-region-multi-column-aggregates-all-columns ()
-  "Aggregate should summarize all selected columns."
+  "Aggregate should summarize all selected cells as one result."
   (with-temp-buffer
     (let (kill-ring kill-ring-yank-pointer)
       (setq-local clutch--result-columns '("id" "a" "b"))
@@ -333,11 +351,10 @@
                  (lambda () '((0 1) 1 2))))
         (clutch-result-aggregate)
         (let ((summary (current-kill 0)))
-          (should (string-match-p "Aggregate \\[a\\]" summary))
-          (should (string-match-p "sum=21" summary))
-          (should (string-match-p "Aggregate \\[b\\]" summary))
-          (should (string-match-p "sum=41" summary))
-          (should (string-match-p "\\[total=2 numeric=2 skipped=0\\]" summary)))))))
+          (should (string-match-p "Aggregate \\[selection\\]" summary))
+          (should (string-match-p "sum=62" summary))
+          (should (string-match-p "avg=15.5" summary))
+          (should (string-match-p "\\[rows=2 cells=4 skipped=0\\]" summary)))))))
 
 (ert-deftest clutch-test-aggregate-region-single-column ()
   "Aggregate should support rectangular region for one selected column."
@@ -355,7 +372,7 @@
           (should (string-match-p "Aggregate \\[score\\]" summary))
           (should (string-match-p "sum=4" summary))
           (should (string-match-p "avg=2" summary))
-          (should (string-match-p "\\[total=2 numeric=2 skipped=0\\]" summary)))))))
+          (should (string-match-p "\\[rows=2 cells=2 skipped=0\\]" summary)))))))
 
 (ert-deftest clutch-test-aggregate-with-prefix-refines-region ()
   "C-u aggregate should use refined rectangle selection."
@@ -373,7 +390,7 @@
         (clutch-result-aggregate t)
         (let ((summary (current-kill 0)))
           (should (string-match-p "sum=4" summary))
-          (should (string-match-p "\\[total=2 numeric=2 skipped=0\\]" summary)))))))
+          (should (string-match-p "\\[rows=2 cells=2 skipped=0\\]" summary)))))))
 
 (ert-deftest clutch-test-down-cell-keeps-region-active ()
   "Row navigation should keep region active for selection workflows."

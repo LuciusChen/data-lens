@@ -305,6 +305,10 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
 (defvar-local clutch--filtered-rows nil
   "Filtered subset of `clutch--result-rows', or nil when unfiltered.")
 
+(defvar-local clutch--aggregate-summary nil
+  "Last aggregate summary plist for result footer, or nil.
+Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
+
 (defvar-local clutch-record--result-buffer nil
   "Reference to the parent result buffer (Record buffer local).")
 
@@ -1078,28 +1082,57 @@ ROW-COUNT is the current page count, TOTAL-ROWS is the overall total or nil."
                           'face hi)
               (propertize " rows" 'face dim)))))
 
+(defun clutch--footer-aggregate-part ()
+  "Build footer part for the last aggregate summary."
+  (when-let* ((stats clutch--aggregate-summary))
+    (let* ((dim 'font-lock-comment-face)
+           (hi 'font-lock-keyword-face)
+           (label (plist-get stats :label))
+           (label-part (unless (string= label "selection")
+                         (propertize (format "[%s] " label) 'face dim))))
+      (if (> (plist-get stats :count) 0)
+          (concat
+           (propertize (concat (clutch--icon '(mdicon . "nf-md-calculator_variant") "∑") " ")
+                       'face dim)
+           label-part
+           (propertize (format " sum=%g avg=%g min=%g max=%g"
+                               (plist-get stats :sum)
+                               (plist-get stats :avg)
+                               (plist-get stats :min)
+                               (plist-get stats :max))
+                       'face hi)
+           (propertize (format " [r%d c%d s%d]"
+                               (plist-get stats :rows)
+                               (plist-get stats :cells)
+                               (plist-get stats :skipped))
+                       'face dim))
+        (concat
+         (propertize (concat (clutch--icon '(mdicon . "nf-md-calculator_variant") "∑") " ")
+                     'face dim)
+         label-part
+         (propertize " n/a" 'face hi)
+         (propertize (format " [r%d c%d s%d]"
+                             (plist-get stats :rows)
+                             (plist-get stats :cells)
+                             (plist-get stats :skipped))
+                     'face dim))))))
+
 (defun clutch--footer-filter-parts ()
-  "Build footer parts for active filters and query preview.
+  "Build footer parts for active filters and aggregate summary.
 Returns a list of propertized strings (may be empty)."
-  (let ((dim 'font-lock-comment-face))
-    (delq nil
-          (list
-           (when clutch--where-filter
-             (let ((icon (clutch--icon '(codicon . "nf-cod-filter") "W:")))
-               (concat (propertize (concat icon " ") 'face 'font-lock-warning-face)
-                       (propertize clutch--where-filter
-                                   'face 'font-lock-warning-face))))
-           (when clutch--filter-pattern
-             (let ((icon (clutch--icon '(codicon . "nf-cod-search") "/:")))
-               (concat (propertize (concat icon " ") 'face 'font-lock-string-face)
-                       (propertize clutch--filter-pattern
-                                   'face 'font-lock-string-face))))
-           (when clutch--last-query
-             (propertize (truncate-string-to-width
-                          (replace-regexp-in-string
-                           "[\n\r]+" " " (string-trim clutch--last-query))
-                          60 nil nil t)
-                         'face dim))))))
+  (delq nil
+        (list
+         (clutch--footer-aggregate-part)
+         (when clutch--where-filter
+           (let ((icon (clutch--icon '(codicon . "nf-cod-filter") "W:")))
+             (concat (propertize (concat icon " ") 'face 'font-lock-warning-face)
+                     (propertize clutch--where-filter
+                                 'face 'font-lock-warning-face))))
+         (when clutch--filter-pattern
+           (let ((icon (clutch--icon '(codicon . "nf-cod-search") "/:")))
+             (concat (propertize (concat icon " ") 'face 'font-lock-string-face)
+                     (propertize clutch--filter-pattern
+                                 'face 'font-lock-string-face)))))))
 
 (defun clutch--footer-main-parts (row-count page-num page-size
                                              total-rows col-num-pages col-cur-page)
@@ -1448,7 +1481,8 @@ IGNORE-BUFFER is excluded from liveness checks."
   (setq-local clutch--sort-descending nil)
   (setq-local clutch--page-current 0)
   (setq-local clutch--page-total-rows (length rows))
-  (setq-local clutch--order-by nil))
+  (setq-local clutch--order-by nil)
+  (setq-local clutch--aggregate-summary nil))
 
 (defun clutch--display-result (result sql elapsed)
   "Display RESULT in the result buffer.
@@ -1611,7 +1645,8 @@ the result data, ELAPSED the query time.  Returns column names."
                 clutch--order-by nil
                 clutch--query-elapsed elapsed
                 clutch--filter-pattern nil
-                clutch--filtered-rows nil)
+                clutch--filtered-rows nil
+                clutch--aggregate-summary nil)
     col-names))
 
 (defun clutch--execute-select (sql connection)
@@ -4054,45 +4089,49 @@ Without region: use current cell."
         (string-to-number s))))
    (t nil)))
 
-(defun clutch-result--compute-aggregate (row-indices cidx)
-  "Compute aggregate stats for ROW-INDICES and column CIDX."
-  (let ((count 0)
+(defun clutch-result--compute-aggregate (row-indices col-indices)
+  "Compute aggregate stats for ROW-INDICES across COL-INDICES."
+  (let* ((rows (length row-indices))
+         (cells (* rows (length col-indices)))
+         (count 0)
         (sum 0.0)
         min-val
-        max-val
-        (total (length row-indices)))
+        max-val)
     (dolist (ridx row-indices)
-      (let* ((row (nth ridx clutch--result-rows))
-             (num (clutch-result--parse-number (nth cidx row))))
-        (when num
-          (setq count (1+ count)
-                sum (+ sum num))
-          (setq min-val (if min-val (min min-val num) num))
-          (setq max-val (if max-val (max max-val num) num)))))
-    (list :total total
+      (let ((row (nth ridx clutch--result-rows)))
+        (dolist (cidx col-indices)
+          (let ((num (clutch-result--parse-number (nth cidx row))))
+            (when num
+              (setq count (1+ count)
+                    sum (+ sum num))
+              (setq min-val (if min-val (min min-val num) num))
+              (setq max-val (if max-val (max max-val num) num)))))))
+    (list :rows rows
+          :cells cells
           :count count
-          :skipped (- total count)
+          :skipped (- cells count)
           :sum sum
           :avg (if (> count 0) (/ sum count) 0)
           :min min-val
           :max max-val)))
 
-(defun clutch-result--format-aggregate-summary (col-name stats)
-  "Return aggregate summary string for COL-NAME with STATS."
+(defun clutch-result--format-aggregate-summary (label stats)
+  "Return aggregate summary string for LABEL with STATS."
   (let ((count (plist-get stats :count)))
     (if (> count 0)
-        (format "Aggregate [%s]: sum=%g avg=%g min=%g max=%g [total=%d numeric=%d skipped=%d]"
-                col-name
+        (format "Aggregate [%s]: sum=%g avg=%g min=%g max=%g [rows=%d cells=%d skipped=%d]"
+                label
                 (plist-get stats :sum)
                 (plist-get stats :avg)
                 (plist-get stats :min)
                 (plist-get stats :max)
-                (plist-get stats :total)
-                count
+                (plist-get stats :rows)
+                (plist-get stats :cells)
                 (plist-get stats :skipped))
-      (format "Aggregate [%s]: n/a [total=%d numeric=0 skipped=%d]"
-              col-name
-              (plist-get stats :total)
+      (format "Aggregate [%s]: n/a [rows=%d cells=%d skipped=%d]"
+              label
+              (plist-get stats :rows)
+              (plist-get stats :cells)
               (plist-get stats :skipped)))))
 
 (defun clutch-result-aggregate (&optional refine)
@@ -4102,17 +4141,24 @@ Without region: use current cell."
                 (clutch-result--refine-region-rectangle
                  (clutch-result--region-rectangle-indices)))))
     (pcase-let* ((`(,row-indices ,col-indices) (clutch-result--aggregate-target rect))
-                 (summaries
-                  (cl-loop for cidx in col-indices
-                           for col-name = (nth cidx clutch--result-columns)
-                           for stats = (clutch-result--compute-aggregate row-indices cidx)
-                           collect (clutch-result--format-aggregate-summary col-name stats)))
-                 (text (string-join summaries "\n")))
-      (kill-new text)
-      (if (= (length summaries) 1)
-          (message "%s" (car summaries))
-        (message "Aggregated %d columns (copied %d summaries)"
-                 (length summaries) (length summaries))))))
+                 (label (if (= (length col-indices) 1)
+                            (nth (car col-indices) clutch--result-columns)
+                          "selection"))
+                 (stats (clutch-result--compute-aggregate row-indices col-indices))
+                 (summary (clutch-result--format-aggregate-summary label stats)))
+      (setq-local clutch--aggregate-summary
+                  (list :label label
+                        :rows (plist-get stats :rows)
+                        :cells (plist-get stats :cells)
+                        :skipped (plist-get stats :skipped)
+                        :sum (plist-get stats :sum)
+                        :avg (plist-get stats :avg)
+                        :min (plist-get stats :min)
+                        :max (plist-get stats :max)
+                        :count (plist-get stats :count)))
+      (clutch--refresh-display)
+      (kill-new summary)
+      (message "%s" summary))))
 
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
