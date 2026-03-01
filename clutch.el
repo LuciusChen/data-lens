@@ -2928,6 +2928,7 @@ Priority: region rows > current row."
     (define-key map "s" #'clutch-result-sort-by-column)
     (define-key map "S" #'clutch-result-sort-by-column-desc)
     (define-key map "Y" #'clutch-result-yank-cell)
+    (define-key map "C" #'clutch-result-copy-command)
     (define-key map "v" #'clutch-result-view-json)
     (define-key map "w" #'clutch-result-copy-row-as-insert)
     (define-key map "y" #'clutch-result-copy-as-csv)
@@ -3051,10 +3052,11 @@ Navigate (row):
   \\[clutch-result-count-total]	Query total row count
   \\[clutch-result-next-col-page]	Next column page
   \\[clutch-result-prev-col-page]	Previous column page
-Copy (C-u for column selection):
-  \\[clutch-result-yank-cell]	Copy cell value
-  \\[clutch-result-copy-row-as-insert]	Copy row(s) as INSERT
-  \\[clutch-result-copy-as-csv]	Copy row(s) as CSV
+Copy:
+  \\[clutch-result-yank-cell]	Copy cell value (C-u: copy region cells)
+  \\[clutch-result-copy-command]	Copy... (tsv/csv/insert)
+  \\[clutch-result-copy-row-as-insert]	Copy row(s) as INSERT (C-u: choose columns)
+  \\[clutch-result-copy-as-csv]	Copy row(s) as CSV (C-u: choose columns)
   \\[clutch-result-export]	Export results
 Edit:
   \\[clutch-result-edit-cell]	Edit cell value
@@ -3730,16 +3732,43 @@ Prompts for a pattern; enter empty string to clear."
 
 ;;;; Yank cell / Copy row as INSERT
 
+(defun clutch-result-copy (format &optional select-cols)
+  "Unified copy entry point for result buffer.
+FORMAT is one of symbols: `tsv', `csv', `insert'.
+For `tsv', prefix arg SELECT-COLS means region-cell copy.
+For `csv' and `insert', prefix arg SELECT-COLS means choose columns."
+  (pcase format
+    ('tsv
+     (if select-cols
+         (clutch-result--yank-region-cells)
+       (pcase-let* ((`(,_ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
+                                               (user-error "No cell at point"))))
+         (clutch-result--yank-cell-value val))))
+    ('csv
+     (clutch-result--copy-rows-as-csv select-cols))
+    ('insert
+     (clutch-result--copy-rows-as-insert select-cols))
+    (_
+     (user-error "Unsupported copy format: %s" format))))
+
+(defun clutch-result-copy-command (&optional select-cols)
+  "Prompt for copy FORMAT and dispatch to `clutch-result-copy'."
+  (interactive "P")
+  (let* ((choice (completing-read "Copy format: " '("tsv" "csv" "insert")
+                                  nil t nil nil "tsv"))
+         (format (pcase choice
+                   ("tsv" 'tsv)
+                   ("csv" 'csv)
+                   ("insert" 'insert)
+                   (_ 'tsv))))
+    (clutch-result-copy format select-cols)))
+
 (defun clutch-result-yank-cell (&optional select-cols)
   "Copy value at point to the kill ring.
-With prefix arg SELECT-COLS, select columns and copy values from
-the current row as a TAB-separated line."
+With prefix arg SELECT-COLS, copy multiple cell values from region.
+Region output is TAB-separated within a row and newline-separated across rows."
   (interactive "P")
-  (pcase-let* ((`(,ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
-                                          (user-error "No cell at point"))))
-    (if select-cols
-        (clutch-result--yank-row-selected-columns ridx)
-      (clutch-result--yank-cell-value val))))
+  (clutch-result-copy 'tsv select-cols))
 
 (defun clutch-result--yank-cell-value (val)
   "Copy VAL to kill ring and show a compact preview message."
@@ -3747,18 +3776,52 @@ the current row as a TAB-separated line."
     (kill-new text)
     (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
 
-(defun clutch-result--yank-row-selected-columns (ridx)
-  "Copy selected column values from row RIDX as a TAB-separated line."
-  (let* ((row (or (nth ridx clutch--result-rows)
-                  (user-error "No row at point")))
-         (col-indices (clutch-result--select-columns))
-         (text (mapconcat (lambda (i)
-                            (clutch--format-value (nth i row)))
-                          col-indices "\t")))
-    (kill-new text)
-    (message "Copied %d column value%s from current row"
-             (length col-indices)
-             (if (= (length col-indices) 1) "" "s"))))
+(defun clutch-result--region-cells (beg end)
+  "Return unique cells in region BEG..END as (ROW-IDX COL-IDX VALUE) list."
+  (let ((pos beg)
+        (seen (make-hash-table :test 'equal))
+        cells)
+    (while (< pos end)
+      (let ((ridx (get-text-property pos 'clutch-row-idx))
+            (cidx (get-text-property pos 'clutch-col-idx)))
+        (when (and ridx cidx)
+          (let ((key (cons ridx cidx)))
+            (unless (gethash key seen)
+              (puthash key t seen)
+              (push (list ridx cidx
+                          (get-text-property pos 'clutch-full-value))
+                    cells)))))
+      (setq pos (or (next-single-property-change pos 'clutch-col-idx nil end)
+                    end)))
+    (nreverse cells)))
+
+(defun clutch-result--yank-region-cells ()
+  "Copy cell values from region as TSV-like text."
+  (unless (use-region-p)
+    (user-error "Set a region to copy multiple cells"))
+  (let* ((cells (clutch-result--region-cells
+                 (region-beginning) (region-end)))
+         (lines nil)
+         (current-row nil)
+         current-values)
+    (unless cells
+      (user-error "No cells in region"))
+    (dolist (cell cells)
+      (pcase-let ((`(,ridx ,_cidx ,val) cell))
+        (if (or (null current-row) (= ridx current-row))
+            (progn
+              (setq current-row ridx)
+              (push (clutch--format-value val) current-values))
+          (push (string-join (nreverse current-values) "\t") lines)
+          (setq current-row ridx
+                current-values (list (clutch--format-value val))))))
+    (when current-values
+      (push (string-join (nreverse current-values) "\t") lines))
+    (let ((text (string-join (nreverse lines) "\n")))
+      (kill-new text)
+      (message "Copied %d cell%s from region"
+               (length cells)
+               (if (= (length cells) 1) "" "s")))))
 
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
@@ -3864,11 +3927,9 @@ Finish with empty input (RET)."
                              cols
                              (mapconcat #'clutch--value-to-literal vals ", ")))))
 
-(defun clutch-result-copy-row-as-insert (&optional select-cols)
+(defun clutch-result--copy-rows-as-insert (&optional select-cols)
   "Copy row(s) as INSERT statement(s) to the kill ring.
-Rows: region > current.
-With prefix arg SELECT-COLS, prompt to choose columns."
-  (interactive "P")
+Rows: region > current.  With SELECT-COLS, prompt to choose columns."
   (let* ((indices (or (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (col-indices (if select-cols
@@ -3880,6 +3941,13 @@ With prefix arg SELECT-COLS, prompt to choose columns."
     (message "Copied %d INSERT statement%s (%d col%s)"
              (length stmts) (if (= (length stmts) 1) "" "s")
              (length col-indices) (if (= (length col-indices) 1) "" "s"))))
+
+(defun clutch-result-copy-row-as-insert (&optional select-cols)
+  "Copy row(s) as INSERT statement(s) to the kill ring.
+Rows: region > current.
+With prefix arg SELECT-COLS, prompt to choose columns."
+  (interactive "P")
+  (clutch-result-copy 'insert select-cols))
 
 (defun clutch-result--build-csv-lines (indices col-indices)
   "Return CSV lines (header + data) for INDICES rows using COL-INDICES columns."
@@ -3896,12 +3964,10 @@ With prefix arg SELECT-COLS, prompt to choose columns."
                    for vals = (mapcar (lambda (i) (nth i row)) col-indices)
                    collect (mapconcat csv-escape vals ",")))))
 
-(defun clutch-result-copy-as-csv (&optional select-cols)
+(defun clutch-result--copy-rows-as-csv (&optional select-cols)
   "Copy row(s) as CSV to the kill ring.
-Rows: region > current.
-With prefix arg SELECT-COLS, prompt to choose columns.
+Rows: region > current.  With SELECT-COLS, prompt to choose columns.
 Includes a header row with column names."
-  (interactive "P")
   (let* ((indices (or (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (col-indices (if select-cols
@@ -3912,6 +3978,14 @@ Includes a header row with column names."
     (message "Copied %d row%s as CSV (%d col%s)"
              (length indices) (if (= (length indices) 1) "" "s")
              (length col-indices) (if (= (length col-indices) 1) "" "s"))))
+
+(defun clutch-result-copy-as-csv (&optional select-cols)
+  "Copy row(s) as CSV to the kill ring.
+Rows: region > current.
+With prefix arg SELECT-COLS, prompt to choose columns.
+Includes a header row with column names."
+  (interactive "P")
+  (clutch-result-copy 'csv select-cols))
 
 (defun clutch-result--goto-col-idx (col-idx)
   "Move point to the first data cell matching COL-IDX in the buffer."
@@ -3947,20 +4021,16 @@ Prompts for format:
 - csv: current page rows to new buffer
 - csv-all: all rows (auto-paged query) to new buffer
 - csv-file: current page rows to CSV file
-- csv-all-file: all rows to CSV file
-- copy: current buffer text to kill ring."
+- csv-all-file: all rows to CSV file."
   (interactive)
   (let ((fmt (completing-read "Export format: "
-                              '("csv" "csv-all" "csv-file" "csv-all-file" "copy")
+                              '("csv" "csv-all" "csv-file" "csv-all-file")
                               nil t)))
     (pcase fmt
       ("csv" (clutch--export-csv))
       ("csv-all" (clutch--export-csv-all))
       ("csv-file" (clutch--export-csv-file))
-      ("csv-all-file" (clutch--export-csv-all-file))
-      ("copy"
-       (kill-ring-save (point-min) (point-max))
-       (message "Buffer content copied to kill ring")))))
+      ("csv-all-file" (clutch--export-csv-all-file)))))
 
 (defun clutch--csv-escape (val)
   "Return CSV-escaped string for VAL."
@@ -4541,8 +4611,9 @@ Accumulates input until a semicolon is found, then executes."
     ("C-c C-c" "Commit"    clutch-result-commit)
     ("i" "Insert row"      clutch-result-insert-row)
     ("d" "Delete row(s)"   clutch-result-delete-rows)]
-   ["Copy (rows: point/region; cols: all/C-u)"
-    ("Y" "Yank cell (C-u: cols)" clutch-result-yank-cell)
+   ["Copy (Y: cell/region; w,y: rows C-u cols)"
+    ("C" "Copy..."          clutch-result-copy-command)
+    ("Y" "Yank cell (C-u: region)" clutch-result-yank-cell)
     ("w" "Rows -> INSERT"  clutch-result-copy-row-as-insert)
     ("y" "Rows -> CSV"     clutch-result-copy-as-csv)
     ("e" "Export"           clutch-result-export)]

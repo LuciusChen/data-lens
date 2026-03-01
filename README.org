@@ -403,11 +403,12 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =o=            | Insert new row                                |
 | =d=            | Delete row(s) (supports region)               |
 | =C-c C-c=     | Commit edits (generates UPDATE)               |
-| =Y=            | Copy cell value (prefix =C-u=: choose columns from current row, TAB-separated) |
+| =Y=            | Copy cell value (prefix =C-u=: copy multiple cells from region, TSV-style) |
+| =C=            | Copy... (choose format: tsv / csv / insert; prefix =C-u= applies mode-specific behavior) |
 | =v=            | View JSON cell (pretty-printed in new buffer) |
 | =w=            | Copy row(s) as INSERT (supports region; prefix =C-u=: choose columns) |
 | =y=            | Copy row(s) as CSV (supports region; prefix =C-u=: choose columns) |
-| =e=            | Export (csv / csv-all / csv-file / csv-all-file / copy) |
+| =e=            | Export (csv / csv-all / csv-file / csv-all-file) |
 | =f= / =F=      | Toggle fullscreen                             |
 | =?=            | Transient menu                                |
 

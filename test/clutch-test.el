@@ -342,18 +342,57 @@
         (clutch-result-yank-cell nil)
         (should (equal (current-kill 0) "hello"))))))
 
-(ert-deftest clutch-test-yank-cell-with-prefix-selects-columns ()
-  "Yank cell with prefix should copy selected column values from current row."
+(ert-deftest clutch-test-yank-cell-with-prefix-requires-region ()
+  "Yank cell with prefix should require region for multi-cell copying."
   (with-temp-buffer
-    (setq-local clutch--result-columns '("id" "name" "city"))
-    (setq-local clutch--result-rows '((1 "alice" "shanghai")))
+    (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+               (lambda () '(0 1 "alice")))
+              ((symbol-function 'use-region-p)
+               (lambda () nil)))
+      (should-error (clutch-result-yank-cell t)
+                    :type 'user-error))))
+
+(ert-deftest clutch-test-yank-cell-with-prefix-copies-region-cells ()
+  "Yank cell with prefix should copy multiple region cells as TSV lines."
+  (with-temp-buffer
     (let (kill-ring kill-ring-yank-pointer)
       (cl-letf (((symbol-function 'clutch-result--cell-at-point)
                  (lambda () '(0 1 "alice")))
-                ((symbol-function 'clutch-result--select-columns)
-                 (lambda () '(0 2))))
+                ((symbol-function 'use-region-p)
+                 (lambda () t))
+                ((symbol-function 'region-beginning)
+                 (lambda () 10))
+                ((symbol-function 'region-end)
+                 (lambda () 20))
+                ((symbol-function 'clutch-result--region-cells)
+                 (lambda (_beg _end)
+                   '((0 0 1) (0 2 "shanghai") (1 1 "bob")))))
         (clutch-result-yank-cell t)
-        (should (equal (current-kill 0) "1\tshanghai"))))))
+        (should (equal (current-kill 0) "1\tshanghai\nbob"))))))
+
+(ert-deftest clutch-test-copy-command-dispatches-to-csv ()
+  "Copy command should dispatch to CSV copier when csv is selected."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "csv"))
+                ((symbol-function 'clutch-result-copy)
+                 (lambda (fmt select-cols)
+                   (setq called (list fmt select-cols)))))
+        (clutch-result-copy-command t)
+        (should (equal called '(csv t)))))))
+
+(ert-deftest clutch-test-copy-command-defaults-to-tsv ()
+  "Copy command should default to TSV format."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "tsv"))
+                ((symbol-function 'clutch-result-copy)
+                 (lambda (fmt select-cols)
+                   (setq called (list fmt select-cols)))))
+        (clutch-result-copy-command nil)
+        (should (equal called '(tsv nil)))))))
 
 (ert-deftest clutch-test-destructive-query-p ()
   "Test destructive query detection."
