@@ -3758,39 +3758,70 @@ Prompts for a pattern; enter empty string to clear."
 
 ;;;; Yank cell / Copy row as INSERT
 
+(defun clutch-result--parse-index-spec (input allowed)
+  "Parse INPUT like \"6,8,10-12\" into numbers, constrained by ALLOWED."
+  (let ((tokens (split-string input "," t "[[:space:]\n\r\t]+"))
+        numbers)
+    (dolist (tok tokens)
+      (cond
+       ((string-match-p "\\`[0-9]+\\'" tok)
+        (push (string-to-number tok) numbers))
+       ((string-match "\\`\\([0-9]+\\)-\\([0-9]+\\)\\'" tok)
+        (let ((beg (string-to-number (match-string 1 tok)))
+              (end (string-to-number (match-string 2 tok))))
+          (when (> beg end)
+            (user-error "Invalid range: %s" tok))
+          (cl-loop for n from beg to end do (push n numbers))))
+       (t
+        (user-error "Invalid token: %s" tok))))
+    (setq numbers (nreverse numbers))
+    (let ((dedup (cl-remove-duplicates numbers :test #'=))
+          (invalid nil))
+      (dolist (n dedup)
+        (unless (member n allowed)
+          (push n invalid)))
+      (when invalid
+        (user-error "Out of range: %s"
+                    (mapconcat #'number-to-string (nreverse invalid) ", ")))
+      dedup)))
+
 (defun clutch-result--read-excluded-rows (row-indices)
   "Read excluded rows from ROW-INDICES (0-based)."
-  (let* ((cands (mapcar (lambda (ridx) (number-to-string (1+ ridx))) row-indices))
-         (picked (completing-read-multiple
-                  "Exclude rows (1-based, comma-separated): "
-                  cands nil t)))
-    (mapcar (lambda (s) (1- (string-to-number s))) picked)))
+  (let* ((allowed (mapcar (lambda (ridx) (1+ ridx)) row-indices))
+         (input (string-trim
+                 (read-string
+                  "Exclude rows (e.g. 6,8,10-12; empty=none): "))))
+    (if (string-empty-p input)
+        nil
+      (mapcar (lambda (n) (1- n))
+              (clutch-result--parse-index-spec input allowed)))))
 
-(defun clutch-result--read-excluded-cols (col-indices)
+(defun clutch-result--read-excluded-cols (col-indices &optional rows-note)
   "Read excluded columns from COL-INDICES (0-based)."
-  (let* ((cand-alist
-          (mapcar (lambda (cidx)
-                    (cons (format "%d:%s" (1+ cidx) (nth cidx clutch--result-columns))
-                          cidx))
-                  col-indices))
-         (picked (completing-read-multiple
-                  "Exclude columns: "
-                  (mapcar #'car cand-alist) nil t)))
-    (delq nil (mapcar (lambda (s) (cdr (assoc s cand-alist))) picked))))
+  (let* ((allowed (mapcar (lambda (cidx) (1+ cidx)) col-indices))
+         (prompt (concat
+                  "Exclude columns (e.g. 1,3-5; empty=none)"
+                  (if rows-note (format " [%s]" rows-note) "")
+                  ": "))
+         (input (string-trim (read-string prompt))))
+    (if (string-empty-p input)
+        nil
+      (mapcar (lambda (n) (1- n))
+              (clutch-result--parse-index-spec input allowed)))))
 
 (defun clutch-result--refine-region-rectangle (rect)
-  "Refine RECT (ROW-INDICES . COL-INDICES) by excluding rows/columns."
+  "Refine RECT (ROW-INDICES . COL-INDICES) by excluding rows then columns."
   (pcase-let* ((`(,row-indices . ,col-indices) rect)
-               (mode (completing-read
-                      "Refine selection: "
-                      '("exclude rows" "exclude columns" "exclude both")
-                      nil t nil nil "exclude rows"))
-               (excluded-rows (if (member mode '("exclude rows" "exclude both"))
-                                  (clutch-result--read-excluded-rows row-indices)
-                                nil))
-               (excluded-cols (if (member mode '("exclude columns" "exclude both"))
-                                  (clutch-result--read-excluded-cols col-indices)
-                                nil))
+               (excluded-rows (clutch-result--read-excluded-rows row-indices))
+               (rows-note (if excluded-rows
+                              (format "rows excluded: %s"
+                                      (string-join
+                                       (mapcar (lambda (ridx) (number-to-string (1+ ridx)))
+                                               excluded-rows)
+                                       ", "))
+                            "rows excluded: none"))
+               (excluded-cols (clutch-result--read-excluded-cols
+                               col-indices rows-note))
                (rows (cl-loop for ridx in row-indices
                               unless (memq ridx excluded-rows)
                               collect ridx))

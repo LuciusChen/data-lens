@@ -392,6 +392,19 @@
           (should (string-match-p "sum=4" summary))
           (should (string-match-p "\\[rows=2 cells=2 skipped=0\\]" summary)))))))
 
+(ert-deftest clutch-test-parse-index-spec-supports-list-and-range ()
+  "Index spec parser should support list/range tokens."
+  (should (equal (clutch-result--parse-index-spec "6,8" '(6 7 8 9))
+                 '(6 8)))
+  (should (equal (clutch-result--parse-index-spec "6-8,9" '(6 7 8 9))
+                 '(6 7 8 9))))
+
+(ert-deftest clutch-test-parse-index-spec-rejects-invalid-input ()
+  "Index spec parser should reject invalid/out-of-range inputs."
+  (should-error (clutch-result--parse-index-spec "8-6" '(6 7 8)) :type 'user-error)
+  (should-error (clutch-result--parse-index-spec "x" '(6 7 8)) :type 'user-error)
+  (should-error (clutch-result--parse-index-spec "6,9" '(6 7 8)) :type 'user-error))
+
 (ert-deftest clutch-test-down-cell-keeps-region-active ()
   "Row navigation should keep region active for selection workflows."
   (with-temp-buffer
