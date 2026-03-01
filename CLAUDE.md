@@ -8,6 +8,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Simplify relentlessly**: Three similar lines of code are better than a premature abstraction. A single large file (like eglot's 3500-line `eglot.el`) is better than five tiny files with unclear boundaries.
 - **Fewer files, clearer boundaries**: Only split a file when it has a genuinely distinct responsibility (e.g., wire protocol vs. UI). Never split for cosmetic reasons or predicted future growth.
 - **Delete, don't deprecate**: If something is unused, remove it entirely. No backward-compatibility shims, no re-exports, no "removed" comments.
+- **Converge UX, avoid mode branches**: Prefer one clear entry point and one consistent behavior model over multiple overlapping commands or prefix-driven branches. If two commands do nearly the same thing, merge them and keep the simpler mental model.
 
 ## Architecture
 
