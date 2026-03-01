@@ -15,7 +15,7 @@ Supports MySQL (primary, daily-use), PostgreSQL, and SQLite (Emacs 29+).
 - =clutch.el= — interactive UI layer: column-paged result browser, record view, FK navigation, editing, transient menus, REPL
 - =ob-clutch.el= — Org-Babel integration (mysql/postgresql/sqlite)
 
-#+CAPTION: Result browser with unified transient workflow (C-c ?), copy (c), and full export (e).
+#+CAPTION: Result browser with unified transient workflow (C-c ?), copy (c), full export (e), and column paging via [ and ].
 [[file:assets/clutch-overview.png]]
 
 *Note:* MySQL is the primary backend — thoroughly tested and used daily.
@@ -437,11 +437,13 @@ Tip: =c= supports both regular region and rectangular selection
               → tab-line shows: Σ 500 of ? rows • 1 / 1 • ⏱ 42ms • select * from orders
 3. N / P      Next page / previous page
 4. #          Query total rows → tab-line shows "Σ 500 of 1234 rows"
-5. W          Enter filter: status = 'pending'
+5. ] / [      Move across column pages when result has many columns
+              → pinned columns stay visible while column pages switch
+6. W          Enter filter: status = 'pending'
               → Appends WHERE clause, re-queries from page 1
-6. /          Client-side filter: type a pattern to narrow visible rows instantly
-7. s          Sort by current column (SQL ORDER BY), re-queries from page 1
-8. W          Enter empty string → clears filter, restores original query
+7. /          Client-side filter: type a pattern to narrow visible rows instantly
+8. s          Sort by current column (SQL ORDER BY), re-queries from page 1
+9. W          Enter empty string → clears filter, restores original query
 #+end_src
 
 *** Foreign Key Navigation
