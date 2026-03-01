@@ -15,6 +15,9 @@ Supports MySQL (primary, daily-use), PostgreSQL, and SQLite (Emacs 29+).
 - =clutch.el= — interactive UI layer: column-paged result browser, record view, FK navigation, editing, transient menus, REPL
 - =ob-clutch.el= — Org-Babel integration (mysql/postgresql/sqlite)
 
+#+CAPTION: Result browser with unified transient workflow (C-c ?), copy (c), and full export (e).
+[[file:assets/clutch-overview.png]]
+
 *Note:* MySQL is the primary backend — thoroughly tested and used daily.
 PostgreSQL support is functional and compatible, but has not been tested as extensively in daily use.
 SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external dependencies.
