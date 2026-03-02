@@ -544,7 +544,7 @@ fast switching between active connections.
 *** Console persistence
 
 Buffer content is automatically saved to =clutch-console-directory=
-(default: =~/.emacs.d/clutch/consoles/=) and restored the next time the same
+(default: =~/.emacs.d/clutch/=) and restored the next time the same
 console is opened.  Each connection gets its own file (e.g. =dev-mysql.sql=).
 Content is saved when the buffer is killed or when Emacs exits.
 

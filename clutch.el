@@ -142,7 +142,7 @@ Password resolution order:
   :group 'clutch)
 
 (defcustom clutch-console-directory
-  (expand-file-name "clutch/consoles" user-emacs-directory)
+  (expand-file-name "clutch" user-emacs-directory)
   "Directory for persisting query console buffer content."
   :type 'directory
   :group 'clutch)
@@ -2563,6 +2563,11 @@ Returns nil when SYM is not a known built-in on this server."
     (concat (propertize sig  'face 'font-lock-function-name-face)
             (propertize (concat "  — " desc) 'face 'shadow))))
 
+(defun clutch--completion-finished-status-p (status)
+  "Return non-nil when completion STATUS means candidate was accepted."
+  (memq status '(finished exact sole)))
+
+
 (defun clutch-sql-keyword-completion-at-point ()
   "Completion-at-point function for SQL keywords.
 Works without a database connection."
@@ -2571,7 +2576,7 @@ Works without a database connection."
           clutch--sql-keywords
           :exclusive 'no
           :exit-function (lambda (_str status)
-                           (when (and (eq status 'finished)
+                           (when (and (clutch--completion-finished-status-p status)
                                       (not (looking-at-p "\\s-")))
                              (insert " "))))))
 
@@ -2602,7 +2607,13 @@ when completion triggers during an in-flight query)."
                                      conn schema tbl)))
                     (setq all (nconc all (copy-sequence cols)))))
                 (delete-dups all)))))
-      (list beg end candidates :exclusive 'no))))
+      (list beg end candidates
+            :exclusive 'no
+            :exit-function (lambda (str status)
+                             (when (and (clutch--completion-finished-status-p status)
+                                        (member (upcase str) clutch--sql-keywords)
+                                        (not (looking-at-p "\\s-")))
+                               (insert " ")))))))
 
 (defun clutch--eldoc-schema-string (conn schema sym)
   "Return an eldoc string for SYM via SCHEMA on CONN, or nil.

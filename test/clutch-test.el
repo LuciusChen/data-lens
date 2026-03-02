@@ -879,12 +879,14 @@
       ;; handles case-insensitive filtering.  Verify SELECT is present.
       (should (member "SELECT" candidates)))))
 
+
 (ert-deftest clutch-test-sql-keyword-completion-no-prefix ()
   "Test that keyword capf returns nil with no word at point."
   (with-temp-buffer
     (insert " ")
     (let ((result (clutch-sql-keyword-completion-at-point)))
       (should-not result))))
+
 
 ;;;; Unit tests — REPL
 
@@ -1062,6 +1064,22 @@ Skips if `clutch-test-password' is nil."
                    (rows (clutch-db-result-rows res)))
               (should (equal rows '((1 "after"))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
+
+(ert-deftest clutch-test-completion-finished-status-p ()
+  "Keyword spacing should trigger for accepted completion statuses."
+  (should (clutch--completion-finished-status-p 'finished))
+  (should (clutch--completion-finished-status-p 'exact))
+  (should (clutch--completion-finished-status-p 'sole))
+  (should-not (clutch--completion-finished-status-p 'unknown)))
+
+(ert-deftest clutch-test-keyword-capf-exit-function-inserts-space-on-exact ()
+  "Keyword CAPF exit-function should insert a trailing space for status `exact'."
+  (with-temp-buffer
+    (insert "FROM")
+    (let* ((capf (clutch-sql-keyword-completion-at-point))
+           (exit-fn (plist-get (cdddr capf) :exit-function)))
+      (funcall exit-fn "FROM" 'exact)
+      (should (equal (buffer-string) "FROM ")))))
 
 (provide 'clutch-test)
 ;;; clutch-test.el ends here
