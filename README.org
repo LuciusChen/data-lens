@@ -389,7 +389,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =N= / =P=     | Next page / previous page (SQL pagination)    |
 | =M->= / =M-<= | Last page / first page                       |
 | =#=            | Query total row count                         |
-| =A=            | Aggregate numeric values (region/current cell; one summary over selected cells; =C-u= exclude rows/cols by index spec) |
+| =A=            | Aggregate numeric values (region/current cell; =C-u= with region enters visual refine mode) |
 | =]=            | Next column page                              |
 | =[=            | Previous column page                          |
 | ===            | Widen current column                          |
@@ -407,18 +407,55 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =d=            | Delete row(s) (supports region)               |
 | =C-c C-c=     | Commit edits (generates UPDATE)               |
 | =C-c C-p=      | Preview SQL (query / pending update / selected delete) |
-| =c=            | Copy... (tsv/csv/insert; region = selected block, no region = current cell; =C-u= exclude rows/cols by index spec) |
+| =c=            | Copy... (tsv/csv/insert; region = selected block, no region = current cell; =C-u= with region enters visual refine mode) |
 | =v=            | View JSON cell (pretty-printed in new buffer) |
 | =e=            | Export all rows (copy / file)                     |
 | =f=            | Toggle fullscreen                             |
 | =C-c ?=        | Transient menu                                |
 
-Tip: =c= supports both regular region and rectangular selection
-(=C-x SPC=, =rectangle-mark-mode=).
+Tip: =c= supports both regular region and rectangular selection (=C-x SPC=).
 Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
-Tip: with active region, =C-u c= / =C-u A= prompts:
-=Exclude rows= then =Exclude columns=.
-Index spec supports =6=, =6,8=, =10-12=, =1,3-5=; empty input means none.
+
+*** Visual Refine Mode (=C-u c= / =C-u A=)
+
+With an active region, =C-u c= or =C-u A= enters *refine mode*: the selected
+rectangle is highlighted and you interactively exclude rows or columns before
+the copy/aggregate is performed.
+
+#+begin_example
+Step 1 — select a region, then press C-u c or C-u A.
+         The rect is highlighted; mode-line shows available keys.
+
+  id   name    email              joined
+  ─────────────────────────────────────────────
+  1  ░ Alice ░ alice@example.com ░ 2023-01-15  ┐
+  2  ░ Bob   ░ bob@example.com   ░ 2023-03-22  ├─ rect (highlighted)
+  3  ░ Carol ░ carol@example.com ░ 2024-07-01  ┘
+  4    Dave    dave@example.com    2024-09-10     (outside rect)
+
+  [REFINE: m=row  x=col  RET=confirm  C-g=cancel]
+
+Step 2 — press m on row 2 to exclude it (dim + strikethrough).
+
+  1  ░ Alice ░ alice@example.com ░ 2023-01-15
+  2    Bob     bob@example.com     2023-03-22   ← excluded
+  3  ░ Carol ░ carol@example.com ░ 2024-07-01
+
+Step 3 — press x on the email column to exclude it.
+
+  1  ░ Alice ░ ~~email~~         ░ 2023-01-15
+  3  ░ Carol ░ ~~email~~         ░ 2024-07-01
+
+Step 4 — press RET to confirm.
+         Result: rows {1, 3} × cols {id, name, joined}.
+#+end_example
+
+| Key   | Action                              |
+|-------+-------------------------------------|
+| =m=   | Toggle exclusion of row at point    |
+| =x=   | Toggle exclusion of column at point |
+| =RET= | Confirm — execute copy / aggregate  |
+| =C-g= | Cancel — discard all exclusions     |
 
 ** Record View (clutch-record-mode) Key Bindings
 
