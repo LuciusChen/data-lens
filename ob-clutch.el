@@ -59,7 +59,7 @@
   "Cache of live DB connections keyed by backend+connection parameters.")
 
 (defconst ob-clutch--meta-keys
-  '(:backend :sql-product :pass-entry :entry-name)
+  '(:backend :sql-product :pass-entry)
   "Connection plist keys not passed to backend connect functions.")
 
 (defun ob-clutch--pass-secret-by-suffix (suffix)

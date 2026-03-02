@@ -138,7 +138,8 @@ Password resolution order:
                                     (:backend symbol)
                                     (:sql-product symbol)
                                     (:pass-entry string)
-                                    (:read-timeout natnum))))
+                                    (:read-timeout natnum)
+                                    (:tls boolean))))
   :group 'clutch)
 
 (defcustom clutch-console-directory
@@ -357,8 +358,6 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
   (dolist (buf (buffer-list))
     (with-current-buffer buf
       (clutch--save-console))))
-
-(add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
 
 ;;;; Connection management
 
@@ -2915,8 +2914,10 @@ Key bindings:
   \\[clutch-connect]	Connect to server
   \\[clutch-list-tables]	List tables
   \\[clutch-describe-table-at-point]	Describe table at point
+  \\[clutch-browse-table]	Browse table data
   \\[clutch-preview-execution-sql]	Preview SQL to execute"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
+  (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
   (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
   (add-hook 'completion-at-point-functions
             #'clutch-completion-at-point nil t)
@@ -4877,7 +4878,7 @@ Accumulates input until a semicolon is found, then executes."
 (defun clutch-repl ()
   "Start a database REPL buffer."
   (interactive)
-  (let* ((buf-name "*DataLens REPL*")
+  (let* ((buf-name "*clutch REPL*")
          (buf (get-buffer-create buf-name)))
     (unless (comint-check-proc buf)
       (with-current-buffer buf

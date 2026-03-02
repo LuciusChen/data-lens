@@ -226,6 +226,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-b=   | Execute entire buffer      |
 | =C-c C-e=   | Connect / reconnect        |
 | =C-c C-t=   | List all tables            |
+| =C-c C-j=   | Browse table data          |
 | =C-c C-d=   | DESCRIBE table at point    |
 | =C-c C-p=   | Preview SQL (dry-run)      |
 | =C-c ?=     | Transient menu             |
@@ -376,10 +377,10 @@ Step 4 — press RET to confirm.
 ** REPL Mode
 
 #+begin_src
-M-x clutch-repl          ;; Open REPL buffer
+M-x clutch-repl          ;; Open REPL buffer (*clutch REPL*)
 C-c C-e                     ;; Connect to database
-mysql> SELECT * FROM users;  ;; Type SQL, auto-executes on ;
-                             ;; Multi-line input supported (continuation prompt ->)
+db> SELECT * FROM users;     ;; Type SQL, auto-executes on ;
+                             ;; Multi-line input supported (continuation prompt     ->)
 #+end_src
 
 ** Query Console
