@@ -440,7 +440,7 @@
     (let (kill-ring kill-ring-yank-pointer)
       (cl-letf (((symbol-function 'clutch-result--cell-at-point)
                  (lambda () '(0 1 "hello"))))
-        (clutch-result-yank-cell)
+        (clutch-result-copy 'tsv)
         (should (equal (current-kill 0) "hello"))))))
 
 (ert-deftest clutch-test-yank-cell-with-region-copies-region-cells ()
@@ -456,7 +456,7 @@
                 ((symbol-function 'clutch-result--region-cells)
                  (lambda ()
                    '((0 0 1) (0 2 "shanghai") (1 1 "bob")))))
-        (clutch-result-yank-cell)
+        (clutch-result-copy 'tsv)
         (should (equal (current-kill 0) "1\tshanghai\nbob"))))))
 
 (ert-deftest clutch-test-yank-cell-without-region-copies-point-cell ()
@@ -467,7 +467,7 @@
                  (lambda () nil))
                 ((symbol-function 'clutch-result--cell-at-point)
                  (lambda () '(2 3 "alice"))))
-        (clutch-result-yank-cell)
+        (clutch-result-copy 'tsv)
         (should (equal (current-kill 0) "alice"))))))
 
 (ert-deftest clutch-test-copy-command-dispatches-to-csv ()

@@ -4002,11 +4002,6 @@ With prefix arg REFINE and an active region, enter visual refine mode."
            (lambda (final-rect) (clutch-result-copy fmt final-rect))))
       (clutch-result-copy fmt))))
 
-(defun clutch-result-yank-cell ()
-  "Copy value at point to the kill ring.
-If region is active, copy region cells as TSV text."
-  (interactive)
-  (clutch-result-copy 'tsv))
 
 (defun clutch-result--yank-cell-value (val)
   "Copy VAL to kill ring and show a compact preview message."
