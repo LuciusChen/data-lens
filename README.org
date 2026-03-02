@@ -83,10 +83,11 @@ SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external d
 
 * Installation
 
-Clone this repository and add it to your =load-path=:
+Clone this repository and add it to your =load-path=
+(skip this if installed via a package manager):
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "~/repos/clutch")
+(add-to-list 'load-path "/path/to/clutch")
 (require 'clutch)
 #+end_src
 
@@ -247,7 +248,7 @@ To trust private/internal CAs, configure:
 *** 1. Configure connections
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "~/repos/clutch")
+(add-to-list 'load-path "/path/to/clutch")
 (require 'clutch)
 
 (setq clutch-connection-alist
@@ -420,11 +421,14 @@ Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
 
 With an active region, =C-u c= or =C-u A= enters *refine mode*: the selected
 rectangle is highlighted and you interactively exclude rows or columns before
-the copy/aggregate is performed.
+the copy/aggregate is performed.  The tab-line at the top of the result buffer
+is replaced with a colour-coded hint for the duration of the session.
 
 #+begin_example
 Step 1 — select a region, then press C-u c or C-u A.
-         The rect is highlighted; mode-line shows available keys.
+         The rect is highlighted; tab-line shows available keys.
+
+  REFINE  m row   x col   RET confirm   C-g cancel     ← tab-line
 
   id   name    email              joined
   ─────────────────────────────────────────────
@@ -432,8 +436,6 @@ Step 1 — select a region, then press C-u c or C-u A.
   2  ░ Bob   ░ bob@example.com   ░ 2023-03-22  ├─ rect (highlighted)
   3  ░ Carol ░ carol@example.com ░ 2024-07-01  ┘
   4    Dave    dave@example.com    2024-09-10     (outside rect)
-
-  [REFINE: m=row  x=col  RET=confirm  C-g=cancel]
 
 Step 2 — press m on row 2 to exclude it (dim + strikethrough).
 
