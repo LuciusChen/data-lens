@@ -72,7 +72,7 @@ SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external d
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
-- JSON cell viewer (=v=): pretty-prints JSON/JSONB cell values in a dedicated buffer with =json-ts-mode=
+- Value viewer (=v=): auto-detects JSON (pretty-printed with =json-ts-mode=), XML (formatted via =xmllint= if available, rendered with =nxml-mode=), or BLOB (concise text/hex preview); XML/BLOB size is shown in viewer header-line (without polluting content highlighting)
 - REPL mode (comint-based)
 
 * Requirements
@@ -260,7 +260,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-c=     | Commit edits (generates UPDATE)               |
 | =C-c C-p=      | Preview SQL (query / pending update / selected delete) |
 | =c=            | Copy... (tsv/csv/insert; region = selected block, no region = current cell; =C-u= with region enters visual refine mode) |
-| =v=            | View JSON cell (pretty-printed in new buffer) |
+| =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
 | =e=            | Export all rows (copy / file)                     |
 | =f=            | Toggle fullscreen                             |
 | =C-c ?=        | Transient menu                                |
@@ -316,7 +316,7 @@ Step 4 — press RET to confirm.
 |-------------+-------------------------------|
 | =RET=       | Expand long field / follow FK |
 | =n= / =p=  | Next row / previous row       |
-| =v=         | View JSON field               |
+| =v=         | View field value (JSON / XML / BLOB preview) |
 | =g=         | Refresh                       |
 | =q=         | Quit                          |
 | =C-c ?=     | Transient menu                |

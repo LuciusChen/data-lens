@@ -107,6 +107,111 @@
   (should-not (clutch--long-field-type-p '(:name "id" :type-category numeric)))
   (should-not (clutch--long-field-type-p '(:name "name" :type-category text))))
 
+(ert-deftest clutch-test-json-value-to-string-hash-table ()
+  "JSON viewer should accept parsed JSON objects."
+  (skip-unless (fboundp 'json-serialize))
+  (let ((obj (make-hash-table :test 'equal)))
+    (puthash "a" 1 obj)
+    (should (equal (clutch--json-value-to-string obj) "{\"a\":1}"))))
+
+(ert-deftest clutch-test-dispatch-view-json-category-serializes-non-string ()
+  "JSON category should route non-string values to JSON viewer."
+  (let ((called nil)
+        (seen nil))
+    (cl-letf (((symbol-function 'clutch--view-json-value)
+               (lambda (s) (setq called t
+                                 seen s)))
+              ((symbol-function 'clutch--json-value-to-string)
+               (lambda (_val) "{\"ok\":true}")))
+      (clutch--dispatch-view (vector 1 2) '(:type-category json))
+      (should called)
+      (should (equal seen "{\"ok\":true}")))))
+
+(ert-deftest clutch-test-dispatch-view-fallback-to-plain ()
+  "Unknown values should open plain viewer rather than JSON viewer."
+  (let ((plain-called nil)
+        (json-called nil))
+    (cl-letf (((symbol-function 'clutch--view-plain-value)
+               (lambda (_v) (setq plain-called t)))
+              ((symbol-function 'clutch--view-json-value)
+               (lambda (_v) (setq json-called t))))
+      (clutch--dispatch-view "hello" '(:type-category text))
+      (should plain-called)
+      (should-not json-called))))
+
+(ert-deftest clutch-test-dispatch-view-xml-content-overrides-blob ()
+  "XML-like content should use XML viewer even when column type is blob."
+  (let ((xml-called nil)
+        (blob-called nil))
+    (cl-letf (((symbol-function 'clutch--view-xml-value)
+               (lambda (_v) (setq xml-called t)))
+              ((symbol-function 'clutch--view-binary-as-string)
+               (lambda (_v) (setq blob-called t))))
+      (clutch--dispatch-view "<rss><item>1</item></rss>" '(:type-category blob))
+      (should xml-called)
+      (should-not blob-called))))
+
+(ert-deftest clutch-test-dispatch-view-invalid-angle-text-not-xml ()
+  "Invalid XML-like text should not be forced into XML viewer."
+  (let ((xml-called nil)
+        (plain-called nil))
+    (cl-letf (((symbol-function 'clutch--view-xml-value)
+               (lambda (_v) (setq xml-called t)))
+              ((symbol-function 'clutch--view-plain-value)
+               (lambda (_v) (setq plain-called t))))
+      (clutch--dispatch-view "<abc" '(:type-category text))
+      (should-not xml-called)
+      (should plain-called))))
+
+(ert-deftest clutch-test-blob-view-string-has-size-and-hex ()
+  "Blob preview should include size and hex output."
+  (let ((s (clutch--blob-view-string (unibyte-string #x00 #xff #x41 #x7f))))
+    (should (string-match-p "BLOB size: 4 bytes" s))
+    (should (string-match-p "Hex preview:" s))
+    (should (string-match-p "00 ff 41 7f" s))))
+
+(ert-deftest clutch-test-blob-view-string-text-preview ()
+  "Text-like blobs should use concise text preview."
+  (let ((s (clutch--blob-view-string "hello world")))
+    (should (string-match-p "BLOB size: 11 bytes" s))
+    (should (string-match-p "Text preview:" s))
+    (should-not (string-match-p "Hex preview:" s))))
+
+(ert-deftest clutch-test-value-placeholder-detects-xml-and-blob ()
+  "Grid placeholders should compactly mark XML and BLOB values."
+  (should (equal (clutch--value-placeholder "<root/>" '(:type-category text))
+                 "<XML>"))
+  (should (equal (clutch--value-placeholder (unibyte-string #x00 #x01)
+                                            '(:type-category blob))
+                 "<BLOB>")))
+
+(ert-deftest clutch-test-xml-like-string-p-strict ()
+  "XML detection should avoid false positives for plain angle-bracket text."
+  (should (clutch--xml-like-string-p "<rss><item>1</item></rss>"))
+  (should (clutch--xml-like-string-p "<?xml version=\"1.0\"?><rss/>"))
+  (should-not (clutch--xml-like-string-p "<abc"))
+  (should-not (clutch--xml-like-string-p "just <text> marker")))
+
+(ert-deftest clutch-test-view-xml-value-enables-fontification ()
+  "XML viewer should invoke fontification and show byte size in header."
+  (let ((fontified nil)
+        (buf nil))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_cmd) nil))
+              ((symbol-function 'nxml-mode) (lambda () nil))
+              ((symbol-function 'font-lock-ensure)
+               (lambda (&rest _args) (setq fontified t)))
+              ((symbol-function 'jit-lock-fontify-now)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'pop-to-buffer)
+               (lambda (b &rest _args)
+                 (setq buf b)
+                 b)))
+      (clutch--view-xml-value "<root><a>1</a></root>")
+      (should fontified)
+      (with-current-buffer buf
+        (should (string-match-p "XML" (format "%s" header-line-format)))
+        (should (string-match-p "bytes" (format "%s" header-line-format)))))))
+
 ;;;; Unit tests — column name extraction
 
 (ert-deftest clutch-test-column-names ()

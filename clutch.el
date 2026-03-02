@@ -662,11 +662,37 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
   "Return non-nil if COL-DEF is a long field type (JSON/BLOB)."
   (memq (plist-get col-def :type-category) '(json blob)))
 
-(defun clutch--long-field-placeholder (col-def)
-  "Return a placeholder string for a long field type COL-DEF."
-  (pcase (plist-get col-def :type-category)
-    ('json "<JSON>")
-    (_ "<BLOB>")))
+(defun clutch--json-like-string-p (val)
+  "Return non-nil when string VAL appears to contain JSON text."
+  (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
+
+(defun clutch--xml-like-string-p (val)
+  "Return non-nil when string VAL appears to contain XML text.
+Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
+  (and (stringp val)
+       (let* ((s (string-trim-left val))
+              (body (if (string-match "\\`<\\?xml\\(?:.\\|\n\\)*?\\?>\\s-*\\(.*\\)\\'" s)
+                        (match-string 1 s)
+                      s))
+              (open-re "\\`<\\([[:alpha:]_][[:alnum:]_.:-]*\\)\\(?:\\s-+[^>]*\\)?\\s-*\\(/>\\|>\\)"))
+         (when (string-match open-re body)
+           (let ((tag (match-string 1 body))
+                 (close (match-string 2 body)))
+             (if (equal close "/>")
+                 (string-match-p "\\`<[^>]+/>\\s-*\\'" body)
+               (string-match-p (format "</%s\\s-*>" (regexp-quote tag)) body)))))))
+
+(defun clutch--value-placeholder (val col-def)
+  "Return compact placeholder text for VAL/COL-DEF in result grid."
+  (let ((cat (plist-get col-def :type-category)))
+    (cond
+     ((eq cat 'blob)
+      "<BLOB>")
+     ((or (eq cat 'json) (clutch--json-like-string-p val))
+      "<JSON>")
+     ((clutch--xml-like-string-p val)
+      "<XML>")
+     (t nil))))
 
 (defun clutch--compute-column-widths (col-names rows column-defs
                                                       &optional max-width)
@@ -939,12 +965,10 @@ so the active-column overlay can find it."
 COL-DEF is the column definition plist, EDITED is the pending edit cons or nil."
   (let* ((display-val (if edited (cdr edited) val))
          (s (replace-regexp-in-string "\n" "↵" (clutch--format-value display-val)))
-         (formatted (if (and (not edited)
-                             (clutch--long-field-type-p col-def)
-                             (> (length s) w)
-                             (not (stringp display-val)))
-                        (clutch--long-field-placeholder col-def)
-                      s)))
+         (placeholder (and (not edited)
+                           (> (string-width s) w)
+                           (clutch--value-placeholder display-val col-def)))
+         (formatted (or placeholder s)))
     (clutch--string-pad
      (if (> (string-width formatted) w)
          (truncate-string-to-width formatted w)
@@ -3009,7 +3033,7 @@ Priority: region rows > current row."
     (define-key map "s" #'clutch-result-sort-by-column)
     (define-key map "S" #'clutch-result-sort-by-column-desc)
     (define-key map "c" #'clutch-result-copy-command)
-    (define-key map "v" #'clutch-result-view-json)
+    (define-key map "v" #'clutch-result-view-value)
     (define-key map "W" #'clutch-result-apply-filter)
     (define-key map (kbd "RET") #'clutch-result-open-record)
     (define-key map "]" #'clutch-result-next-col-page)
@@ -4293,29 +4317,179 @@ With prefix arg REFINE and an active region, enter visual refine mode."
                   (clutch-result--aggregate-target nil)))
       (clutch-result--do-aggregate (cons row-indices col-indices)))))
 
-(defun clutch--view-json-value (val)
-  "Display VAL as formatted JSON in a pop-up buffer."
-  (unless (and (stringp val) (not (string-empty-p val)))
-    (user-error "No JSON value at point"))
-  (let ((buf (get-buffer-create "*clutch-json*")))
+(defun clutch--view-in-buffer (val buf-name setup-fn)
+  "Insert string VAL into BUF-NAME, call SETUP-FN, then pop to it.
+SETUP-FN is called with no args; it should activate a mode and
+optionally reformat the buffer content."
+  (let ((buf (get-buffer-create buf-name)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert val)
-        (condition-case nil (json-pretty-print-buffer) (error nil))
-        (cond ((fboundp 'json-ts-mode) (json-ts-mode))
-              ((fboundp 'json-mode)    (json-mode))
-              (t                       (special-mode)))
+        (funcall setup-fn)
         (goto-char (point-min))
         (setq buffer-read-only t)))
     (pop-to-buffer buf)))
 
-(defun clutch-result-view-json ()
-  "Display the JSON value of the cell at point in a formatted buffer."
+(defun clutch--view-json-value (val)
+  "Display VAL as formatted JSON in a pop-up buffer."
+  (unless (and (stringp val) (not (string-empty-p val)))
+    (user-error "No JSON value at point"))
+  (clutch--view-in-buffer val "*clutch-json*"
+    (lambda ()
+      (condition-case nil (json-pretty-print-buffer) (error nil))
+      (cond ((fboundp 'json-ts-mode) (json-ts-mode))
+            ((fboundp 'json-mode)    (json-mode))
+            (t                       (special-mode))))))
+
+(defun clutch--json-value-to-string (val)
+  "Convert VAL to a JSON-ish string suitable for the JSON viewer."
+  (cond
+   ((stringp val) val)
+   ((and (fboundp 'json-serialize)
+         (or (hash-table-p val) (vectorp val) (listp val)))
+    (condition-case nil
+        (json-serialize val)
+      (error (clutch--format-value val))))
+   (t (clutch--format-value val))))
+
+(defun clutch--view-xml-value (val)
+  "Display VAL as formatted XML in a pop-up buffer.
+Uses xmllint for pretty-printing when available; shows a message otherwise."
+  (unless (and (stringp val) (not (string-empty-p val)))
+    (user-error "No XML value at point"))
+  (clutch--view-in-buffer val "*clutch-xml*"
+    (lambda ()
+      (if (executable-find "xmllint")
+          (let ((raw (buffer-string))
+                (err-file (make-temp-file "clutch-xmllint-")))
+            (unwind-protect
+                (unless (eq 0 (call-process-region
+                               (point-min) (point-max)
+                               "xmllint" t (list t err-file) nil "--format" "-"))
+                  (erase-buffer)
+                  (insert raw)
+                  (message "xmllint: %s"
+                           (string-trim (with-temp-buffer
+                                          (insert-file-contents err-file)
+                                          (buffer-string)))))
+              (delete-file err-file)))
+        (message "xmllint not found — showing raw XML without formatting"))
+      (cond ((fboundp 'nxml-mode) (nxml-mode))
+            ((fboundp 'xml-mode) (xml-mode))
+            (t (special-mode)))
+      (setq-local header-line-format
+                  (format " XML  |  %d bytes" (string-bytes val)))
+      ;; Force fontification so XML is highlighted immediately in popup buffers.
+      (when (fboundp 'font-lock-ensure)
+        (font-lock-ensure (point-min) (point-max)))
+      (when (fboundp 'jit-lock-fontify-now)
+        (jit-lock-fontify-now (point-min) (point-max))))))
+
+(defun clutch--blob-bytes (val)
+  "Return a unibyte string for blob-like VAL."
+  (cond
+   ((stringp val) (encode-coding-string val 'binary))
+   ((vectorp val) (apply #'unibyte-string (append val nil)))
+   (t (encode-coding-string (clutch--format-value val) 'binary))))
+
+(defun clutch--blob-hexdump-lines (bytes &optional max-bytes)
+  "Return hex dump lines for BYTES, up to MAX-BYTES bytes."
+  (let* ((total (length bytes))
+         (limit (min total (or max-bytes total)))
+         (offset 0)
+         lines)
+    (while (< offset limit)
+      (let* ((line-len (min 16 (- limit offset)))
+             (hex-parts nil)
+             (ascii-parts nil))
+        (dotimes (i line-len)
+          (let* ((b (aref bytes (+ offset i)))
+                 (ch (if (and (>= b 32) (<= b 126)) b ?.)))
+            (push (format "%02x" b) hex-parts)
+            (push (char-to-string ch) ascii-parts)))
+        (push (format "%08x  %-47s  |%s|"
+                      offset
+                      (mapconcat #'identity (nreverse hex-parts) " ")
+                      (mapconcat #'identity (nreverse ascii-parts) ""))
+              lines)
+        (setq offset (+ offset line-len))))
+    (nreverse lines)))
+
+(defun clutch--blob-likely-text-p (bytes &optional sample-size)
+  "Return non-nil when BYTES appears mostly text-like."
+  (let* ((n (min (length bytes) (or sample-size 512)))
+         (printable 0))
+    (if (= n 0)
+        t
+      (dotimes (i n)
+        (let ((b (aref bytes i)))
+          (when (or (and (>= b 32) (<= b 126))
+                    (memq b '(9 10 13)))
+            (setq printable (1+ printable)))))
+      (>= (/ (float printable) n) 0.85))))
+
+(defun clutch--blob-view-string (val)
+  "Build a concise DataGrip-like display string for blob VAL."
+  (let* ((bytes (clutch--blob-bytes val))
+         (size (length bytes))
+         (text-like (clutch--blob-likely-text-p bytes))
+         (max-bytes (if text-like 1024 256))
+         (shown (min size max-bytes))
+         (truncated (> size max-bytes)))
+    (concat
+     (format "BLOB size: %d bytes\n\n" size)
+     (if text-like
+         (let ((preview (condition-case nil
+                            (decode-coding-string (substring bytes 0 shown) 'utf-8 t)
+                          (error ""))))
+           (concat "Text preview:\n"
+                   (if (string-empty-p preview) "<empty>" preview)))
+       (concat "Hex preview:\n"
+               (mapconcat #'identity
+                          (clutch--blob-hexdump-lines bytes max-bytes)
+                          "\n")))
+     (if truncated
+         (format "\n\n... truncated, showing first %d bytes" max-bytes)
+       ""))))
+
+(defun clutch--view-binary-as-string (val)
+  "Display blob-like VAL in a DataGrip-style preview buffer."
+  (let ((s (clutch--blob-view-string val)))
+    (when (string-empty-p s)
+      (user-error "No value at point"))
+    (clutch--view-in-buffer s "*clutch-blob*"
+      (lambda () (special-mode)))))
+
+(defun clutch--view-plain-value (val)
+  "Display VAL as plain text in a pop-up buffer."
+  (let ((s (clutch--format-value val)))
+    (clutch--view-in-buffer s "*clutch-value*"
+      (lambda () (special-mode)))))
+
+(defun clutch--dispatch-view (val col-def)
+  "Open the appropriate viewer for VAL given column metadata COL-DEF.
+Dispatch order: blob type → binary string; json type or {/[ content
+→ JSON; < prefix → XML; otherwise falls back to plain text viewer."
+  (let ((cat (plist-get col-def :type-category)))
+    (cond
+     ((clutch--xml-like-string-p val)
+      (clutch--view-xml-value val))
+     ((eq cat 'blob)
+      (clutch--view-binary-as-string val))
+     ((or (eq cat 'json)
+          (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
+      (clutch--view-json-value (clutch--json-value-to-string val)))
+     (t
+      (clutch--view-plain-value val)))))
+
+(defun clutch-result-view-value ()
+  "Display the cell value at point in an appropriate pop-up buffer.
+Selects JSON, XML, or binary string view based on column type and content."
   (interactive)
-  (pcase-let ((`(,_ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
-                                          (user-error "No cell at point"))))
-    (clutch--view-json-value val)))
+  (pcase-let ((`(,_ridx ,cidx ,val) (or (clutch-result--cell-at-point)
+                                         (user-error "No cell at point"))))
+    (clutch--dispatch-view val (nth cidx clutch--result-column-defs))))
 
 (defun clutch-result--build-insert-statements (indices col-indices table)
   "Return INSERT statement strings for INDICES rows using COL-INDICES into TABLE."
@@ -4626,7 +4800,7 @@ previous window layout."
     (define-key map (kbd "RET") #'clutch-record-toggle-expand)
     (define-key map "n" #'clutch-record-next-row)
     (define-key map "p" #'clutch-record-prev-row)
-    (define-key map "v" #'clutch-record-view-json)
+    (define-key map "v" #'clutch-record-view-value)
     (define-key map "q" #'quit-window)
     (define-key map "g" #'clutch-record-refresh)
     (define-key map (kbd "C-c ?") #'clutch-record-dispatch)
@@ -4774,12 +4948,19 @@ MAX-NAME-W is the label column width."
     (setq clutch-record--expanded-fields nil)
     (clutch-record--render)))
 
-(defun clutch-record-view-json ()
-  "Display the JSON field value at point in a formatted buffer."
+(defun clutch-record-view-value ()
+  "Display the field value at point in an appropriate pop-up buffer.
+Selects JSON, XML, or binary string view based on column type and content."
   (interactive)
-  (clutch--view-json-value
-   (or (get-text-property (point) 'clutch-full-value)
-       (user-error "No field at point"))))
+  (let* ((cidx (get-text-property (point) 'clutch-col-idx))
+         (_ridx (get-text-property (point) 'clutch-row-idx))
+         (val  (if cidx
+                   (get-text-property (point) 'clutch-full-value)
+                 (user-error "No field at point")))
+         (col-def (when (and cidx (buffer-live-p clutch-record--result-buffer))
+                    (with-current-buffer clutch-record--result-buffer
+                      (nth cidx clutch--result-column-defs)))))
+    (clutch--dispatch-view val col-def)))
 
 (defun clutch-record-refresh ()
   "Refresh the Record buffer."
@@ -4956,7 +5137,7 @@ Accumulates input until a semicolon is found, then executes."
     ("p" "Prev row"     clutch-record-prev-row)
     ("RET" "Expand/FK"  clutch-record-toggle-expand)]
    ["Other"
-    ("v" "View JSON" clutch-record-view-json)
+    ("v" "View value" clutch-record-view-value)
     ("g" "Refresh" clutch-record-refresh)
     ("q" "Quit"    quit-window)]])
 
