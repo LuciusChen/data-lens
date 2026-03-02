@@ -262,6 +262,9 @@ adjacent to the correct console window.")
 (defvar-local clutch--refine-callback nil
   "Callback called with final rect when refine is confirmed.")
 
+(defvar-local clutch--refine-saved-tab-line nil
+  "Saved tab-line-format to restore after refine mode exits.")
+
 (defvar-local clutch--page-current 0
   "Current data page number (0-based).")
 
@@ -3934,20 +3937,24 @@ Scans buffer once for this column — O(buffer)."
     (let ((cb clutch--refine-callback)
           (final-rect (cons row-indices col-indices)))
       (clutch-refine-mode -1)
-      (setq clutch--refine-rect nil
+      (setq tab-line-format clutch--refine-saved-tab-line
+            clutch--refine-rect nil
             clutch--refine-excluded-rows nil
             clutch--refine-excluded-cols nil
-            clutch--refine-callback nil)
+            clutch--refine-callback nil
+            clutch--refine-saved-tab-line nil)
       (funcall cb final-rect))))
 
 (defun clutch-refine-cancel ()
   "Cancel refine mode without executing the callback."
   (interactive)
   (clutch-refine-mode -1)
-  (setq clutch--refine-rect nil
+  (setq tab-line-format clutch--refine-saved-tab-line
+        clutch--refine-rect nil
         clutch--refine-excluded-rows nil
         clutch--refine-excluded-cols nil
-        clutch--refine-callback nil)
+        clutch--refine-callback nil
+        clutch--refine-saved-tab-line nil)
   (message "Refine cancelled"))
 
 (defun clutch-result--start-refine (rect callback)
@@ -3957,7 +3964,20 @@ RECT is (ROW-INDICES . COL-INDICES)."
   (setq-local clutch--refine-rect rect
               clutch--refine-excluded-rows nil
               clutch--refine-excluded-cols nil
-              clutch--refine-callback callback)
+              clutch--refine-callback callback
+              clutch--refine-saved-tab-line tab-line-format
+              tab-line-format
+              (concat
+               (propertize " " 'display '(space :align-to 0))
+               (propertize "REFINE  " 'face 'font-lock-warning-face)
+               (propertize "m" 'face 'font-lock-keyword-face)
+               (propertize " row   " 'face 'font-lock-comment-face)
+               (propertize "x" 'face 'font-lock-keyword-face)
+               (propertize " col   " 'face 'font-lock-comment-face)
+               (propertize "RET" 'face 'font-lock-keyword-face)
+               (propertize " confirm   " 'face 'font-lock-comment-face)
+               (propertize "C-g" 'face 'font-lock-keyword-face)
+               (propertize " cancel" 'face 'font-lock-comment-face)))
   (clutch-refine-mode 1)
   (clutch-refine--init-overlays))
 
