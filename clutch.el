@@ -247,6 +247,21 @@ adjacent to the correct console window.")
 (defvar-local clutch--row-overlay nil
   "Overlay used to highlight the current row.")
 
+(defvar-local clutch--refine-rect nil
+  "Rectangle (ROW-INDICES . COL-INDICES) being refined, or nil.")
+
+(defvar-local clutch--refine-excluded-rows nil
+  "Row indices (0-based) excluded during refine mode.")
+
+(defvar-local clutch--refine-excluded-cols nil
+  "Col indices (0-based) excluded during refine mode.")
+
+(defvar-local clutch--refine-overlays nil
+  "Overlays created during refine mode.")
+
+(defvar-local clutch--refine-callback nil
+  "Callback called with final rect when refine is confirmed.")
+
 (defvar-local clutch--page-current 0
   "Current data page number (0-based).")
 
@@ -3758,81 +3773,193 @@ Prompts for a pattern; enter empty string to clear."
 
 ;;;; Yank cell / Copy row as INSERT
 
-(defun clutch-result--parse-index-spec (input allowed)
-  "Parse INPUT like \"6,8,10-12\" into numbers, constrained by ALLOWED."
-  (let ((tokens (split-string input "," t "[[:space:]\n\r\t]+"))
-        numbers)
-    (dolist (tok tokens)
-      (cond
-       ((string-match-p "\\`[0-9]+\\'" tok)
-        (push (string-to-number tok) numbers))
-       ((string-match "\\`\\([0-9]+\\)-\\([0-9]+\\)\\'" tok)
-        (let ((beg (string-to-number (match-string 1 tok)))
-              (end (string-to-number (match-string 2 tok))))
-          (when (> beg end)
-            (user-error "Invalid range: %s" tok))
-          (cl-loop for n from beg to end do (push n numbers))))
-       (t
-        (user-error "Invalid token: %s" tok))))
-    (setq numbers (nreverse numbers))
-    (let ((dedup (cl-remove-duplicates numbers :test #'=))
-          (invalid nil))
-      (dolist (n dedup)
-        (unless (member n allowed)
-          (push n invalid)))
-      (when invalid
-        (user-error "Out of range: %s"
-                    (mapconcat #'number-to-string (nreverse invalid) ", ")))
-      dedup)))
+;;;; Refine minor mode
 
-(defun clutch-result--read-excluded-rows (row-indices)
-  "Read excluded rows from ROW-INDICES (0-based)."
-  (let* ((allowed (mapcar (lambda (ridx) (1+ ridx)) row-indices))
-         (input (string-trim
-                 (read-string
-                  "Exclude rows (e.g. 6,8,10-12; empty=none): "))))
-    (if (string-empty-p input)
-        nil
-      (mapcar (lambda (n) (1- n))
-              (clutch-result--parse-index-spec input allowed)))))
+(defvar clutch-refine-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "m") #'clutch-refine-toggle-row)
+    (define-key map (kbd "x") #'clutch-refine-toggle-col)
+    (define-key map (kbd "RET") #'clutch-refine-confirm)
+    (define-key map (kbd "C-g") #'clutch-refine-cancel)
+    map)
+  "Keymap for `clutch-refine-mode'.")
 
-(defun clutch-result--read-excluded-cols (col-indices &optional rows-note)
-  "Read excluded columns from COL-INDICES (0-based)."
-  (let* ((allowed (mapcar (lambda (cidx) (1+ cidx)) col-indices))
-         (prompt (concat
-                  "Exclude columns (e.g. 1,3-5; empty=none)"
-                  (if rows-note (format " [%s]" rows-note) "")
-                  ": "))
-         (input (string-trim (read-string prompt))))
-    (if (string-empty-p input)
-        nil
-      (mapcar (lambda (n) (1- n))
-              (clutch-result--parse-index-spec input allowed)))))
+(define-minor-mode clutch-refine-mode
+  "Transient minor mode for visually refining a rectangular selection.
+\\<clutch-refine-mode-map>
+\\[clutch-refine-toggle-row]: toggle row exclusion at point
+\\[clutch-refine-toggle-col]: toggle column exclusion at point
+\\[clutch-refine-confirm]: confirm and execute
+\\[clutch-refine-cancel]: cancel"
+  :keymap clutch-refine-mode-map
+  :lighter " [REFINE: m=row x=col RET=ok C-g=cancel]"
+  (unless clutch-refine-mode
+    (clutch-refine--clear-overlays)))
 
-(defun clutch-result--refine-region-rectangle (rect)
-  "Refine RECT (ROW-INDICES . COL-INDICES) by excluding rows then columns."
-  (pcase-let* ((`(,row-indices . ,col-indices) rect)
-               (excluded-rows (clutch-result--read-excluded-rows row-indices))
-               (rows-note (if excluded-rows
-                              (format "rows excluded: %s"
-                                      (string-join
-                                       (mapcar (lambda (ridx) (number-to-string (1+ ridx)))
-                                               excluded-rows)
-                                       ", "))
-                            "rows excluded: none"))
-               (excluded-cols (clutch-result--read-excluded-cols
-                               col-indices rows-note))
-               (rows (cl-loop for ridx in row-indices
-                              unless (memq ridx excluded-rows)
-                              collect ridx))
-               (cols (cl-loop for cidx in col-indices
-                              unless (memq cidx excluded-cols)
-                              collect cidx)))
-    (unless rows
+(defun clutch-refine--clear-overlays ()
+  "Delete all overlays created during refine mode."
+  (mapc #'delete-overlay clutch--refine-overlays)
+  (setq clutch--refine-overlays nil))
+
+(defun clutch-refine--make-overlay (beg end face priority &optional tag-prop tag-val)
+  "Create a refine overlay from BEG to END with FACE and PRIORITY.
+Optionally tag with TAG-PROP = TAG-VAL for incremental removal."
+  (let ((ov (make-overlay beg end)))
+    (overlay-put ov 'face face)
+    (overlay-put ov 'priority priority)
+    (when tag-prop (overlay-put ov tag-prop tag-val))
+    (push ov clutch--refine-overlays)))
+
+(defun clutch-refine--init-overlays ()
+  "Apply layer-1 selection overlays for the rect.  Called once on refine start."
+  (clutch-refine--clear-overlays)
+  (save-excursion
+    (pcase-let ((`(,row-indices . ,col-indices) clutch--refine-rect))
+      (dolist (cidx col-indices)
+        (goto-char (point-min))
+        (cl-loop for match = (text-property-search-forward 'clutch-col-idx cidx #'eql)
+                 while match
+                 do (let ((beg (prop-match-beginning match))
+                          (end (prop-match-end match)))
+                      (when (memq (get-text-property beg 'clutch-row-idx) row-indices)
+                        (clutch-refine--make-overlay beg end 'secondary-selection 0))))))))
+
+(defun clutch-refine--add-row-exclusion (ridx)
+  "Add exclusion overlays for row RIDX within the rect's columns.
+Finds the row's line first, then scans only that line — O(buffer-to-row + line)."
+  (save-excursion
+    (goto-char (point-min))
+    (when-let* ((match (text-property-search-forward 'clutch-row-idx ridx #'eql)))
+      (goto-char (prop-match-beginning match))
+      (let ((bol (line-beginning-position))
+            (eol (line-end-position))
+            (col-set (cdr clutch--refine-rect)))
+        (cl-loop with p = bol
+                 while (< p eol)
+                 do (let ((cidx (get-text-property p 'clutch-col-idx)))
+                      (if (and cidx (memq cidx col-set))
+                          (let ((end (or (next-single-property-change
+                                         p 'clutch-col-idx nil eol)
+                                        eol)))
+                            (clutch-refine--make-overlay
+                             p end '(:inherit shadow :strike-through t) 1
+                             'clutch-refine-row ridx)
+                            (setq p end))
+                        (setq p (1+ p)))))))))
+
+(defun clutch-refine--remove-row-exclusion (ridx)
+  "Remove exclusion overlays tagged with RIDX."
+  (setq clutch--refine-overlays
+        (cl-loop for ov in clutch--refine-overlays
+                 if (eql (overlay-get ov 'clutch-refine-row) ridx)
+                 do (delete-overlay ov)
+                 else collect ov)))
+
+(defun clutch-refine--add-col-exclusion (cidx)
+  "Add exclusion overlays for column CIDX (header + rect rows).
+Scans buffer once for this column — O(buffer)."
+  (save-excursion
+    (goto-char (point-min))
+    (when-let* ((match (text-property-search-forward 'clutch-header-col cidx #'eql)))
+      (clutch-refine--make-overlay (prop-match-beginning match) (prop-match-end match)
+                                   '(:inherit shadow :strike-through t) 1
+                                   'clutch-refine-col cidx))
+    (goto-char (point-min))
+    (cl-loop for match = (text-property-search-forward 'clutch-col-idx cidx #'eql)
+             while match
+             do (let ((beg (prop-match-beginning match))
+                      (end (prop-match-end match)))
+                  (when (memq (get-text-property beg 'clutch-row-idx)
+                              (car clutch--refine-rect))
+                    (clutch-refine--make-overlay beg end
+                                                 '(:inherit shadow :strike-through t) 1
+                                                 'clutch-refine-col cidx))))))
+
+(defun clutch-refine--remove-col-exclusion (cidx)
+  "Remove exclusion overlays tagged with CIDX."
+  (setq clutch--refine-overlays
+        (cl-loop for ov in clutch--refine-overlays
+                 if (eql (overlay-get ov 'clutch-refine-col) cidx)
+                 do (delete-overlay ov)
+                 else collect ov)))
+
+(defun clutch-refine-toggle-row ()
+  "Toggle exclusion of the row at point."
+  (interactive)
+  (if-let* ((ridx (clutch-result--row-idx-at-line)))
+      (if (memq ridx (car clutch--refine-rect))
+          (if (memq ridx clutch--refine-excluded-rows)
+              (progn
+                (setq clutch--refine-excluded-rows
+                      (delq ridx clutch--refine-excluded-rows))
+                (clutch-refine--remove-row-exclusion ridx)
+                (message "Row %d included" (1+ ridx)))
+            (push ridx clutch--refine-excluded-rows)
+            (clutch-refine--add-row-exclusion ridx)
+            (message "Row %d excluded" (1+ ridx)))
+        (user-error "Row not in selection"))
+    (user-error "No row at point")))
+
+(defun clutch-refine-toggle-col ()
+  "Toggle exclusion of the column at point."
+  (interactive)
+  (if-let* ((cidx (or (get-text-property (point) 'clutch-col-idx)
+                      (get-text-property (point) 'clutch-header-col))))
+      (if (memq cidx (cdr clutch--refine-rect))
+          (if (memq cidx clutch--refine-excluded-cols)
+              (progn
+                (setq clutch--refine-excluded-cols
+                      (delq cidx clutch--refine-excluded-cols))
+                (clutch-refine--remove-col-exclusion cidx)
+                (message "Column \"%s\" included" (nth cidx clutch--result-columns)))
+            (push cidx clutch--refine-excluded-cols)
+            (clutch-refine--add-col-exclusion cidx)
+            (message "Column \"%s\" excluded" (nth cidx clutch--result-columns)))
+        (user-error "Column not in selection"))
+    (user-error "No column at point")))
+
+(defun clutch-refine-confirm ()
+  "Confirm the current refine selection and execute the callback."
+  (interactive)
+  (let* ((row-indices (cl-loop for ridx in (car clutch--refine-rect)
+                               unless (memq ridx clutch--refine-excluded-rows)
+                               collect ridx))
+         (col-indices (cl-loop for cidx in (cdr clutch--refine-rect)
+                               unless (memq cidx clutch--refine-excluded-cols)
+                               collect cidx)))
+    (unless row-indices
       (user-error "No rows left after exclusion"))
-    (unless cols
+    (unless col-indices
       (user-error "No columns left after exclusion"))
-    (cons rows cols)))
+    (let ((cb clutch--refine-callback)
+          (final-rect (cons row-indices col-indices)))
+      (clutch-refine-mode -1)
+      (setq clutch--refine-rect nil
+            clutch--refine-excluded-rows nil
+            clutch--refine-excluded-cols nil
+            clutch--refine-callback nil)
+      (funcall cb final-rect))))
+
+(defun clutch-refine-cancel ()
+  "Cancel refine mode without executing the callback."
+  (interactive)
+  (clutch-refine-mode -1)
+  (setq clutch--refine-rect nil
+        clutch--refine-excluded-rows nil
+        clutch--refine-excluded-cols nil
+        clutch--refine-callback nil)
+  (message "Refine cancelled"))
+
+(defun clutch-result--start-refine (rect callback)
+  "Enter refine mode for RECT with CALLBACK called with final rect on confirm.
+RECT is (ROW-INDICES . COL-INDICES)."
+  (deactivate-mark)
+  (setq-local clutch--refine-rect rect
+              clutch--refine-excluded-rows nil
+              clutch--refine-excluded-cols nil
+              clutch--refine-callback callback)
+  (clutch-refine-mode 1)
+  (clutch-refine--init-overlays))
 
 (defun clutch-result-copy (format &optional rect)
   "Unified copy entry point for result buffer.
@@ -3856,21 +3983,24 @@ Otherwise, copy the current cell."
      (user-error "Unsupported copy format: %s" format))))
 
 (defun clutch-result-copy-command (&optional refine)
-  "Prompt for copy FORMAT and dispatch to `clutch-result-copy'."
+  "Prompt for copy FORMAT and dispatch to `clutch-result-copy'.
+With prefix arg REFINE and an active region, enter visual refine mode."
   (interactive "P")
   (let* ((choice (completing-read "Copy format: " '("tsv" "csv" "insert")
                                   nil t nil nil "tsv"))
-         (format (pcase choice
-                   ("tsv" 'tsv)
-                   ("csv" 'csv)
-                   ("insert" 'insert)
-                   (_ 'tsv)))
-         (rect (when refine
-                 (unless (use-region-p)
-                   (user-error "Set a region before using C-u"))
-                 (clutch-result--refine-region-rectangle
-                  (clutch-result--region-rectangle-indices)))))
-    (clutch-result-copy format rect)))
+         (fmt (pcase choice
+                ("tsv" 'tsv)
+                ("csv" 'csv)
+                ("insert" 'insert)
+                (_ 'tsv))))
+    (if refine
+        (progn
+          (unless (use-region-p)
+            (user-error "Set a region before using C-u"))
+          (clutch-result--start-refine
+           (clutch-result--region-rectangle-indices)
+           (lambda (final-rect) (clutch-result-copy fmt final-rect))))
+      (clutch-result-copy fmt))))
 
 (defun clutch-result-yank-cell ()
   "Copy value at point to the kill ring.
@@ -4058,30 +4188,38 @@ Without region: use current cell."
               (plist-get stats :cells)
               (plist-get stats :skipped)))))
 
+(defun clutch-result--do-aggregate (rect)
+  "Perform aggregate on RECT (ROW-INDICES . COL-INDICES) and update display."
+  (pcase-let* ((`(,row-indices . ,col-indices) rect)
+               (label (if (= (length col-indices) 1)
+                          (nth (car col-indices) clutch--result-columns)
+                        "selection"))
+               (stats (clutch-result--compute-aggregate row-indices col-indices))
+               (summary (clutch-result--format-aggregate-summary label stats)))
+    (setq-local clutch--aggregate-summary
+                (list :label label
+                      :rows (plist-get stats :rows)
+                      :cells (plist-get stats :cells)
+                      :skipped (plist-get stats :skipped)
+                      :sum (plist-get stats :sum)
+                      :avg (plist-get stats :avg)
+                      :min (plist-get stats :min)
+                      :max (plist-get stats :max)
+                      :count (plist-get stats :count)))
+    (clutch--refresh-display)
+    (kill-new summary)))
+
 (defun clutch-result-aggregate (&optional refine)
-  "Aggregate numeric values from selected columns or current cell."
+  "Aggregate numeric values from selected columns or current cell.
+With prefix arg REFINE and an active region, enter visual refine mode."
   (interactive "P")
-  (let ((rect (when (and refine (use-region-p))
-                (clutch-result--refine-region-rectangle
-                 (clutch-result--region-rectangle-indices)))))
-    (pcase-let* ((`(,row-indices ,col-indices) (clutch-result--aggregate-target rect))
-                 (label (if (= (length col-indices) 1)
-                            (nth (car col-indices) clutch--result-columns)
-                          "selection"))
-                 (stats (clutch-result--compute-aggregate row-indices col-indices))
-                 (summary (clutch-result--format-aggregate-summary label stats)))
-      (setq-local clutch--aggregate-summary
-                  (list :label label
-                        :rows (plist-get stats :rows)
-                        :cells (plist-get stats :cells)
-                        :skipped (plist-get stats :skipped)
-                        :sum (plist-get stats :sum)
-                        :avg (plist-get stats :avg)
-                        :min (plist-get stats :min)
-                        :max (plist-get stats :max)
-                        :count (plist-get stats :count)))
-      (clutch--refresh-display)
-      (kill-new summary))))
+  (if (and refine (use-region-p))
+      (clutch-result--start-refine
+       (clutch-result--region-rectangle-indices)
+       #'clutch-result--do-aggregate)
+    (pcase-let* ((`(,row-indices ,col-indices)
+                  (clutch-result--aggregate-target nil)))
+      (clutch-result--do-aggregate (cons row-indices col-indices)))))
 
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
