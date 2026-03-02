@@ -559,9 +559,11 @@ Suggested global bindings:
 
 #+begin_src
 C-c C-t                     ;; List all tables
+C-c C-j                     ;; Browse table data (select table, insert SELECT into console)
 TAB                          ;; Expand/collapse table columns (type, PK, FK)
 E / C                        ;; Expand all / Collapse all
 RET                          ;; Show DDL for table at point
+v                            ;; Browse table data at point (insert SELECT into console)
 g                            ;; Refresh
 #+end_src
 

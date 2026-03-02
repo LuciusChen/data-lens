@@ -949,6 +949,58 @@
         (should (string-match-p "1 row" output))
         (should (string-match-p "db> $" output))))))
 
+;;;; Unit tests - schema/table browse helpers
+
+(ert-deftest clutch-test-schema-browse-at-point-errors-without-console ()
+  "Schema browse should error when no matching query console is open."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch-schema--table-at-point)
+               (lambda () "users"))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn tbl) tbl))
+              ((symbol-function 'clutch--find-console-for-conn)
+               (lambda (_conn) nil)))
+      (should-error (clutch-schema-browse-at-point) :type 'user-error))))
+
+(ert-deftest clutch-test-schema-browse-at-point-inserts-sql-into-console ()
+  "Schema browse should insert escaped SELECT in the target console buffer."
+  (let ((console (generate-new-buffer " *clutch-test-console*")))
+    (unwind-protect
+        (with-current-buffer console
+          (insert "SELECT 1;")
+          (setq-local clutch-connection 'fake-conn)
+          (cl-letf (((symbol-function 'clutch-schema--table-at-point)
+                     (lambda () "order-items"))
+                    ((symbol-function 'clutch-db-escape-identifier)
+                     (lambda (_conn tbl) (format "\"%s\"" tbl)))
+                    ((symbol-function 'clutch--find-console-for-conn)
+                     (lambda (_conn) console))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (set-buffer buf)
+                       buf)))
+            (with-temp-buffer
+              (setq-local clutch-connection 'fake-conn)
+              (clutch-schema-browse-at-point)))
+          (should (string-suffix-p
+                   "\n\nSELECT * FROM \"order-items\""
+                   (buffer-string))))
+      (kill-buffer console))))
+
+(ert-deftest clutch-test-browse-table-inserts-escaped-select ()
+  "Browse table command should escape identifier before inserting SQL."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (insert "-- tail")
+    (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn tbl) (format "\"%s\"" tbl))))
+      (clutch-browse-table "order-items"))
+    (should (string-suffix-p
+             "\n\nSELECT * FROM \"order-items\""
+             (buffer-string)))))
+
 ;;;; Live integration tests
 
 (defmacro clutch-test--with-conn (var &rest body)

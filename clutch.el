@@ -2668,6 +2668,7 @@ SQL keyword/function docs are shown even without a connection."
     (define-key map (kbd "TAB") #'clutch-schema-toggle-expand)
     (define-key map "E" #'clutch-schema-expand-all)
     (define-key map "C" #'clutch-schema-collapse-all)
+    (define-key map "v" #'clutch-schema-browse-at-point)
     map)
   "Keymap for `clutch-schema-mode'.")
 
@@ -2679,6 +2680,7 @@ SQL keyword/function docs are shown even without a connection."
   \\[clutch-schema-expand-all]	Expand all tables
   \\[clutch-schema-collapse-all]	Collapse all tables
   \\[clutch-schema-describe-at-point]	Show DDL for table
+  \\[clutch-schema-browse-at-point]	Browse table data (insert SELECT into console)
   \\[clutch-schema-refresh]	Refresh"
   (setq truncate-lines t)
   (setq-local revert-buffer-function #'clutch-schema--revert))
@@ -2846,6 +2848,44 @@ If EXPANDED-P, also insert column detail lines using CONN."
     (goto-char (point-min))
     (forward-line (1- line))))
 
+(defun clutch--find-console-for-conn (conn)
+  "Return the clutch-mode buffer that owns CONN, or nil."
+  (cl-loop for buf in (buffer-list)
+           when (and (eq (buffer-local-value 'major-mode buf) 'clutch-mode)
+                     (eq (buffer-local-value 'clutch-connection buf) conn))
+           return buf))
+
+(defun clutch-schema-browse-at-point ()
+  "Insert SELECT * FROM <table> into the query console and switch to it."
+  (interactive)
+  (if-let* ((tbl (clutch-schema--table-at-point)))
+      (let* ((conn clutch-connection)
+             (sql (format "SELECT * FROM %s"
+                          (clutch-db-escape-identifier conn tbl)))
+             (console (or (clutch--find-console-for-conn conn)
+                          (user-error "No query console open for this connection"))))
+        (pop-to-buffer console)
+        (goto-char (point-max))
+        (unless (bolp) (insert "\n"))
+        (insert "\n" sql))
+    (user-error "No table at point")))
+
+(defun clutch-browse-table (table)
+  "Insert SELECT * FROM TABLE at end of the current console buffer.
+Prompts for TABLE via `completing-read' using schema cache table names."
+  (interactive
+   (list (let* ((schema (clutch--schema-for-connection))
+                (tables (or (and schema (hash-table-keys schema))
+                            (progn (clutch--ensure-connection)
+                                   (clutch-db-list-tables clutch-connection)))))
+           (completing-read "Browse table: " tables nil t))))
+  (clutch--ensure-connection)
+  (let ((sql (format "SELECT * FROM %s"
+                     (clutch-db-escape-identifier clutch-connection table))))
+    (goto-char (point-max))
+    (unless (bolp) (insert "\n"))
+    (insert "\n" sql)))
+
 ;;;; clutch-mode (SQL editing major mode)
 
 (defvar clutch-mode-map
@@ -2856,6 +2896,7 @@ If EXPANDED-P, also insert column detail lines using CONN."
     (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
     (define-key map (kbd "C-c C-e") #'clutch-connect)
     (define-key map (kbd "C-c C-t") #'clutch-list-tables)
+    (define-key map (kbd "C-c C-j") #'clutch-browse-table)
     (define-key map (kbd "C-c C-d") #'clutch-describe-table-at-point)
     (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
     (define-key map (kbd "C-c ?") #'clutch-dispatch)
