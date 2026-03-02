@@ -91,156 +91,6 @@ Clone this repository and add it to your =load-path=
 (require 'clutch)
 #+end_src
 
-* Protocol Layer Usage (mysql.el)
-
-#+begin_src emacs-lisp
-(require 'mysql)
-
-;; Connect
-(setq conn (mysql-connect :host "127.0.0.1"
-                           :port 3306
-                           :user "root"
-                           :password "secret"
-                           :database "mydb"))
-
-;; Query
-(let ((result (mysql-query conn "SELECT * FROM users LIMIT 10")))
-  (mysql-result-columns result)  ;; column metadata
-  (mysql-result-rows result))    ;; list of rows (list of values)
-
-;; DML
-(let ((result (mysql-query conn "INSERT INTO users (name) VALUES ('alice')")))
-  (mysql-result-affected-rows result)  ;; => 1
-  (mysql-result-last-insert-id result)) ;; => auto-increment id
-
-;; Disconnect
-(mysql-disconnect conn)
-#+end_src
-
-** TLS Connection
-
-When =:tls t= is used, certificate and hostname verification are enabled by
-default (secure-by-default).  If verification fails, connection setup aborts
-with an error; it does not silently downgrade to insecure mode.
-
-To trust private/internal CAs, configure:
-
-- =mysql-tls-trustfiles= (list of CA certificate files)
-- =mysql-tls-verify-server= (defaults to =t=; set to =nil= only for local/dev)
-- =mysql-tls-keylist= for client certificates when required
-
-#+begin_src emacs-lisp
-;; Example: custom CA for private PKI
-(setq mysql-tls-trustfiles '("/etc/ssl/certs/internal-ca.pem"))
-
-(setq conn (mysql-connect :host "127.0.0.1"
-                           :port 3306
-                           :user "root"
-                           :password "secret"
-                           :database "mydb"
-                           :tls t))
-#+end_src
-
-** URI Connection
-
-#+begin_src emacs-lisp
-(setq conn (mysql-connect/uri "mysql://root:secret@127.0.0.1:3306/mydb"))
-#+end_src
-
-** Convenience Macros
-
-#+begin_src emacs-lisp
-;; Auto-close connection
-(with-mysql-connection conn (:host "127.0.0.1" :user "root"
-                             :password "secret" :database "mydb")
-  (mysql-query conn "SELECT 1"))
-
-;; Transaction with auto-rollback on error
-(with-mysql-transaction conn
-  (mysql-query conn "INSERT INTO users (name) VALUES ('alice')")
-  (mysql-query conn "INSERT INTO users (name) VALUES ('bob')"))
-#+end_src
-
-** Prepared Statements
-
-#+begin_src emacs-lisp
-(let ((stmt (mysql-prepare conn "SELECT * FROM users WHERE id = ?")))
-  (let ((result (mysql-execute stmt 42)))
-    (mysql-result-rows result))
-  (mysql-stmt-close stmt))
-#+end_src
-
-** Utilities
-
-#+begin_src emacs-lisp
-(mysql-ping conn)                          ;; => t
-(mysql-escape-identifier "my`table")       ;; => "`my``table`"
-(mysql-escape-literal "it's a \"test\"")   ;; => "'it\\'s a \\\"test\\\"'"
-#+end_src
-
-* Protocol Layer Usage (pg.el)
-
-#+begin_src emacs-lisp
-(require 'pg)
-
-;; Connect
-(setq conn (pg-connect :host "127.0.0.1"
-                        :port 5432
-                        :user "postgres"
-                        :password "secret"
-                        :database "mydb"))
-
-;; Query
-(let ((result (pg-query conn "SELECT * FROM users LIMIT 10")))
-  (pg-result-columns result)  ;; column metadata
-  (pg-result-rows result))    ;; list of rows (list of values)
-
-;; DML
-(let ((result (pg-query conn "INSERT INTO users (name) VALUES ('alice')")))
-  (pg-result-affected-rows result))  ;; => 1
-
-;; Disconnect
-(pg-disconnect conn)
-#+end_src
-
-** TLS Connection
-
-When =:tls t= is used, certificate and hostname verification are enabled by
-default (secure-by-default).  If verification fails, connection setup aborts
-with an error; it does not silently downgrade to insecure mode.
-
-To trust private/internal CAs, configure:
-
-- =pg-tls-trustfiles= (list of CA certificate files)
-- =pg-tls-verify-server= (defaults to =t=; set to =nil= only for local/dev)
-- =pg-tls-keylist= for client certificates when required
-
-#+begin_src emacs-lisp
-;; Example: custom CA for private PKI
-(setq pg-tls-trustfiles '("/etc/ssl/certs/internal-ca.pem"))
-
-(setq conn (pg-connect :host "127.0.0.1"
-                        :port 5432
-                        :user "postgres"
-                        :password "secret"
-                        :database "mydb"
-                        :tls t))
-#+end_src
-
-** Convenience Macros
-
-#+begin_src emacs-lisp
-;; Auto-close connection
-(with-pg-connection conn (:host "127.0.0.1" :user "postgres"
-                          :password "secret" :database "mydb")
-  (pg-query conn "SELECT 1"))
-
-;; Transaction with auto-rollback on error
-(with-pg-transaction conn
-  (pg-query conn "INSERT INTO users (name) VALUES ('alice')")
-  (pg-query conn "INSERT INTO users (name) VALUES ('bob')"))
-#+end_src
-
 * Interactive Client
 
 ** Quick Start
@@ -630,6 +480,156 @@ Compatibility entry files:
   - the next command auto-reconnects when saved connection params are available.
 - High-risk DML (=UPDATE/DELETE= without top-level =WHERE=) requires typed
   confirmation (=YES=) before execution.
+
+* Protocol Layer Usage (mysql.el)
+
+#+begin_src emacs-lisp
+(require 'mysql)
+
+;; Connect
+(setq conn (mysql-connect :host "127.0.0.1"
+                           :port 3306
+                           :user "root"
+                           :password "secret"
+                           :database "mydb"))
+
+;; Query
+(let ((result (mysql-query conn "SELECT * FROM users LIMIT 10")))
+  (mysql-result-columns result)  ;; column metadata
+  (mysql-result-rows result))    ;; list of rows (list of values)
+
+;; DML
+(let ((result (mysql-query conn "INSERT INTO users (name) VALUES ('alice')")))
+  (mysql-result-affected-rows result)  ;; => 1
+  (mysql-result-last-insert-id result)) ;; => auto-increment id
+
+;; Disconnect
+(mysql-disconnect conn)
+#+end_src
+
+** TLS Connection
+
+When =:tls t= is used, certificate and hostname verification are enabled by
+default (secure-by-default).  If verification fails, connection setup aborts
+with an error; it does not silently downgrade to insecure mode.
+
+To trust private/internal CAs, configure:
+
+- =mysql-tls-trustfiles= (list of CA certificate files)
+- =mysql-tls-verify-server= (defaults to =t=; set to =nil= only for local/dev)
+- =mysql-tls-keylist= for client certificates when required
+
+#+begin_src emacs-lisp
+;; Example: custom CA for private PKI
+(setq mysql-tls-trustfiles '("/etc/ssl/certs/internal-ca.pem"))
+
+(setq conn (mysql-connect :host "127.0.0.1"
+                           :port 3306
+                           :user "root"
+                           :password "secret"
+                           :database "mydb"
+                           :tls t))
+#+end_src
+
+** URI Connection
+
+#+begin_src emacs-lisp
+(setq conn (mysql-connect/uri "mysql://root:secret@127.0.0.1:3306/mydb"))
+#+end_src
+
+** Convenience Macros
+
+#+begin_src emacs-lisp
+;; Auto-close connection
+(with-mysql-connection conn (:host "127.0.0.1" :user "root"
+                             :password "secret" :database "mydb")
+  (mysql-query conn "SELECT 1"))
+
+;; Transaction with auto-rollback on error
+(with-mysql-transaction conn
+  (mysql-query conn "INSERT INTO users (name) VALUES ('alice')")
+  (mysql-query conn "INSERT INTO users (name) VALUES ('bob')"))
+#+end_src
+
+** Prepared Statements
+
+#+begin_src emacs-lisp
+(let ((stmt (mysql-prepare conn "SELECT * FROM users WHERE id = ?")))
+  (let ((result (mysql-execute stmt 42)))
+    (mysql-result-rows result))
+  (mysql-stmt-close stmt))
+#+end_src
+
+** Utilities
+
+#+begin_src emacs-lisp
+(mysql-ping conn)                          ;; => t
+(mysql-escape-identifier "my`table")       ;; => "`my``table`"
+(mysql-escape-literal "it's a \"test\"")   ;; => "'it\\'s a \\\"test\\\"'"
+#+end_src
+
+* Protocol Layer Usage (pg.el)
+
+#+begin_src emacs-lisp
+(require 'pg)
+
+;; Connect
+(setq conn (pg-connect :host "127.0.0.1"
+                        :port 5432
+                        :user "postgres"
+                        :password "secret"
+                        :database "mydb"))
+
+;; Query
+(let ((result (pg-query conn "SELECT * FROM users LIMIT 10")))
+  (pg-result-columns result)  ;; column metadata
+  (pg-result-rows result))    ;; list of rows (list of values)
+
+;; DML
+(let ((result (pg-query conn "INSERT INTO users (name) VALUES ('alice')")))
+  (pg-result-affected-rows result))  ;; => 1
+
+;; Disconnect
+(pg-disconnect conn)
+#+end_src
+
+** TLS Connection
+
+When =:tls t= is used, certificate and hostname verification are enabled by
+default (secure-by-default).  If verification fails, connection setup aborts
+with an error; it does not silently downgrade to insecure mode.
+
+To trust private/internal CAs, configure:
+
+- =pg-tls-trustfiles= (list of CA certificate files)
+- =pg-tls-verify-server= (defaults to =t=; set to =nil= only for local/dev)
+- =pg-tls-keylist= for client certificates when required
+
+#+begin_src emacs-lisp
+;; Example: custom CA for private PKI
+(setq pg-tls-trustfiles '("/etc/ssl/certs/internal-ca.pem"))
+
+(setq conn (pg-connect :host "127.0.0.1"
+                        :port 5432
+                        :user "postgres"
+                        :password "secret"
+                        :database "mydb"
+                        :tls t))
+#+end_src
+
+** Convenience Macros
+
+#+begin_src emacs-lisp
+;; Auto-close connection
+(with-pg-connection conn (:host "127.0.0.1" :user "postgres"
+                          :password "secret" :database "mydb")
+  (pg-query conn "SELECT 1"))
+
+;; Transaction with auto-rollback on error
+(with-pg-transaction conn
+  (pg-query conn "INSERT INTO users (name) VALUES ('alice')")
+  (pg-query conn "INSERT INTO users (name) VALUES ('bob')"))
+#+end_src
 
 * Testing
 
