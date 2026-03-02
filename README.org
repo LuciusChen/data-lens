@@ -403,7 +403,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C=            | Jump to column                                |
 | =g=            | Re-execute query                              |
 | =C-c '=       | Edit cell value                               |
-| =o=            | Insert new row                                |
+| =i=            | Insert new row                                |
 | =d=            | Delete row(s) (supports region)               |
 | =C-c C-c=     | Commit edits (generates UPDATE)               |
 | =C-c C-p=      | Preview SQL (query / pending update / selected delete) |
@@ -514,7 +514,7 @@ Step 4 — press RET to confirm.
 
 #+begin_src
 1. SELECT * FROM users;      → C-c C-c to execute
-2. o                          → opens insert buffer with all column fields
+2. i                          → opens insert buffer with all column fields
 3. Fill values, C-c C-c to commit INSERT (C-c C-k to cancel)
 4. Use normal Emacs region selection to select rows
 5. d                          → delete current row or selected region
