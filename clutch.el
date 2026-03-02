@@ -2569,7 +2569,11 @@ Works without a database connection."
   (when-let* ((bounds (bounds-of-thing-at-point 'symbol)))
     (list (car bounds) (cdr bounds)
           clutch--sql-keywords
-          :exclusive 'no)))
+          :exclusive 'no
+          :exit-function (lambda (_str status)
+                           (when (and (eq status 'finished)
+                                      (not (looking-at-p "\\s-")))
+                             (insert " "))))))
 
 (defun clutch-completion-at-point ()
   "Completion-at-point function for SQL identifiers.
