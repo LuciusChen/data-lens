@@ -1028,5 +1028,40 @@ Skips if `clutch-test-password' is nil."
       (let ((paged (clutch-db-build-paged-sql conn base-sql 0 10 '("Host" . "ASC"))))
         (should (string-match-p "ORDER BY" paged))))))
 
+(ert-deftest clutch-test-live-edit-field-and-commit-persists ()
+  :tags '(:clutch-live)
+  "Edit one field and commit; the persisted row value should change."
+  (clutch-test--with-conn conn
+    (let* ((table (format "clutch_edit_commit_%d" (emacs-pid)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table))
+           (create-sql
+            (format "CREATE TABLE %s (id INT PRIMARY KEY, name VARCHAR(64))" table))
+           (insert-sql
+            (format "INSERT INTO %s (id, name) VALUES (1, 'before')" table))
+           (select-sql
+            (format "SELECT id, name FROM %s ORDER BY id" table)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query conn create-sql)
+            (clutch-db-query conn insert-sql)
+            (with-temp-buffer
+              (setq-local clutch-connection conn)
+              (setq-local clutch--last-query select-sql)
+              (setq-local clutch--result-columns '("id" "name"))
+              (setq-local clutch--result-rows '((1 "before")))
+              (setq-local clutch--pending-edits nil)
+              (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore)
+                        ((symbol-function 'clutch--execute) #'ignore)
+                        ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+                (clutch-result--apply-edit 0 1 "after")
+                (should clutch--pending-edits)
+                (clutch-result-commit)
+                (should-not clutch--pending-edits)))
+            (let* ((res (clutch-db-query conn select-sql))
+                   (rows (clutch-db-result-rows res)))
+              (should (equal rows '((1 "after"))))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
+
 (provide 'clutch-test)
 ;;; clutch-test.el ends here
