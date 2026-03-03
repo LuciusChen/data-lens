@@ -2883,7 +2883,7 @@ If EXPANDED-P, also insert column detail lines using CONN."
   (interactive)
   (if-let* ((tbl (clutch-schema--table-at-point)))
       (let* ((conn clutch-connection)
-             (sql (format "SELECT * FROM %s"
+             (sql (format "SELECT * FROM %s;"
                           (clutch-db-escape-identifier conn tbl)))
              (console (or (clutch--find-console-for-conn conn)
                           (user-error "No query console open for this connection"))))
@@ -2903,7 +2903,7 @@ Prompts for TABLE via `completing-read' using schema cache table names."
                                    (clutch-db-list-tables clutch-connection)))))
            (completing-read "Browse table: " tables nil t))))
   (clutch--ensure-connection)
-  (let ((sql (format "SELECT * FROM %s"
+  (let ((sql (format "SELECT * FROM %s;"
                      (clutch-db-escape-identifier clutch-connection table))))
     (goto-char (point-max))
     (unless (bolp) (insert "\n"))

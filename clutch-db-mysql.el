@@ -51,10 +51,23 @@
     (,mysql-type-timestamp  . datetime))
   "Alist mapping MySQL type codes to type-category symbols.")
 
-(defun clutch-db-mysql--type-category (mysql-type)
-  "Map a MySQL type code MYSQL-TYPE to a type-category symbol."
-  (or (alist-get mysql-type clutch-db-mysql--type-category-alist)
-      'text))
+(defconst clutch-db-mysql--binary-charset 63
+  "MySQL charset code for binary.
+Blob-family types with this charset are true BLOBs; others are TEXT.")
+
+(defconst clutch-db-mysql--blob-family-types
+  (list mysql-type-blob mysql-type-tiny-blob
+        mysql-type-medium-blob mysql-type-long-blob)
+  "MySQL type codes that share BLOB/TEXT family encodings.")
+
+(defun clutch-db-mysql--type-category (mysql-type charset)
+  "Map a MySQL type code MYSQL-TYPE (with CHARSET) to a type-category symbol.
+For the blob-family type codes, charset 63 (binary) means a true BLOB;
+any other charset means a TEXT column."
+  (if (memq mysql-type clutch-db-mysql--blob-family-types)
+      (if (= charset clutch-db-mysql--binary-charset) 'blob 'text)
+    (or (alist-get mysql-type clutch-db-mysql--type-category-alist)
+        'text)))
 
 (defun clutch-db-mysql--convert-columns (mysql-columns)
   "Convert MySQL column plists to clutch-db column plists.
@@ -62,7 +75,8 @@ Each output plist has :name and :type-category."
   (mapcar (lambda (col)
             (list :name (plist-get col :name)
                   :type-category (clutch-db-mysql--type-category
-                                  (plist-get col :type))))
+                                  (plist-get col :type)
+                                  (plist-get col :character-set))))
           mysql-columns))
 
 (defun clutch-db-mysql--wrap-result (mysql-result)

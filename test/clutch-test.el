@@ -92,6 +92,7 @@
   ;; String longer than width — no padding
   (should (equal (clutch--string-pad "hello" 3) "hello")))
 
+
 ;;;; Unit tests — column type detection
 
 (ert-deftest clutch-test-numeric-type-p ()
@@ -1089,7 +1090,7 @@
               (setq-local clutch-connection 'fake-conn)
               (clutch-schema-browse-at-point)))
           (should (string-suffix-p
-                   "\n\nSELECT * FROM \"order-items\""
+                   "\n\nSELECT * FROM \"order-items\";"
                    (buffer-string))))
       (kill-buffer console))))
 
@@ -1103,7 +1104,7 @@
                (lambda (_conn tbl) (format "\"%s\"" tbl))))
       (clutch-browse-table "order-items"))
     (should (string-suffix-p
-             "\n\nSELECT * FROM \"order-items\""
+             "\n\nSELECT * FROM \"order-items\";"
              (buffer-string)))))
 
 ;;;; Live integration tests
