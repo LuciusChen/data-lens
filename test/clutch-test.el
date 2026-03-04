@@ -1094,6 +1094,31 @@
                    (buffer-string))))
       (kill-buffer console))))
 
+(ert-deftest clutch-test-schema-toggle-expand-keeps-point-on-table-header ()
+  "Toggling expand from a column line should keep point on that table header."
+  (with-temp-buffer
+    (clutch-schema-mode)
+    (setq-local clutch-connection 'fake-conn
+                clutch-schema--tables '("a" "b")
+                clutch-schema--expanded-tables '("a"))
+    (cl-letf (((symbol-function 'clutch-db-database)
+               (lambda (_conn) "db"))
+              ((symbol-function 'clutch-db-column-details)
+               (lambda (_conn tbl)
+                 (if (equal tbl "a")
+                     (list (list :name "c1" :type "int")
+                           (list :name "c2" :type "int")
+                           (list :name "c3" :type "int"))
+                   nil))))
+      (clutch-schema--render)
+      (goto-char (point-min))
+      (search-forward "c2")
+      (beginning-of-line)
+      (should (equal (clutch-schema--table-at-point) "a"))
+      (clutch-schema-toggle-expand)
+      (should (equal (clutch-schema--table-at-point) "a"))
+      (should (looking-at-p "▸ a")))))
+
 (ert-deftest clutch-test-browse-table-inserts-escaped-select ()
   "Browse table command should escape identifier before inserting SQL."
   (with-temp-buffer

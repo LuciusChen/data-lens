@@ -2716,6 +2716,21 @@ SQL keyword/function docs are shown even without a connection."
   "Return the table name at the current line, or nil."
   (get-text-property (line-beginning-position) 'clutch-schema-table))
 
+(defun clutch-schema--goto-table-line (tbl)
+  "Move point to the table header line for TBL.  Return non-nil if found."
+  (goto-char (point-min))
+  (let (found)
+    (while (and (not found) (not (eobp)))
+      (let ((line-tbl (get-text-property (line-beginning-position) 'clutch-schema-table)))
+        (when (and line-tbl (string= line-tbl tbl)
+                   (save-excursion
+                     (beginning-of-line)
+                     (looking-at-p "[▸▾] ")))
+          (setq found t)))
+      (unless found
+        (forward-line 1)))
+    found))
+
 (defun clutch-schema--column-annotation (col)
   "Return the annotation suffix for column detail plist COL."
   (let ((pk (plist-get col :primary-key))
@@ -2792,14 +2807,14 @@ If EXPANDED-P, also insert column detail lines using CONN."
   "Toggle column expansion for the table at point."
   (interactive)
   (if-let* ((tbl (clutch-schema--table-at-point)))
-      (let ((line (line-number-at-pos)))
+      (progn
         (if (member tbl clutch-schema--expanded-tables)
             (setq clutch-schema--expanded-tables
                   (delete tbl clutch-schema--expanded-tables))
           (push tbl clutch-schema--expanded-tables))
         (clutch-schema--render)
-        (goto-char (point-min))
-        (forward-line (1- line)))
+        (unless (clutch-schema--goto-table-line tbl)
+          (goto-char (point-min))))
     (user-error "No table at point")))
 
 (defun clutch-schema-expand-all ()
