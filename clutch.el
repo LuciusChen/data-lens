@@ -1377,13 +1377,15 @@ Falls back to the same row (any column), then point-min."
 
 (defun clutch--refresh-display ()
   "Recompute column pages for current window width and re-render.
-Preserves cursor position (row + column) across the refresh."
+Preserves cursor position (row + column) and window scroll across the refresh."
   (when clutch--column-widths
     (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
                           (clutch-result--row-idx-at-line)))
            (save-cidx (get-text-property (point) 'clutch-col-idx))
            (win (get-buffer-window (current-buffer)))
            (win-width (if win (window-body-width win) 80))
+           (win-line (when (and win save-ridx)
+                       (count-lines (window-start win) (point))))
            (nw (clutch--row-number-digits))
            (width (- win-width 1 (* 2 clutch-column-padding) nw)))
       (setq clutch--column-pages
@@ -1401,7 +1403,10 @@ Preserves cursor position (row + column) across the refresh."
         (setq clutch--row-overlay nil))
       (clutch--render-result)
       (when save-ridx
-        (clutch--goto-cell save-ridx save-cidx)))))
+        (clutch--goto-cell save-ridx save-cidx)
+        (when (and win win-line)
+          (with-selected-window win
+            (recenter win-line)))))))
 
 (defun clutch--window-size-change (frame)
   "Handle window size changes for result buffers in FRAME."
