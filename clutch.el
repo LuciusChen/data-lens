@@ -1704,6 +1704,13 @@ Times execution and displays results.
 For SELECT queries, applies pagination (LIMIT/OFFSET).
 Prompts for confirmation on destructive operations."
   (clutch--ensure-connection)
+  (when-let* ((result-buf (get-buffer (clutch--result-buffer-name))))
+    (with-current-buffer result-buf
+      (when (and (or clutch--pending-edits
+                     clutch--pending-deletes
+                     clutch--pending-inserts)
+                 (not (yes-or-no-p "Discard pending changes and re-run query? ")))
+        (user-error "Execution cancelled"))))
   (let ((connection (or conn clutch-connection))
         (source-win (selected-window)))
     (when (clutch--destructive-query-p sql)
@@ -3403,9 +3410,6 @@ Uses the rewrite layer so complex SQL is handled via derived-table count."
 (defun clutch-result-rerun ()
   "Re-execute the last query that produced this result buffer."
   (interactive)
-  (when (and (or clutch--pending-edits clutch--pending-deletes clutch--pending-inserts)
-             (not (yes-or-no-p "Discard pending changes and re-run query? ")))
-    (user-error "Re-run cancelled"))
   (if-let* ((sql (or clutch--base-query clutch--last-query)))
       (clutch--execute sql clutch-connection)
     (user-error "No query to re-execute")))
