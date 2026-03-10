@@ -1320,7 +1320,8 @@ NROWS is the count of real rows (used to compute ghost row indices)."
 (defun clutch--render-result ()
   "Render the result buffer content using column paging.
 Preserves point position (row + column) across the render."
-  (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
+  (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
+                        (clutch-result--row-idx-at-line)))
          (save-cidx (get-text-property (point) 'clutch-col-idx))
          (inhibit-read-only t)
          (visible-cols (clutch--visible-columns))
@@ -1378,7 +1379,8 @@ Falls back to the same row (any column), then point-min."
   "Recompute column pages for current window width and re-render.
 Preserves cursor position (row + column) across the refresh."
   (when clutch--column-widths
-    (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
+    (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
+                          (clutch-result--row-idx-at-line)))
            (save-cidx (get-text-property (point) 'clutch-col-idx))
            (win (get-buffer-window (current-buffer)))
            (win-width (if win (window-body-width win) 80))
