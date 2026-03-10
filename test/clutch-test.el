@@ -1264,5 +1264,147 @@ Skips if `clutch-test-password' is nil."
       (funcall exit-fn "FROM" 'exact)
       (should (equal (buffer-string) "FROM ")))))
 
+;;;; Staged-commit PK-vec tests
+
+(ert-deftest clutch-test-stage-delete-stores-pk-vec ()
+  "Staging a delete stores a PK vector, not a ridx integer."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--result-rows (list (list 42 "alice")))
+    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--filtered-rows nil)
+    (setq-local clutch--pending-deletes nil)
+    (cl-letf (((symbol-function 'clutch-result--selected-row-indices) (lambda () '(0)))
+              ((symbol-function 'clutch-result--detect-table) (lambda () "users"))
+              ((symbol-function 'clutch-result--detect-primary-key) (lambda () '(0)))
+              ((symbol-function 'clutch--refresh-display) #'ignore))
+      (clutch-result-delete-rows)
+      (should (equal clutch--pending-deletes (list (vector 42)))))))
+
+(ert-deftest clutch-test-commit-delete-uses-pk-vec ()
+  "DELETE statement uses PK values from stored vector, not ridx."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--pending-deletes (list (vector 42)))
+    (cl-letf (((symbol-function 'clutch-result--detect-table) (lambda () "users"))
+              ((symbol-function 'clutch-result--detect-primary-key) (lambda () '(0)))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn name) (format "`%s`" name)))
+              ((symbol-function 'clutch--value-to-literal) (lambda (v) (format "%s" v))))
+      (let ((stmts (clutch-result--build-pending-delete-statements)))
+        (should (= (length stmts) 1))
+        (should (string-match-p "WHERE" (car stmts)))
+        (should (string-match-p "42" (car stmts)))))))
+
+(ert-deftest clutch-test-stage-edit-stores-pk-vec ()
+  "Staging an edit stores (pk-vec . cidx) key, not (ridx . cidx)."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--result-rows (list (list 7 "bob")))
+    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--filtered-rows nil)
+    (setq-local clutch--pending-edits nil)
+    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
+      (clutch-result--apply-edit 0 1 "carol")
+      (should (= (length clutch--pending-edits) 1))
+      (let ((key (caar clutch--pending-edits)))
+        (should (vectorp (car key)))
+        (should (equal (car key) (vector 7)))
+        (should (= (cdr key) 1))))))
+
+(ert-deftest clutch-test-commit-edit-generates-update-with-pk-where ()
+  "UPDATE statement uses PK values in WHERE clause."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--pending-edits
+                (list (cons (cons (vector 7) 1) "carol")))
+    (cl-letf (((symbol-function 'clutch-result--detect-table) (lambda () "users"))
+              ((symbol-function 'clutch-result--detect-primary-key) (lambda () '(0)))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn name) (format "`%s`" name)))
+              ((symbol-function 'clutch--value-to-literal)
+               (lambda (v) (if (stringp v) (format "'%s'" v) (format "%s" v)))))
+      (let ((stmts (clutch-result--build-update-statements)))
+        (should (= (length stmts) 1))
+        (should (string-match-p "carol" (car stmts)))
+        (should (string-match-p "WHERE" (car stmts)))
+        (should (string-match-p "7" (car stmts)))))))
+
+(ert-deftest clutch-test-discard-delete-removes-pk-entry ()
+  "C-c C-k removes the matching pk-vec from pending-deletes."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--result-rows (list (list 42 "alice")))
+    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--filtered-rows nil)
+    (setq-local clutch--pending-deletes (list (vector 42)))
+    (setq-local clutch--pending-edits nil)
+    (setq-local clutch--pending-inserts nil)
+    (cl-letf (((symbol-function 'clutch-result--row-idx-at-line) (lambda () 0))
+              ((symbol-function 'clutch--refresh-display) #'ignore))
+      (clutch-result-discard-pending-at-point)
+      (should (null clutch--pending-deletes)))))
+
+(ert-deftest clutch-test-discard-insert-removes-entry ()
+  "C-c C-k on a ghost insert row removes it from pending-inserts."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--result-rows (list (list 1 "x")))
+    (setq-local clutch--pending-inserts (list '(("id" . "99") ("name" . "new"))))
+    (setq-local clutch--pending-deletes nil)
+    (setq-local clutch--pending-edits nil)
+    (cl-letf (((symbol-function 'clutch-result--row-idx-at-line)
+               (lambda () 1))  ; ridx=1 >= nrows=1 → insert slot 0
+              ((symbol-function 'clutch--refresh-display) #'ignore))
+      (clutch-result-discard-pending-at-point)
+      (should (null clutch--pending-inserts)))))
+
+(ert-deftest clutch-test-check-pending-changes-blocks-when-deletes-pending ()
+  "clutch--check-pending-changes signals user-error when user declines to discard."
+  (let ((buf (generate-new-buffer "*clutch-result*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (setq-local clutch--pending-deletes (list (vector 1)))
+          (setq-local clutch--pending-edits nil)
+          (setq-local clutch--pending-inserts nil)
+          (cl-letf (((symbol-function 'get-buffer)
+                     (lambda (_name) buf))
+                    ((symbol-function 'yes-or-no-p) (lambda (_) nil)))
+            (should-error (clutch--check-pending-changes) :type 'user-error)))
+      (kill-buffer buf))))
+
+(ert-deftest clutch-test-commit-ordering-insert-update-delete ()
+  "Commit executes INSERT before UPDATE before DELETE."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--result-rows (list (list 1 "a") (list 2 "b")))
+    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--pending-inserts '((("id" . "3") ("name" . "c"))))
+    (setq-local clutch--pending-edits
+                (list (cons (cons (vector 1) 1) "a2")))
+    (setq-local clutch--pending-deletes (list (vector 2)))
+    (let (executed)
+      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+                 (lambda () '("INSERT INTO users (id, name) VALUES (3, 'c')")))
+                ((symbol-function 'clutch-result--build-update-statements)
+                 (lambda () '("UPDATE users SET name = 'a2' WHERE id = 1")))
+                ((symbol-function 'clutch-result--build-pending-delete-statements)
+                 (lambda () '("DELETE FROM users WHERE id = 2")))
+                ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (_conn stmt) (push stmt executed)))
+                ((symbol-function 'clutch--execute) #'ignore))
+        (clutch-result-commit)
+        (should (= (length executed) 3))
+        ;; executed is in reverse push order: last executed is at (nth 0 executed)
+        (should (string-prefix-p "INSERT" (nth 2 executed)))
+        (should (string-prefix-p "UPDATE" (nth 1 executed)))
+        (should (string-prefix-p "DELETE" (nth 0 executed)))))))
+
 (provide 'clutch-test)
 ;;; clutch-test.el ends here

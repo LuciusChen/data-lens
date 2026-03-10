@@ -288,8 +288,11 @@ Returns an alist of (field-code . value) pairs."
   "Format a human-readable error message from FIELDS alist."
   (let ((severity (or (alist-get ?S fields) "ERROR"))
         (code (or (alist-get ?C fields) "?????"))
-        (message (or (alist-get ?M fields) "Unknown error")))
-    (format "%s [%s]: %s" severity code message)))
+        (message (or (alist-get ?M fields) "Unknown error"))
+        (pos (alist-get ?P fields)))
+    (if pos
+        (format "%s [%s]: %s (position %s)" severity code message pos)
+      (format "%s [%s]: %s" severity code message))))
 
 ;;;; Authentication
 

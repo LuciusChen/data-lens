@@ -128,6 +128,15 @@ Underlined to indicate clickable (RET to follow)."
   "Face for rows staged for insertion."
   :group 'clutch)
 
+(defface clutch-error-position-face
+  '((((class color) (background light))
+     :background "#fde8e8" :underline (:color "red" :style wave))
+    (((class color) (background dark))
+     :background "#3b1212" :underline (:color "#fca5a5" :style wave))
+    (t :underline t))
+  "Face for the character at the SQL error position."
+  :group 'clutch)
+
 (defcustom clutch-connection-alist nil
   "Alist of saved database connections.
 Each entry has the form:
@@ -228,10 +237,17 @@ Used to update the mode-line with a spinner during execution.")
 (defvar-local clutch--executed-sql-overlay nil
   "Overlay highlighting the last successfully executed SQL region.")
 
+(defvar-local clutch--error-position-overlay nil
+  "Overlay marking the error position in the last failed query, or nil.")
+
 (defvar clutch--source-window nil
   "Window that initiated the current query execution.
 Dynamically bound by `clutch--execute' so result buffers open
 adjacent to the correct console window.")
+
+(defvar clutch--executing-sql-start nil
+  "Buffer position where the currently executing SQL begins, or nil.
+Dynamically bound by `clutch--execute-and-mark'.")
 
 (defvar-local clutch--conn-sql-product nil
   "SQL product for the current connection, or nil to use the default.")
@@ -298,10 +314,14 @@ DIRECTION is \"ASC\" or \"DESC\".")
   "Full column definition plists from the last result.")
 
 (defvar-local clutch--pending-edits nil
-  "Alist of pending edits: ((ROW-IDX . COL-IDX) . NEW-VALUE).")
+  "Alist of pending edits: ((PK-VEC . COL-IDX) . NEW-VALUE).")
 
 (defvar-local clutch--pending-deletes nil
-  "List of row indices staged for deletion.")
+  "List of pk-value vectors staged for deletion.")
+
+(defvar-local clutch--cached-pk-indices nil
+  "Cached list of PK column indices for the current result, or nil.
+Set alongside FK loading after each query execution.")
 
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.
@@ -1233,10 +1253,11 @@ EDGE-FN applies column-page edge indicators."
   (let ((bface 'clutch-border-face)
         (pad-str (make-string clutch-column-padding ?\s))
         (marked clutch--marked-rows)
-        (pending-del clutch--pending-deletes))
+        (pending-del clutch--pending-deletes)
+        (pk-indices clutch--cached-pk-indices))
     (cl-loop for row in rows
              for ridx from 0
-             for deletingp = (memq ridx pending-del)
+             for deletingp = (clutch--row-pending-delete-p row pk-indices pending-del)
              for data-row = (let ((r (funcall edge-fn
                                               (clutch--render-row
                                                row ridx visible-cols widths))))
@@ -1680,8 +1701,12 @@ Returns the query result."
          (result (condition-case err
                      (clutch-db-query connection paged-sql)
                    (clutch-db-error
-                    (user-error "Query error: %s"
-                                (error-message-string err)))))
+                    (let ((msg (error-message-string err)))
+                      (when-let* ((src-buf (window-buffer clutch--source-window))
+                                  (sql-start clutch--executing-sql-start)
+                                  (pos (clutch--parse-error-position msg)))
+                        (clutch--mark-error-position src-buf (+ sql-start (1- pos))))
+                      (user-error "Query error: %s" msg)))))
          (elapsed (- (float-time) start))
          (buf (get-buffer-create (clutch--result-buffer-name)))
          (columns (clutch-db-result-columns result))
@@ -1692,7 +1717,8 @@ Returns the query result."
                         connection sql columns rows elapsed)))
         (when col-names
           (clutch--display-select-result col-names rows columns)))
-      (clutch--load-fk-info))
+      (clutch--load-fk-info)
+      (setq clutch--cached-pk-indices (clutch-result--detect-primary-key)))
     (clutch--show-result-buffer buf)
     result))
 
@@ -1704,8 +1730,12 @@ Returns the query result."
          (result (condition-case err
                      (clutch-db-query connection sql)
                    (clutch-db-error
-                    (user-error "Query error: %s"
-                                (error-message-string err)))))
+                    (let ((msg (error-message-string err)))
+                      (when-let* ((src-buf (window-buffer clutch--source-window))
+                                  (sql-start clutch--executing-sql-start)
+                                  (pos (clutch--parse-error-position msg)))
+                        (clutch--mark-error-position src-buf (+ sql-start (1- pos))))
+                      (user-error "Query error: %s" msg)))))
          (elapsed (- (float-time) start)))
     (clutch--display-result result sql elapsed)
     result))
@@ -1727,6 +1757,7 @@ Times execution and displays results.
 For SELECT queries, applies pagination (LIMIT/OFFSET).
 Prompts for confirmation on destructive operations."
   (clutch--ensure-connection)
+  (clutch--clear-error-position-overlay)
   (clutch--check-pending-changes)
   (let ((connection (or conn clutch-connection))
         (source-win (selected-window)))
@@ -1782,9 +1813,34 @@ Prompts for confirmation on destructive operations."
     (overlay-put clutch--executed-sql-overlay 'priority 1000)
     (overlay-put clutch--executed-sql-overlay 'evaporate t)))
 
+(defun clutch--parse-error-position (msg)
+  "Extract character position from error MSG string, or nil.
+Handles PG '(position N)' suffix appended by pg--error-fields-message."
+  (when (string-match "(position \\([0-9]+\\))" msg)
+    (string-to-number (match-string 1 msg))))
+
+(defun clutch--clear-error-position-overlay ()
+  "Remove the error-position overlay from the current buffer."
+  (when (overlayp clutch--error-position-overlay)
+    (delete-overlay clutch--error-position-overlay)
+    (setq clutch--error-position-overlay nil)))
+
+(defun clutch--mark-error-position (buf pos)
+  "Place error-position overlay in BUF at POS (buffer position, 1-based)."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (clutch--clear-error-position-overlay)
+      (when (and pos (< pos (point-max)))
+        (setq clutch--error-position-overlay
+              (make-overlay pos (1+ pos)))
+        (overlay-put clutch--error-position-overlay 'face 'clutch-error-position-face)
+        (overlay-put clutch--error-position-overlay 'priority 1001)
+        (overlay-put clutch--error-position-overlay 'evaporate t)))))
+
 (defun clutch--execute-and-mark (sql beg end &optional conn)
   "Execute SQL and mark BEG..END on success."
-  (clutch--execute sql conn)
+  (let ((clutch--executing-sql-start beg))
+    (clutch--execute sql conn))
   (clutch--mark-executed-sql-region beg end))
 
 ;;;; Query-at-point detection
@@ -3148,11 +3204,20 @@ Priority: region rows > current row."
               (delq (nth iidx clutch--pending-inserts) clutch--pending-inserts))
         (clutch--refresh-display)
         (message "Pending insertion discarded")))
-     ((memq ridx clutch--pending-deletes)
-      (setq clutch--pending-deletes (delq ridx clutch--pending-deletes))
-      (clutch--refresh-display)
-      (message "Pending deletion discarded"))
-     (t (user-error "No pending deletion or insertion at this row")))))
+     (t
+      (let* ((pk-indices (or clutch--cached-pk-indices
+                             (clutch-result--detect-primary-key)))
+             (display-rows (or clutch--filtered-rows clutch--result-rows))
+             (pv (when pk-indices
+                   (clutch-result--extract-pk-vec (nth ridx display-rows) pk-indices)))
+             (was-pending (and pv (cl-find pv clutch--pending-deletes :test #'equal))))
+        (if was-pending
+            (progn
+              (setq clutch--pending-deletes
+                    (cl-remove pv clutch--pending-deletes :test #'equal))
+              (clutch--refresh-display)
+              (message "Pending deletion discarded"))
+          (user-error "No pending deletion or insertion at this row")))))))
 
 ;;;; clutch-result-mode
 
@@ -3545,13 +3610,18 @@ Use C-c C-c in the result buffer to commit all staged edits."
 
 (defun clutch-result--apply-edit (ridx cidx new-value)
   "Record edit for row RIDX, column CIDX with NEW-VALUE and refresh display."
-  (let ((key (cons ridx cidx))
-        (original (nth cidx (nth ridx clutch--result-rows))))
-    ;; If edited back to original, remove the pending edit
+  (let* ((pk-indices (or clutch--cached-pk-indices
+                         (clutch-result--detect-primary-key)
+                         (user-error "Cannot detect primary key")))
+         (display-rows (or clutch--filtered-rows clutch--result-rows))
+         (row (nth ridx display-rows))
+         (pk-vec (clutch-result--extract-pk-vec row pk-indices))
+         (key (cons pk-vec cidx))
+         (original (nth cidx (nth ridx clutch--result-rows))))
     (if (equal new-value original)
         (setq clutch--pending-edits
-              (assoc-delete-all key clutch--pending-edits))
-      (let ((existing (assoc key clutch--pending-edits)))
+              (cl-remove key clutch--pending-edits :test #'equal :key #'car))
+      (let ((existing (cl-assoc key clutch--pending-edits :test #'equal)))
         (if existing
             (setcdr existing new-value)
           (push (cons key new-value) clutch--pending-edits)))))
@@ -3614,12 +3684,23 @@ column indices to their referenced table and column."
                 (push (cons idx ref-info) clutch--fk-info)))))
       (clutch-db-error nil))))
 
-(defun clutch-result--group-edits-by-row (edits)
-  "Group EDITS alist by row index into a hash-table.
-Returns hash-table mapping ridx → list of (cidx . value)."
-  (let ((ht (make-hash-table :test 'eql)))
-    (pcase-dolist (`((,ridx . ,cidx) . ,val) edits)
-      (push (cons cidx val) (gethash ridx ht)))
+(defun clutch-result--extract-pk-vec (row pk-indices)
+  "Return a vector of PK column values from ROW at PK-INDICES."
+  (apply #'vector (mapcar (lambda (i) (nth i row)) pk-indices)))
+
+(defun clutch--row-pending-delete-p (row pk-indices pending-del)
+  "Return non-nil if ROW is staged for deletion, using PK-INDICES.
+Compares PK values with EQUAL against PENDING-DEL list."
+  (when pk-indices
+    (let ((pv (clutch-result--extract-pk-vec row pk-indices)))
+      (cl-find pv pending-del :test #'equal))))
+
+(defun clutch-result--group-edits-by-pk (edits)
+  "Group EDITS alist by PK-VEC into a hash-table (test: equal).
+Returns hash-table mapping pk-vec -> list of (cidx . new-value)."
+  (let ((ht (make-hash-table :test 'equal)))
+    (pcase-dolist (`((,pk-vec . ,cidx) . ,val) edits)
+      (push (cons cidx val) (gethash pk-vec ht)))
     ht))
 
 (defun clutch--sql-has-top-level-where-p (sql)
@@ -3635,10 +3716,10 @@ Returns hash-table mapping ridx → list of (cidx . value)."
                   op-name
                   (truncate-string-to-width (string-trim stmt) 120 nil nil "…")))))
 
-(defun clutch-result--build-update-stmt (table row _ridx edits col-names pk-indices)
+(defun clutch-result--build-update-stmt (table pk-vec edits col-names pk-names)
   "Build an UPDATE statement for TABLE.
-ROW is the original row data at _RIDX, EDITS is a list of (cidx . value),
-COL-NAMES are column names, PK-INDICES are primary key column indices."
+PK-VEC is the primary key vector, EDITS is a list of (cidx . value),
+COL-NAMES are column names, PK-NAMES are primary key column names."
   (let ((conn clutch-connection))
     (let ((set-parts
            (mapcar (lambda (e)
@@ -3648,15 +3729,13 @@ COL-NAMES are column names, PK-INDICES are primary key column indices."
                              (clutch--value-to-literal (cdr e))))
                    edits))
           (where-parts
-           (mapcar (lambda (pki)
-                     (let ((v (nth pki row)))
-                       (format "%s %s"
-                               (clutch-db-escape-identifier
-                                conn (nth pki col-names))
-                               (if (null v) "IS NULL"
-                                 (format "= %s"
-                                         (clutch--value-to-literal v))))))
-                   pk-indices)))
+           (cl-mapcar (lambda (col val)
+                        (format "%s %s"
+                                (clutch-db-escape-identifier conn col)
+                                (if (null val) "IS NULL"
+                                  (format "= %s"
+                                          (clutch--value-to-literal val)))))
+                      pk-names (append pk-vec nil))))
       (format "UPDATE %s SET %s WHERE %s"
               (clutch-db-escape-identifier conn table)
               (mapconcat #'identity set-parts ", ")
@@ -3690,18 +3769,19 @@ Clear pending edits and re-run the last query if confirmed."
     (user-error "No pending edits"))
   (let* ((table (or (clutch-result--detect-table)
                     (user-error "Cannot detect source table (multi-table query?)")))
-         (pk-indices (or (clutch-result--detect-primary-key)
+         (pk-indices (or clutch--cached-pk-indices
+                         (clutch-result--detect-primary-key)
                          (user-error "Cannot detect primary key for table %s" table)))
+         (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
          (col-names clutch--result-columns)
-         (rows clutch--result-rows)
-         (by-row (clutch-result--group-edits-by-row clutch--pending-edits))
+         (by-pk (clutch-result--group-edits-by-pk clutch--pending-edits))
          statements)
     (maphash
-     (lambda (ridx edits)
+     (lambda (pk-vec edits)
        (push (clutch-result--build-update-stmt
-              table (nth ridx rows) ridx edits col-names pk-indices)
+              table pk-vec edits col-names pk-names)
              statements))
-     by-row)
+     by-pk)
     statements))
 
 (defun clutch-result--build-pending-insert-statements ()
@@ -3716,13 +3796,23 @@ Clear pending edits and re-run the last query if confirmed."
   "Build DELETE statements from `clutch--pending-deletes'."
   (let* ((table (or (clutch-result--detect-table)
                     (user-error "Cannot detect source table")))
-         (pk-indices (or (clutch-result--detect-primary-key)
+         (pk-indices (or clutch--cached-pk-indices
+                         (clutch-result--detect-primary-key)
                          (user-error "Cannot detect primary key for %s" table)))
-         (col-names clutch--result-columns)
-         (rows clutch--result-rows))
-    (mapcar (lambda (ridx)
-              (clutch-result--build-delete-stmt
-               table (nth ridx rows) col-names pk-indices))
+         (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
+         (conn clutch-connection))
+    (mapcar (lambda (pk-vec)
+              (let ((where-parts
+                     (cl-mapcar (lambda (col val)
+                                  (format "%s %s"
+                                          (clutch-db-escape-identifier conn col)
+                                          (if (null val) "IS NULL"
+                                            (format "= %s"
+                                                    (clutch--value-to-literal val)))))
+                                pk-names (append pk-vec nil))))
+                (format "DELETE FROM %s WHERE %s"
+                        (clutch-db-escape-identifier conn table)
+                        (mapconcat #'identity where-parts " AND "))))
             clutch--pending-deletes)))
 
 (defun clutch-result-commit ()
@@ -3819,14 +3909,17 @@ PK-INDICES are primary key column indices."
   "Stage selected rows for deletion.
 Use \\[clutch-result-commit] in the result buffer to commit."
   (interactive)
-  (let ((indices (or (clutch-result--selected-row-indices)
-                     (user-error "No row at point"))))
+  (let* ((indices (or (clutch-result--selected-row-indices)
+                      (user-error "No row at point")))
+         (pk-indices (or clutch--cached-pk-indices
+                         (clutch-result--detect-primary-key)
+                         (user-error "Cannot detect primary key")))
+         (display-rows (or clutch--filtered-rows clutch--result-rows)))
     (unless (clutch-result--detect-table)
       (user-error "Cannot detect source table"))
-    (unless (clutch-result--detect-primary-key)
-      (user-error "Cannot detect primary key"))
     (dolist (ridx indices)
-      (cl-pushnew ridx clutch--pending-deletes))
+      (let ((pv (clutch-result--extract-pk-vec (nth ridx display-rows) pk-indices)))
+        (cl-pushnew pv clutch--pending-deletes :test #'equal)))
     (clutch--refresh-display)
     (message "%d row%s staged for deletion — C-c C-c to commit"
              (length indices)
