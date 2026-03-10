@@ -227,7 +227,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-e=   | Connect / reconnect        |
 | =C-c C-t=   | List all tables            |
 | =C-c C-j=   | Browse table data          |
-| =C-c C-d=   | DESCRIBE table at point    |
+| =C-c C-d=   | DESCRIBE table at point (errors if not on a table name) |
 | =C-c C-p=   | Preview SQL (dry-run)      |
 | =C-c ?=     | Transient menu             |
 | =TAB=       | Complete table/column name |
@@ -423,6 +423,26 @@ RET                          ;; Show DDL for table at point
 v                            ;; Browse table data at point (insert SELECT into console)
 g                            ;; Refresh
 #+end_src
+
+** Embark Integration (optional)
+
+If [[https://github.com/oantolin/embark][embark]] is installed, clutch registers a =clutch-table= target type so table
+names can be acted on with a consistent action map:
+
+| Key | Action |
+|-----+--------|
+| =b= | Browse table (=SELECT *=) |
+| =d= | Describe table (show DDL) |
+| =w= | Copy table name to kill ring |
+
+Table names are recognised as targets in three contexts:
+
+- *=clutch-schema-mode= buffer* — table name on the current line
+- *=clutch-mode= (SQL buffer)* — symbol at point, validated against the schema cache
+- *=completing-read= minibuffer* — current candidate in =clutch-browse-table= or =clutch-describe-table=
+
+Example: invoke =C-c C-j= (browse table), navigate to a candidate, then press
+the Embark key and =d= to describe it instead — without cancelling and re-running.
 
 ** Transient Menus
 
