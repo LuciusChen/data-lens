@@ -1560,6 +1560,11 @@ Signals an error if pagination is not available."
     (user-error "Pagination not available for this query"))
   (unless (clutch--connection-alive-p clutch-connection)
     (user-error "Not connected"))
+  (when (and (or clutch--pending-edits
+                 clutch--pending-deletes
+                 clutch--pending-inserts)
+             (not (yes-or-no-p "Discard pending changes and change page? ")))
+    (user-error "Page change cancelled"))
   (let* ((paged-sql (clutch--build-paged-sql
                      clutch--base-query page-num
                      clutch-result-max-rows clutch--order-by))
