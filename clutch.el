@@ -110,6 +110,24 @@ Underlined to indicate clickable (RET to follow)."
   "Face for the last successfully executed SQL text."
   :group 'clutch)
 
+(defface clutch-pending-delete-face
+  '((((class color) (background light))
+     :background "#fde8e8" :foreground "#9b1c1c" :strike-through t)
+    (((class color) (background dark))
+     :background "#3b1212" :foreground "#fca5a5" :strike-through t)
+    (t :strike-through t))
+  "Face for rows staged for deletion."
+  :group 'clutch)
+
+(defface clutch-pending-insert-face
+  '((((class color) (background light))
+     :background "#e6f4ea" :foreground "#1e4620")
+    (((class color) (background dark))
+     :background "#1a3320" :foreground "#86efac")
+    (t :inherit success))
+  "Face for rows staged for insertion."
+  :group 'clutch)
+
 (defcustom clutch-connection-alist nil
   "Alist of saved database connections.
 Each entry has the form:
@@ -281,6 +299,13 @@ DIRECTION is \"ASC\" or \"DESC\".")
 
 (defvar-local clutch--pending-edits nil
   "Alist of pending edits: ((ROW-IDX . COL-IDX) . NEW-VALUE).")
+
+(defvar-local clutch--pending-deletes nil
+  "List of row indices staged for deletion.")
+
+(defvar-local clutch--pending-inserts nil
+  "List of field alists staged for insertion.
+Each alist has the form ((COL-NAME . VALUE-STRING) ...).")
 
 (defvar-local clutch--fk-info nil
   "Foreign key info for the current result.
@@ -1207,22 +1232,51 @@ GLOBAL-FIRST-ROW is the 0-based offset for numbering.
 EDGE-FN applies column-page edge indicators."
   (let ((bface 'clutch-border-face)
         (pad-str (make-string clutch-column-padding ?\s))
-        (marked clutch--marked-rows))
+        (marked clutch--marked-rows)
+        (pending-del clutch--pending-deletes))
     (cl-loop for row in rows
              for ridx from 0
-             for data-row = (funcall edge-fn
-                                     (clutch--render-row
-                                      row ridx visible-cols widths))
-             for mark-char = (if (memq ridx marked) "*" " ")
+             for deletingp = (memq ridx pending-del)
+             for data-row = (let ((r (funcall edge-fn
+                                              (clutch--render-row
+                                               row ridx visible-cols widths))))
+                               (if deletingp
+                                   (propertize r 'face 'clutch-pending-delete-face)
+                                 r))
+             for mark-char = (cond (deletingp "D")
+                                   ((memq ridx marked) "*")
+                                   (t " "))
              for num-label = (string-pad
                               (number-to-string
                                (1+ (+ global-first-row ridx)))
                               nw nil t)
-             for num-face = (if (memq ridx marked)
-                                'clutch-marked-face 'shadow)
+             for num-face = (cond (deletingp 'clutch-pending-delete-face)
+                                  ((memq ridx marked) 'clutch-marked-face)
+                                  (t 'shadow))
              do (insert (propertize "│" 'face bface)
                         (propertize mark-char 'face num-face)
                         (propertize num-label 'face num-face)
+                        pad-str
+                        data-row "\n"))))
+
+(defun clutch--insert-pending-insert-rows (visible-cols widths nw nrows)
+  "Append ghost rows for pending inserts below the real data rows.
+VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
+NROWS is the count of real rows (used to compute ghost row indices)."
+  (let ((bface 'clutch-border-face)
+        (pad-str (make-string clutch-column-padding ?\s)))
+    (cl-loop for fields in clutch--pending-inserts
+             for iidx from 0
+             for ridx = (+ nrows iidx)
+             for row = (mapcar (lambda (col) (cdr (assoc col fields)))
+                               clutch--result-columns)
+             for data-row = (propertize
+                             (clutch--render-row row ridx visible-cols widths)
+                             'face 'clutch-pending-insert-face)
+             for num-label = (string-pad (format "+%d" (1+ iidx)) nw nil t)
+             do (insert (propertize "│" 'face bface)
+                        (propertize "+" 'face 'clutch-pending-insert-face)
+                        (propertize num-label 'face 'clutch-pending-insert-face)
                         pad-str
                         data-row "\n"))))
 
@@ -1242,14 +1296,26 @@ EDGE-FN applies column-page edge indicators."
                                            has-prev has-next
                                            clutch--header-active-col))))
 
-(defun clutch--render-pending-edits-header ()
-  "Insert a pending edits notification line if there are pending edits."
-  (when clutch--pending-edits
-    (insert (propertize
-             (format "-- %d pending edit%s\n"
-                     (length clutch--pending-edits)
-                     (if (= (length clutch--pending-edits) 1) "" "s"))
-             'face 'clutch-modified-face))))
+(defun clutch--render-pending-changes-header ()
+  "Insert a notification line if there are any pending changes."
+  (let (parts)
+    (when clutch--pending-edits
+      (push (format "%d edit%s" (length clutch--pending-edits)
+                    (if (= (length clutch--pending-edits) 1) "" "s"))
+            parts))
+    (when clutch--pending-deletes
+      (push (format "%d deletion%s" (length clutch--pending-deletes)
+                    (if (= (length clutch--pending-deletes) 1) "" "s"))
+            parts))
+    (when clutch--pending-inserts
+      (push (format "%d insertion%s" (length clutch--pending-inserts)
+                    (if (= (length clutch--pending-inserts) 1) "" "s"))
+            parts))
+    (when parts
+      (insert (propertize
+               (format "-- %s pending — C-c C-c to commit\n"
+                       (mapconcat #'identity (nreverse parts) ", "))
+               'face 'clutch-modified-face)))))
 
 (defun clutch--render-result ()
   "Render the result buffer content using column paging.
@@ -1270,8 +1336,9 @@ Preserves point position (row + column) across the render."
     (erase-buffer)
     (clutch--update-result-line-formats rows col-num-pages cur-page
                                         has-prev has-next visible-cols widths nw)
-    (clutch--render-pending-edits-header)
+    (clutch--render-pending-changes-header)
     (clutch--insert-data-rows rows visible-cols widths nw global-first-row edge-fn)
+    (clutch--insert-pending-insert-rows visible-cols widths nw (length rows))
     (if save-ridx
         (clutch--goto-cell save-ridx save-cidx)
       (goto-char (point-min)))))
@@ -1411,6 +1478,8 @@ IGNORE-BUFFER is excluded from liveness checks."
   (setq-local clutch--result-column-defs columns)
   (setq-local clutch--result-rows rows)
   (setq-local clutch--pending-edits nil)
+  (setq-local clutch--pending-deletes nil)
+  (setq-local clutch--pending-inserts nil)
   (setq-local clutch--marked-rows nil)
   (setq-local clutch--current-col-page 0)
   (setq-local clutch--pinned-columns nil)
@@ -1467,6 +1536,8 @@ COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the new page."
                 clutch--result-rows rows
                 clutch--page-current page-num
                 clutch--pending-edits nil
+                clutch--pending-deletes nil
+                clutch--pending-inserts nil
                 clutch--marked-rows nil
                 clutch--query-elapsed elapsed
                 clutch--filter-pattern nil
@@ -1572,6 +1643,8 @@ the result data, ELAPSED the query time.  Returns column names."
                 clutch--result-column-defs columns
                 clutch--result-rows rows
                 clutch--pending-edits nil
+                clutch--pending-deletes nil
+                clutch--pending-inserts nil
                 clutch--marked-rows nil
                 clutch--current-col-page 0
                 clutch--pinned-columns nil
@@ -3027,6 +3100,26 @@ Priority: region rows > current row."
       (when-let* ((ridx (clutch-result--row-idx-at-line)))
         (list ridx))))
 
+(defun clutch-result-discard-pending-at-point ()
+  "Discard the staged deletion or insertion for the row at point."
+  (interactive)
+  (let ((ridx (or (clutch-result--row-idx-at-line)
+                  (user-error "No row at point")))
+        (nrows (length clutch--result-rows)))
+    (cond
+     ((>= ridx nrows)
+      (let ((iidx (- ridx nrows)))
+        (setq clutch--pending-inserts
+              (append (seq-take clutch--pending-inserts iidx)
+                      (seq-drop clutch--pending-inserts (1+ iidx))))
+        (clutch--refresh-display)
+        (message "Pending insertion discarded")))
+     ((memq ridx clutch--pending-deletes)
+      (setq clutch--pending-deletes (delq ridx clutch--pending-deletes))
+      (clutch--refresh-display)
+      (message "Pending deletion discarded"))
+     (t (user-error "No pending deletion or insertion at this row")))))
+
 ;;;; clutch-result-mode
 
 (defvar clutch-result-mode-map
@@ -3071,6 +3164,7 @@ Priority: region rows > current row."
     ;; Delete / Insert
     (define-key map "d" #'clutch-result-delete-rows)
     (define-key map "i" #'clutch-result-insert-row)
+    (define-key map (kbd "C-c C-k") #'clutch-result-discard-pending-at-point)
     map)
   "Keymap for `clutch-result-mode'.")
 
@@ -3309,6 +3403,9 @@ Uses the rewrite layer so complex SQL is handled via derived-table count."
 (defun clutch-result-rerun ()
   "Re-execute the last query that produced this result buffer."
   (interactive)
+  (when (and (or clutch--pending-edits clutch--pending-deletes clutch--pending-inserts)
+             (not (yes-or-no-p "Discard pending changes and re-run query? ")))
+    (user-error "Re-run cancelled"))
   (if-let* ((sql (or clutch--base-query clutch--last-query)))
       (clutch--execute sql clutch-connection)
     (user-error "No query to re-execute")))
@@ -3576,11 +3673,60 @@ Clear pending edits and re-run the last query if confirmed."
      by-row)
     statements))
 
+(defun clutch-result--build-pending-insert-statements ()
+  "Build INSERT statements from `clutch--pending-inserts'."
+  (let ((table (or (clutch-result--detect-table)
+                   (user-error "Cannot detect source table"))))
+    (mapcar (lambda (fields)
+              (clutch-result-insert--build-sql clutch-connection table fields))
+            clutch--pending-inserts)))
+
+(defun clutch-result--build-pending-delete-statements ()
+  "Build DELETE statements from `clutch--pending-deletes'."
+  (let* ((table (or (clutch-result--detect-table)
+                    (user-error "Cannot detect source table")))
+         (pk-indices (or (clutch-result--detect-primary-key)
+                         (user-error "Cannot detect primary key for %s" table)))
+         (col-names clutch--result-columns)
+         (rows clutch--result-rows))
+    (mapcar (lambda (ridx)
+              (clutch-result--build-delete-stmt
+               table (nth ridx rows) col-names pk-indices))
+            clutch--pending-deletes)))
+
 (defun clutch-result-commit ()
-  "Generate and execute UPDATE statements for pending edits."
+  "Commit all pending changes: INSERT new rows, UPDATE edits, DELETE staged rows.
+Executes in order: INSERTs first, then UPDATEs, then DELETEs."
   (interactive)
-  (let ((statements (clutch-result--build-update-statements)))
-    (clutch-result--confirm-and-run-updates statements)))
+  (unless (or clutch--pending-edits clutch--pending-deletes clutch--pending-inserts)
+    (user-error "No pending changes"))
+  (let* ((insert-stmts (when clutch--pending-inserts
+                         (clutch-result--build-pending-insert-statements)))
+         (update-stmts (when clutch--pending-edits
+                         (clutch-result--build-update-statements)))
+         (delete-stmts (when clutch--pending-deletes
+                         (clutch-result--build-pending-delete-statements)))
+         (all-stmts (append insert-stmts update-stmts delete-stmts))
+         (sql-text (mapconcat (lambda (s) (concat s ";")) all-stmts "\n")))
+    (clutch-result--ensure-where-guard delete-stmts "DELETE")
+    (clutch-result--ensure-where-guard update-stmts "UPDATE")
+    (when (yes-or-no-p (format "Execute %d statement%s?\n\n%s\n\n"
+                               (length all-stmts)
+                               (if (= (length all-stmts) 1) "" "s")
+                               sql-text))
+      (dolist (stmt all-stmts)
+        (condition-case err
+            (clutch-db-query clutch-connection stmt)
+          (clutch-db-error
+           (user-error "Statement failed: %s" (error-message-string err)))))
+      (setq clutch--pending-edits nil
+            clutch--pending-deletes nil
+            clutch--pending-inserts nil
+            clutch--marked-rows nil)
+      (message "%d change%s committed"
+               (length all-stmts)
+               (if (= (length all-stmts) 1) "" "s"))
+      (clutch--execute clutch--last-query clutch-connection))))
 
 ;;;; Delete rows
 
@@ -3639,13 +3785,21 @@ PK-INDICES are primary key column indices."
             indices)))
 
 (defun clutch-result-delete-rows ()
-  "Delete selected rows from the database.
-Selection priority: region rows > current row.
-Detects table and primary key, builds DELETE statements,
-and prompts for confirmation before executing."
+  "Stage selected rows for deletion.
+Use \\[clutch-result-commit] in the result buffer to commit."
   (interactive)
-  (let ((statements (clutch-result--build-delete-statements)))
-    (clutch-result--confirm-and-run-deletes statements)))
+  (let ((indices (or (clutch-result--selected-row-indices)
+                     (user-error "No row at point"))))
+    (unless (clutch-result--detect-table)
+      (user-error "Cannot detect source table"))
+    (unless (clutch-result--detect-primary-key)
+      (user-error "Cannot detect primary key"))
+    (dolist (ridx indices)
+      (cl-pushnew ridx clutch--pending-deletes))
+    (clutch--refresh-display)
+    (message "%d row%s staged for deletion — C-c C-c to commit"
+             (length indices)
+             (if (= (length indices) 1) "" "s"))))
 
 ;;;; Insert row
 
@@ -3684,7 +3838,7 @@ and prompts for confirmation before executing."
       (setq-local clutch-result-insert--result-buffer result-buf
                   clutch-result-insert--table table
                   header-line-format
-                  (format " INSERT into %s  |  C-c C-c: execute  C-c C-k: cancel"
+                  (format " INSERT into %s  |  C-c C-c: stage  C-c C-k: cancel"
                           table))
       (dolist (col col-names)
         (insert (propertize col 'face 'clutch-header-face)
@@ -3724,26 +3878,22 @@ FIELDS is an alist of (column-name . value-string)."
             (clutch-db-escape-identifier conn table) cols vals)))
 
 (defun clutch-result-insert-commit ()
-  "Build and execute the INSERT statement from the edit buffer."
+  "Stage the new row for insertion and return to the result buffer.
+Use \\[clutch-result-commit] in the result buffer to commit."
   (interactive)
-  (let* ((fields     (clutch-result-insert--parse-fields))
-         (table      clutch-result-insert--table)
+  (let* ((fields (clutch-result-insert--parse-fields))
          (result-buf clutch-result-insert--result-buffer))
-    (unless fields      (user-error "No values entered"))
+    (unless fields (user-error "No values entered"))
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
-    (let* ((conn (buffer-local-value 'clutch-connection result-buf))
-           (sql  (clutch-result-insert--build-sql conn table fields)))
-      (when (yes-or-no-p (format "Execute?\n\n%s\n\n" sql))
-        (condition-case err
-            (clutch-db-query conn sql)
-          (clutch-db-error
-           (user-error "INSERT failed: %s" (error-message-string err))))
-        (quit-window 'kill)
-        (when (buffer-live-p result-buf)
-          (with-current-buffer result-buf
-            (clutch--execute clutch--last-query conn)))
-        (message "Row inserted into %s" table)))))
+    (quit-window 'kill)
+    (with-current-buffer result-buf
+      (setq clutch--pending-inserts
+            (append clutch--pending-inserts (list fields)))
+      (clutch--refresh-display)
+      (message "%d insertion%s staged — C-c C-c to commit"
+               (length clutch--pending-inserts)
+               (if (= (length clutch--pending-inserts) 1) "" "s")))))
 
 (defun clutch-result-insert-cancel ()
   "Cancel the INSERT and close the edit buffer."
@@ -5132,8 +5282,9 @@ Accumulates input until a semicolon is found, then executes."
   [["Edit"
     ("C-c '" "Edit cell"   clutch-result-edit-cell)
     ("C-c C-c" "Commit"    clutch-result-commit)
-    ("i" "Insert row"      clutch-result-insert-row)
-    ("d" "Delete row(s)"   clutch-result-delete-rows)]
+    ("i" "Stage insert"    clutch-result-insert-row)
+    ("d" "Stage delete"    clutch-result-delete-rows)
+    ("C-c C-k" "Discard pending" clutch-result-discard-pending-at-point)]
    ["Copy (region/rect: C-x SPC)"
     ("c" "Copy..."          clutch-result-copy-command)
     ("e" "Export"           clutch-result-export)]

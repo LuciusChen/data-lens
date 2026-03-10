@@ -255,9 +255,10 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C=            | Jump to column                                |
 | =g=            | Re-execute query                              |
 | =C-c '=       | Edit cell value                               |
-| =i=            | Insert new row                                |
-| =d=            | Delete row(s) (supports region)               |
-| =C-c C-c=     | Commit edits (generates UPDATE)               |
+| =i=            | Stage new row for insertion                   |
+| =d=            | Stage row(s) for deletion (supports region)   |
+| =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
+| =C-c C-k=     | Discard pending deletion/insertion at point   |
 | =C-c C-p=      | Preview SQL (query / pending update / selected delete) |
 | =c=            | Copy... (tsv/csv/insert; region = selected block, no region = current cell; =C-u= with region enters visual refine mode) |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
@@ -368,10 +369,15 @@ Step 4 — press RET to confirm.
 #+begin_src
 1. SELECT * FROM users;      → C-c C-c to execute
 2. i                          → opens insert buffer with all column fields
-3. Fill values, C-c C-c to commit INSERT (C-c C-k to cancel)
+3. Fill values, C-c C-c to stage (C-c C-k to cancel)
+                               staged rows appear as green ghost rows in result buffer
 4. Use normal Emacs region selection to select rows
-5. d                          → delete current row or selected region
-6. Confirmation shows the DELETE SQL before executing
+5. d                          → stage current row or selected region for deletion
+                               staged rows are highlighted in red with strikethrough
+6. C-c C-k                    → discard pending deletion or insertion at point
+7. g with pending changes     → prompts "Discard pending changes and re-run query?"
+8. C-c C-c in result buffer  → confirmation prompt showing all statements
+                               commits in order: INSERT → UPDATE → DELETE
 #+end_src
 
 ** REPL Mode
@@ -423,6 +429,8 @@ g                            ;; Refresh
 Requires the =transient= package (built-in since Emacs 28.1).
 
 Press =C-c ?= to open the transient menu.  The *Schema* group contains =List tables=, =Describe table=, and =Browse table=.
+
+In the result buffer, the *Edit* group in the transient menu provides the unified staged-commit workflow: =i= stages an insert, =d= stages a deletion, =C-c C-k= discards a pending change at point, and =C-c C-c= commits all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
 
 ** Org-Babel Integration
 
