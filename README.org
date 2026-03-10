@@ -229,6 +229,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-j=   | Browse table data          |
 | =C-c C-d=   | DESCRIBE table at point (errors if not on a table name) |
 | =C-c C-p=   | Preview SQL (dry-run)      |
+| =C-c C-s=   | Refresh schema cache       |
 | =C-c ?=     | Transient menu             |
 | =TAB=       | Complete table/column name |
 
@@ -659,6 +660,64 @@ To trust private/internal CAs, configure:
   (pg-query conn "INSERT INTO users (name) VALUES ('alice')")
   (pg-query conn "INSERT INTO users (name) VALUES ('bob')"))
 #+end_src
+
+* Org-Babel Integration
+
+=ob-clutch.el= provides Org-Babel source block execution for MySQL, PostgreSQL,
+and SQLite.  Results are returned as Org tables.
+
+** Activation
+
+#+begin_src emacs-lisp
+;; Load the integration (adds handlers for mysql, postgresql, sqlite blocks)
+(require 'ob-clutch)
+#+end_src
+
+Alternatively the per-language shims can be loaded individually:
+=ob-clutch-mysql.el=, =ob-clutch-pg.el=, =ob-clutch-sqlite.el=.
+
+** Header Arguments
+
+| Argument       | Description                                      |
+|----------------+--------------------------------------------------|
+| =:backend=     | Database backend: =mysql=, =pg=, or =sqlite=     |
+| =:host=        | Database host (default: =127.0.0.1=)             |
+| =:port=        | Database port (default: backend default)         |
+| =:user=        | Database user                                    |
+| =:database=    | Database name                                    |
+| =:pass-entry=  | auth-source entry name for password lookup       |
+
+** Example Source Blocks
+
+MySQL:
+
+#+begin_src org
+,#+begin_src mysql :host 127.0.0.1 :user root :database mydb :pass-entry mydb-root
+SELECT id, name, created_at FROM users LIMIT 5;
+,#+end_src
+#+end_src
+
+PostgreSQL:
+
+#+begin_src org
+,#+begin_src postgresql :host 127.0.0.1 :user postgres :database mydb :pass-entry mydb-pg
+SELECT schemaname, tablename FROM pg_tables WHERE schemaname = 'public';
+,#+end_src
+#+end_src
+
+SQLite:
+
+#+begin_src org
+,#+begin_src sqlite :database /path/to/mydb.sqlite
+SELECT name, sql FROM sqlite_master WHERE type = 'table';
+,#+end_src
+#+end_src
+
+** Connection Caching
+
+Connections are cached by parameter hash and reused across source block
+evaluations in the same Emacs session.  All cached connections are cleanly
+disconnected when Emacs exits (via =kill-emacs-hook=).
 
 * Testing
 

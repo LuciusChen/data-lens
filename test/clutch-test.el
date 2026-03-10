@@ -17,6 +17,7 @@
 (require 'ert)
 (require 'clutch-db)
 (require 'clutch)
+(require 'ob-clutch)
 
 ;;;; Test configuration
 
@@ -936,6 +937,8 @@
         (clutch-connection 'fake-conn)
         (clutch--executing-p nil))
     (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
+              ((symbol-function 'clutch--check-pending-changes) #'ignore)
+              ((symbol-function 'clutch--clear-error-position-overlay) #'ignore)
               ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
               ((symbol-function 'clutch--update-mode-line) (lambda () nil))
               ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
@@ -954,6 +957,8 @@
   (let ((called nil)
         (clutch-connection 'fake-conn))
     (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
+              ((symbol-function 'clutch--check-pending-changes) #'ignore)
+              ((symbol-function 'clutch--clear-error-position-overlay) #'ignore)
               ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
               ((symbol-function 'clutch--require-risky-dml-confirmation)
                (lambda (_sql) (setq called t)))
@@ -1583,11 +1588,11 @@ Note: [00 00 C0 FF] has mantissa bit set -> NaN, not -Inf."
   (mapconcat (lambda (b) (format "%02x" b)) bytes ""))
 
 (ert-deftest clutch-test-pbkdf2-sha256-c1-dklen32 ()
-  "PBKDF2-SHA256 c=1, dkLen=32 matches RFC 7914 vector."
+  "PBKDF2-SHA256 c=1, dkLen=32: verified with Python hashlib.pbkdf2_hmac."
   (skip-unless (fboundp 'secure-hash))
   (let ((result (pg--pbkdf2-sha256 "password" "salt" 1 32)))
     (should (equal (clutch-test--bytes-to-hex result)
-                   "120fb6cffccd925779ef5d3e32ae524c1546dcc25e5ae0b9d1c97832e3e01d33"))))
+                   "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"))))
 
 (ert-deftest clutch-test-pbkdf2-sha256-c4096-dklen32 ()
   "PBKDF2-SHA256 c=4096, dkLen=32 matches RFC 7914 vector."
@@ -1597,14 +1602,15 @@ Note: [00 00 C0 FF] has mantissa bit set -> NaN, not -Inf."
                    "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"))))
 
 (ert-deftest clutch-test-pbkdf2-sha256-multi-block ()
-  "PBKDF2-SHA256 dkLen=64 exercises two-block outer loop."
+  "PBKDF2-SHA256 dkLen=64 exercises two-block outer loop.
+Expected value verified with Python hashlib.pbkdf2_hmac."
   (skip-unless (fboundp 'secure-hash))
   (let ((result (pg--pbkdf2-sha256 "password" "salt" 1 64)))
     (should (equal (clutch-test--bytes-to-hex result)
-                   (concat "120fb6cffccd925779ef5d3e32ae524c"
-                           "1546dcc25e5ae0b9d1c97832e3e01d33"
-                           "6f56060780b5c13be0990c24a0e0e68f"
-                           "6266c94fb5e48d88dc4d8ca0e5cb4fcf")))))
+                   (concat "120fb6cffcf8b32c43e7225256c4f837"
+                           "a86548c92ccc35480805987cb70be17b"
+                           "4dbf3a2f3dad3377264bb7b8e8330d4e"
+                           "fc7451418617dabef683735361cdc18c")))))
 
 (ert-deftest clutch-test-pbkdf2-sha256-output-length ()
   "PBKDF2-SHA256 returns exactly key-length bytes for various lengths."
@@ -1755,6 +1761,106 @@ Use `cl-letf' to bypass `mysql--ensure-data' in tests."
 ;;                           (dotimes (_ (* 1000 20))
 ;;                             (mysql--read-bytes conn 8))))))
 ;;       (kill-buffer buf))))
+
+;;;; Quality fix tests
+
+;;; Fix 1 — pg-oid-bool type-category
+
+(ert-deftest clutch-test-pg-bool-type-category ()
+  "pg-oid-bool should map to text, not numeric."
+  (require 'clutch-db-pg)
+  (let ((entry (assoc pg-oid-bool clutch-db-pg--type-category-alist)))
+    (should entry)
+    (should (eq (cdr entry) 'text))))
+
+;;; Fix 3 — clutch-db-format-temporal
+
+(ert-deftest clutch-test-format-temporal-datetime ()
+  "clutch-db-format-temporal formats datetime plists."
+  (should (equal (clutch-db-format-temporal
+                  '(:year 2024 :month 1 :day 15 :hours 13 :minutes 45 :seconds 30))
+                 "2024-01-15 13:45:30")))
+
+(ert-deftest clutch-test-format-temporal-date-only ()
+  "clutch-db-format-temporal formats date-only plists."
+  (should (equal (clutch-db-format-temporal '(:year 2024 :month 6 :day 1))
+                 "2024-06-01")))
+
+(ert-deftest clutch-test-format-temporal-time-only ()
+  "clutch-db-format-temporal formats time-only plists."
+  (should (equal (clutch-db-format-temporal
+                  '(:hours 13 :minutes 5 :seconds 0 :negative nil))
+                 "13:05:00")))
+
+(ert-deftest clutch-test-format-temporal-time-negative ()
+  "clutch-db-format-temporal formats negative time plists."
+  (should (equal (clutch-db-format-temporal
+                  '(:hours 1 :minutes 0 :seconds 0 :negative t))
+                 "-01:00:00")))
+
+(ert-deftest clutch-test-format-temporal-non-temporal ()
+  "clutch-db-format-temporal returns nil for non-temporal plists."
+  (should (null (clutch-db-format-temporal '(:foo 1 :bar 2)))))
+
+(ert-deftest clutch-test-ob-format-value-number-raw ()
+  "ob-clutch--format-value returns raw number for Org column alignment."
+  (should (= (ob-clutch--format-value 42) 42)))
+
+;;; Fix 2 — reconnect clears pending state
+
+(ert-deftest clutch-test-reconnect-clears-pending ()
+  "Reconnect discards pending state in result buffers."
+  (let ((result-buf (generate-new-buffer "*clutch-test-result*"))
+        (clutch-buf (generate-new-buffer "*clutch-test*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (clutch-result-mode)
+            (setq-local clutch--pending-deletes (list (vector 1)))
+            (setq-local clutch--pending-edits nil)
+            (setq-local clutch--pending-inserts nil))
+          (with-current-buffer clutch-buf
+            (cl-letf (((symbol-function 'clutch--build-conn)
+                       (lambda (_) 'fake-conn))
+                      ((symbol-function 'clutch-db-live-p)
+                       (lambda (_) t))
+                      ((symbol-function 'clutch--connection-key)
+                       (lambda (_) "fake"))
+                      ((symbol-function 'clutch--update-mode-line) #'ignore)
+                      ((symbol-function 'clutch--refresh-display) #'ignore))
+              (setq-local clutch--connection-params '(:backend mysql))
+              (clutch--try-reconnect)))
+          (with-current-buffer result-buf
+            (should (null clutch--pending-deletes))))
+      (kill-buffer result-buf)
+      (kill-buffer clutch-buf))))
+
+;;; Fix 4 — clutch-refresh-schema
+
+(ert-deftest clutch-test-refresh-schema-calls-refresh ()
+  "clutch-refresh-schema calls clutch--refresh-schema-cache."
+  (let (refresh-called)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch--refresh-schema-cache)
+               (lambda (_conn) (setq refresh-called t))))
+      (with-temp-buffer
+        (setq-local clutch-connection 'fake-conn)
+        (clutch-refresh-schema)
+        (should refresh-called)))))
+
+;;; Fix 5 — ob-clutch--disconnect-all
+
+(ert-deftest clutch-test-ob-clutch-disconnect-all ()
+  "ob-clutch--disconnect-all disconnects and clears all cached connections."
+  (let ((disconnected nil)
+        (ob-clutch--connection-cache (make-hash-table :test 'equal)))
+    (puthash "key1" 'conn1 ob-clutch--connection-cache)
+    (puthash "key2" 'conn2 ob-clutch--connection-cache)
+    (cl-letf (((symbol-function 'clutch-db-disconnect)
+               (lambda (c) (push c disconnected))))
+      (ob-clutch--disconnect-all)
+      (should (= (length disconnected) 2))
+      (should (= (hash-table-count ob-clutch--connection-cache) 0)))))
 
 (provide 'clutch-test)
 ;;; clutch-test.el ends here

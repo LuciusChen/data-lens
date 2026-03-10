@@ -36,7 +36,7 @@
     (,pg-oid-float4    . numeric)
     (,pg-oid-float8    . numeric)
     (,pg-oid-numeric   . numeric)
-    (,pg-oid-bool      . numeric)
+    (,pg-oid-bool      . text)
     (,pg-oid-json      . json)
     (,pg-oid-jsonb     . json)
     (,pg-oid-bytea     . blob)

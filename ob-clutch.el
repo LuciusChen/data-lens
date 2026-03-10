@@ -176,19 +176,9 @@ DEFAULT-BACKEND is used by language-specific executors."
   "Format VAL for Org-Babel table output."
   (cond
    ((null val) "NULL")
-   ((numberp val) val)
+   ((numberp val) val)           ; raw number for Org column alignment
    ((stringp val) val)
-   ((and (listp val) (plist-get val :year) (plist-get val :hours))
-    (format "%04d-%02d-%02d %02d:%02d:%02d"
-            (plist-get val :year) (plist-get val :month) (plist-get val :day)
-            (plist-get val :hours) (plist-get val :minutes) (plist-get val :seconds)))
-   ((and (listp val) (plist-get val :year))
-    (format "%04d-%02d-%02d"
-            (plist-get val :year) (plist-get val :month) (plist-get val :day)))
-   ((and (listp val) (plist-get val :hours))
-    (format "%s%02d:%02d:%02d"
-            (if (plist-get val :negative) "-" "")
-            (plist-get val :hours) (plist-get val :minutes) (plist-get val :seconds)))
+   ((listp val) (or (clutch-db-format-temporal val) (format "%S" val)))
    (t (format "%S" val))))
 
 (defun ob-clutch--execute (body params default-backend)
@@ -227,6 +217,19 @@ DEFAULT-BACKEND is used by language-specific executors."
 (defun org-babel-execute:sqlite (body params)
   "Execute a SQLite BODY with Babel PARAMS."
   (ob-clutch--execute body params 'sqlite))
+
+;;;; Cleanup on exit
+
+(defun ob-clutch--disconnect-all ()
+  "Disconnect all cached ob-clutch connections and clear the cache."
+  (maphash (lambda (_key conn)
+             (condition-case nil
+                 (clutch-db-disconnect conn)
+               (error nil)))
+           ob-clutch--connection-cache)
+  (clrhash ob-clutch--connection-cache))
+
+(add-hook 'kill-emacs-hook #'ob-clutch--disconnect-all)
 
 (provide 'ob-clutch)
 ;;; ob-clutch.el ends here

@@ -194,5 +194,24 @@ Returns a backend-specific connection object."
                                backend (error-message-string err))))))
     (user-error "Unknown backend: %s" backend)))
 
+;;;; Temporal value formatting
+
+(defun clutch-db-format-temporal (val)
+  "Format temporal plist VAL as a string, or nil if VAL is not temporal.
+Handles datetime (with :year and :hours), date (with :year only), and
+time (with :hours only) plists returned by the protocol layers."
+  (cond
+   ((and (listp val) (plist-get val :year) (plist-get val :hours))
+    (format "%04d-%02d-%02d %02d:%02d:%02d"
+            (plist-get val :year) (plist-get val :month) (plist-get val :day)
+            (plist-get val :hours) (plist-get val :minutes) (plist-get val :seconds)))
+   ((and (listp val) (plist-get val :year))
+    (format "%04d-%02d-%02d"
+            (plist-get val :year) (plist-get val :month) (plist-get val :day)))
+   ((and (listp val) (plist-get val :hours))
+    (format "%s%02d:%02d:%02d"
+            (if (plist-get val :negative) "-" "")
+            (plist-get val :hours) (plist-get val :minutes) (plist-get val :seconds)))))
+
 (provide 'clutch-db)
 ;;; clutch-db.el ends here

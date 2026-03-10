@@ -733,7 +733,7 @@ Built once at load time for O(1) dispatch.  `pg-type-parsers' takes precedence."
         (funcall custom value)
       (if-let* ((parser (gethash oid pg--oid-dispatch-table)))
           (funcall parser value)
-        value)))))
+        value))))
 
 ;;;; Query execution
 

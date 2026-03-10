@@ -15,7 +15,7 @@
 ;; GNU General Public License for more details.
 
 ;; You should have received a copy of the GNU General Public License
-;; along with mysql.el.  If not, see <https://www.gnu.org/licenses/>.
+;; along with clutch.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
@@ -418,9 +418,22 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
   "Return non-nil if CONN is live."
   (and conn (clutch-db-live-p conn)))
 
+(defun clutch--result-buffers-with-pending ()
+  "Return list of live result buffers that have uncommitted pending state."
+  (cl-remove-if-not
+   (lambda (buf)
+     (and (buffer-live-p buf)
+          (with-current-buffer buf
+            (and (derived-mode-p 'clutch-result-mode)
+                 (or clutch--pending-deletes
+                     clutch--pending-edits
+                     clutch--pending-inserts)))))
+   (buffer-list)))
+
 (defun clutch--try-reconnect ()
   "Attempt to re-establish the connection using `clutch--connection-params'.
 Updates `clutch-connection' and refreshes the mode-line on success.
+Any result buffers with uncommitted pending state are cleared.
 Returns non-nil on success, nil on failure."
   (when clutch--connection-params
     (condition-case err
@@ -428,6 +441,15 @@ Returns non-nil on success, nil on failure."
           (setq clutch-connection conn)
           (clutch--update-mode-line)
           (message "Reconnected to %s" (clutch--connection-key conn))
+          (when-let* ((bufs (clutch--result-buffers-with-pending)))
+            (dolist (buf bufs)
+              (with-current-buffer buf
+                (setq clutch--pending-deletes nil
+                      clutch--pending-edits   nil
+                      clutch--pending-inserts nil)
+                (clutch--refresh-display)))
+            (message "Reconnected — discarded pending changes in %d result buffer(s)"
+                     (length bufs)))
           t)
       (error
        (message "Reconnect failed: %s" (error-message-string err))
@@ -637,20 +659,7 @@ nil → \"NULL\", plists → formatted date/time strings."
    ((null val) "NULL")
    ((stringp val) val)
    ((numberp val) (number-to-string val))
-   ;; datetime plist: has :year and :hours
-   ((and (listp val) (plist-get val :year) (plist-get val :hours))
-    (format "%04d-%02d-%02d %02d:%02d:%02d"
-            (plist-get val :year) (plist-get val :month) (plist-get val :day)
-            (plist-get val :hours) (plist-get val :minutes) (plist-get val :seconds)))
-   ;; date plist: has :year but no :hours
-   ((and (listp val) (plist-get val :year))
-    (format "%04d-%02d-%02d"
-            (plist-get val :year) (plist-get val :month) (plist-get val :day)))
-   ;; time plist: has :hours but no :year
-   ((and (listp val) (plist-get val :hours))
-    (format "%s%02d:%02d:%02d"
-            (if (plist-get val :negative) "-" "")
-            (plist-get val :hours) (plist-get val :minutes) (plist-get val :seconds)))
+   ((listp val) (or (clutch-db-format-temporal val) (format "%S" val)))
    (t (format "%S" val))))
 
 (defun clutch--truncate-cell (str max-width)
@@ -2166,6 +2175,16 @@ Only loads table names (fast).  Column info is loaded lazily."
         (message "Connected — %d tables" (hash-table-count schema)))
     (clutch-db-error nil)))
 
+;;;###autoload
+(defun clutch-refresh-schema ()
+  "Refresh the schema cache for the current connection.
+Useful after DDL operations (CREATE TABLE, ALTER TABLE, DROP TABLE)
+executed outside clutch that would otherwise leave stale completions."
+  (interactive)
+  (clutch--ensure-connection)
+  (clutch--refresh-schema-cache clutch-connection)
+  (message "Schema refreshed"))
+
 (defun clutch--ensure-columns (conn schema table)
   "Ensure column info for TABLE is loaded in SCHEMA.
 Fetches from the backend if not yet cached.  Returns column list."
@@ -3101,6 +3120,7 @@ Prompts for TABLE via `completing-read' using schema cache table names."
     (define-key map (kbd "C-c C-j") #'clutch-browse-table)
     (define-key map (kbd "C-c C-d") #'clutch-describe-table-at-point)
     (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
+    (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
     (define-key map (kbd "C-c ?") #'clutch-dispatch)
     map)
   "Keymap for `clutch-mode'.")
@@ -5376,9 +5396,10 @@ Accumulates input until a semicolon is found, then executes."
    ["Edit"
     ("'" "Indirect edit"  clutch-edit-indirect)]
    ["Schema"
-    ("t" "List tables"    clutch-list-tables)
-    ("D" "Describe table" clutch-describe-table-at-point)
-    ("j" "Browse table"   clutch-browse-table)]])
+    ("t" "List tables"      clutch-list-tables)
+    ("D" "Describe table"   clutch-describe-table-at-point)
+    ("j" "Browse table"     clutch-browse-table)
+    ("s" "Refresh schema"   clutch-refresh-schema)]])
 
 (transient-define-prefix clutch-result-dispatch ()
   "Dispatch menu for clutch result buffer."
