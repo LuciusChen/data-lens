@@ -76,6 +76,16 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - Never autoload internal functions, defcustom, or defvar.
 - Use `declare-function` for functions from optional dependencies to silence byte-compiler.
 
+## Pre-Submit Review
+
+Before committing significant changes, step back and review the whole diff:
+
+- **No heuristic shortcuts**: If a fix feels "good enough for now", it probably isn't. Either do it correctly or explicitly document why it's deferred in a postmortem.
+- **No redundancy**: Check for duplicated logic, dead code, or overlapping abstractions introduced by the change. Remove them.
+- **Long-term correctness**: Ask whether the approach holds up under edge cases (filtered views, missing PK, concurrent buffer edits, etc.).
+- **Docs in sync**: Any change to key bindings, defaults, workflow, or data structures must update `README.org` and, where applicable, add or update a postmortem.
+- **Byte-compile clean**: `(byte-compile-file "clutch.el")` must produce zero warnings.
+
 ## Quality Checks
 
 Before releasing, ensure:
