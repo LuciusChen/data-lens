@@ -1698,19 +1698,24 @@ Returns the query result."
     (clutch--display-result result sql elapsed)
     result))
 
-(defun clutch--execute (sql &optional conn)
-  "Execute SQL on CONN (or current buffer connection).
-Times execution and displays results.
-For SELECT queries, applies pagination (LIMIT/OFFSET).
-Prompts for confirmation on destructive operations."
-  (clutch--ensure-connection)
+(defun clutch--check-pending-changes ()
+  "Prompt to discard pending changes in the result buffer, if any.
+Signals `user-error' if the user declines."
   (when-let* ((result-buf (get-buffer (clutch--result-buffer-name))))
     (with-current-buffer result-buf
       (when (and (or clutch--pending-edits
                      clutch--pending-deletes
                      clutch--pending-inserts)
                  (not (yes-or-no-p "Discard pending changes and re-run query? ")))
-        (user-error "Execution cancelled"))))
+        (user-error "Execution cancelled")))))
+
+(defun clutch--execute (sql &optional conn)
+  "Execute SQL on CONN (or current buffer connection).
+Times execution and displays results.
+For SELECT queries, applies pagination (LIMIT/OFFSET).
+Prompts for confirmation on destructive operations."
+  (clutch--ensure-connection)
+  (clutch--check-pending-changes)
   (let ((connection (or conn clutch-connection))
         (source-win (selected-window)))
     (when (clutch--destructive-query-p sql)
@@ -3117,8 +3122,7 @@ Priority: region rows > current row."
      ((>= ridx nrows)
       (let ((iidx (- ridx nrows)))
         (setq clutch--pending-inserts
-              (append (seq-take clutch--pending-inserts iidx)
-                      (seq-drop clutch--pending-inserts (1+ iidx))))
+              (delq (nth iidx clutch--pending-inserts) clutch--pending-inserts))
         (clutch--refresh-display)
         (message "Pending insertion discarded")))
      ((memq ridx clutch--pending-deletes)
