@@ -5362,6 +5362,7 @@ Works in `clutch-schema-mode' (via text property) and `clutch-mode'
 (with-eval-after-load 'embark
   (defvar-keymap clutch-embark-table-actions
     :doc "Embark actions for clutch table names."
+    :parent embark-general-map
     "b" #'clutch-browse-table
     "d" #'clutch-describe-table
     "w" #'clutch-copy-table-name)
