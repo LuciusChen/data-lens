@@ -1406,5 +1406,355 @@ Skips if `clutch-test-password' is nil."
         (should (string-prefix-p "UPDATE" (nth 1 executed)))
         (should (string-prefix-p "DELETE" (nth 0 executed)))))))
 
+;;;; Protocol Layer Benchmarks and Correctness Tests
+
+(require 'mysql)
+(require 'pg)
+
+;;; Opt 1: IEEE 754 float/double decoding correctness
+
+(ert-deftest clutch-test-ieee754-double-1.0 ()
+  "Double-precision: [00 00 00 00 00 00 F0 3F] -> 1.0."
+  (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #xF0 #x3F)))
+    (should (= (mysql--ieee754-double-to-float data 0) 1.0))))
+
+(ert-deftest clutch-test-ieee754-double-2.0 ()
+  "Double-precision: [00 00 00 00 00 00 00 40] -> 2.0."
+  (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x40)))
+    (should (= (mysql--ieee754-double-to-float data 0) 2.0))))
+
+(ert-deftest clutch-test-ieee754-double-neg-1.5 ()
+  "Double-precision: -1.5 round-trip via known LE bytes."
+  ;; -1.5: sign=1, exp=1023, mantissa=2^51; LE: 00 00 00 00 00 00 F8 BF
+  (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #xF8 #xBF)))
+    (should (= (mysql--ieee754-double-to-float data 0) -1.5))))
+
+(ert-deftest clutch-test-ieee754-double-pos-inf ()
+  "Double-precision: [00 00 00 00 00 00 F0 7F] -> +Inf."
+  (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #xF0 #x7F)))
+    (should (= (mysql--ieee754-double-to-float data 0) 1.0e+INF))))
+
+(ert-deftest clutch-test-ieee754-double-neg-inf ()
+  "Double-precision: [00 00 00 00 00 00 F0 FF] -> -Inf."
+  (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #xF0 #xFF)))
+    (should (= (mysql--ieee754-double-to-float data 0) -1.0e+INF))))
+
+(ert-deftest clutch-test-ieee754-double-nan ()
+  "Double-precision: exponent=0x7FF, mantissa!=0 -> NaN."
+  (let ((data (unibyte-string #x01 #x00 #x00 #x00 #x00 #x00 #xF0 #x7F)))
+    (should (isnan (mysql--ieee754-double-to-float data 0)))))
+
+(ert-deftest clutch-test-ieee754-double-subnormal ()
+  "Double-precision subnormal: exponent=0, mantissa!=0 -> tiny positive float."
+  (let* ((data (unibyte-string #x01 #x00 #x00 #x00 #x00 #x00 #x00 #x00))
+         (result (mysql--ieee754-double-to-float data 0)))
+    (should (floatp result))
+    (should (> result 0.0))
+    (should (< result 2.3e-308))))
+
+(ert-deftest clutch-test-ieee754-double-offset ()
+  "Double-precision decoder respects non-zero offset within data string."
+  ;; Pad with one garbage byte at offset 0; double starts at offset 1.
+  (let ((data (unibyte-string #xFF #x00 #x00 #x00 #x00 #x00 #x00 #xF0 #x3F)))
+    (should (= (mysql--ieee754-double-to-float data 1) 1.0))))
+
+(ert-deftest clutch-test-ieee754-single-1.0 ()
+  "Single-precision: [00 00 80 3F] -> 1.0."
+  (let ((data (unibyte-string #x00 #x00 #x80 #x3F)))
+    (should (= (mysql--ieee754-single-to-float data 0) 1.0))))
+
+(ert-deftest clutch-test-ieee754-single-2.0 ()
+  "Single-precision: [00 00 00 40] -> 2.0."
+  (let ((data (unibyte-string #x00 #x00 #x00 #x40)))
+    (should (= (mysql--ieee754-single-to-float data 0) 2.0))))
+
+(ert-deftest clutch-test-ieee754-single-pos-inf ()
+  "Single-precision: [00 00 80 7F] -> +Inf."
+  (let ((data (unibyte-string #x00 #x00 #x80 #x7F)))
+    (should (= (mysql--ieee754-single-to-float data 0) 1.0e+INF))))
+
+(ert-deftest clutch-test-ieee754-single-neg-inf ()
+  "Single-precision: [00 00 80 FF] -> -Inf.
+Note: [00 00 C0 FF] has mantissa bit set -> NaN, not -Inf."
+  (let ((data (unibyte-string #x00 #x00 #x80 #xFF)))
+    (should (= (mysql--ieee754-single-to-float data 0) -1.0e+INF))))
+
+(ert-deftest clutch-test-ieee754-single-nan ()
+  "Single-precision: exponent=0xFF, mantissa!=0 -> NaN."
+  (let ((data (unibyte-string #x01 #x00 #x80 #x7F)))
+    (should (isnan (mysql--ieee754-single-to-float data 0)))))
+
+(ert-deftest clutch-test-ieee754-single-subnormal ()
+  "Single-precision subnormal: exponent=0, mantissa!=0 -> tiny positive float."
+  (let* ((data (unibyte-string #x01 #x00 #x00 #x00))
+         (result (mysql--ieee754-single-to-float data 0)))
+    (should (floatp result))
+    (should (> result 0.0))
+    (should (< result 1.2e-38))))
+
+;; Benchmark (uncomment and eval manually; not run by default):
+;; (ert-deftest clutch-bench-ieee754-double () :tags '(benchmark)
+;;   (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #xF0 #x3F)))
+;;     (message "IEEE754 double x10000: %.4fs"
+;;              (car (benchmark-run 10000
+;;                     (mysql--ieee754-double-to-float data 0))))))
+
+;;; Opt 2: PG type dispatch hash table
+
+(ert-deftest clutch-test-pg-parse-value-null ()
+  "nil input returns nil for any OID."
+  (should (null (pg--parse-value nil pg-oid-int4)))
+  (should (null (pg--parse-value nil pg-oid-bool)))
+  (should (null (pg--parse-value nil 99999))))
+
+(ert-deftest clutch-test-pg-parse-value-bool ()
+  "Bool OID: \"t\"->t, \"f\"->nil, other->raw string."
+  (should (eq (pg--parse-value "t" pg-oid-bool) t))
+  (should (null (pg--parse-value "f" pg-oid-bool)))
+  (should (equal (pg--parse-value "unknown" pg-oid-bool) "unknown")))
+
+(ert-deftest clutch-test-pg-parse-value-integers ()
+  "Integer OIDs: string -> number."
+  (should (= (pg--parse-value "42" pg-oid-int2) 42))
+  (should (= (pg--parse-value "42" pg-oid-int4) 42))
+  (should (= (pg--parse-value "42" pg-oid-int8) 42)))
+
+(ert-deftest clutch-test-pg-parse-value-floats ()
+  "Float/numeric OIDs: string -> number."
+  (should (= (pg--parse-value "3.14" pg-oid-float4) 3.14))
+  (should (= (pg--parse-value "3.14" pg-oid-float8) 3.14))
+  (should (= (pg--parse-value "1.5" pg-oid-numeric) 1.5)))
+
+(ert-deftest clutch-test-pg-parse-value-date ()
+  "Date OID: string -> plist with :year/:month/:day."
+  (let ((result (pg--parse-value "2024-01-15" pg-oid-date)))
+    (should (= (plist-get result :year) 2024))
+    (should (= (plist-get result :month) 1))
+    (should (= (plist-get result :day) 15))))
+
+(ert-deftest clutch-test-pg-parse-value-time ()
+  "Time OID: string -> plist with :hours/:minutes/:seconds."
+  (let ((result (pg--parse-value "13:45:30" pg-oid-time)))
+    (should (= (plist-get result :hours) 13))
+    (should (= (plist-get result :minutes) 45))
+    (should (= (plist-get result :seconds) 30))))
+
+(ert-deftest clutch-test-pg-parse-value-timestamp ()
+  "Timestamp OID: string -> plist with :year/:hours."
+  (let ((result (pg--parse-value "2024-01-15 13:45:30" pg-oid-timestamp)))
+    (should (= (plist-get result :year) 2024))
+    (should (= (plist-get result :hours) 13))))
+
+(ert-deftest clutch-test-pg-parse-value-timestamptz ()
+  "Timestamptz OID: uses same parser as timestamp."
+  (let ((result (pg--parse-value "2024-01-15 13:45:30+00" pg-oid-timestamptz)))
+    (should (= (plist-get result :year) 2024))))
+
+(ert-deftest clutch-test-pg-parse-value-unknown-oid ()
+  "Unknown OID: raw string passthrough."
+  (should (equal (pg--parse-value "foo" 99999) "foo"))
+  (should (equal (pg--parse-value "" 0) "")))
+
+(ert-deftest clutch-test-pg-parse-value-user-parser-takes-precedence ()
+  "pg-type-parsers entries override the dispatch table."
+  (let ((pg-type-parsers (list (cons pg-oid-int4 (lambda (_v) :custom-result)))))
+    (should (eq (pg--parse-value "42" pg-oid-int4) :custom-result))))
+
+(ert-deftest clutch-test-pg-parse-value-user-parser-unknown-oid ()
+  "pg-type-parsers can add parsers for OIDs not in the dispatch table."
+  (let ((pg-type-parsers (list (cons 99999 (lambda (v) (concat "custom:" v))))))
+    (should (equal (pg--parse-value "test" 99999) "custom:test"))))
+
+;; Benchmark (uncomment and eval manually; not run by default):
+;; (ert-deftest clutch-bench-pg-parse-value () :tags '(benchmark)
+;;   (let ((oids (list pg-oid-int4 pg-oid-float8 pg-oid-bool pg-oid-date
+;;                     pg-oid-timestamp pg-oid-int8 pg-oid-numeric
+;;                     pg-oid-int2 pg-oid-float4 pg-oid-time))
+;;         (vals (list "42" "3.14" "t" "2024-01-15"
+;;                     "2024-01-15 00:00:00" "999" "1.5" "7" "2.71" "13:00:00")))
+;;     (message "pg--parse-value 10-col x10000: %.4fs"
+;;              (car (benchmark-run 10000
+;;                     (cl-mapcar #'pg--parse-value vals oids))))))
+
+;;; Opt 3: PBKDF2-SHA256 loop condition
+
+(defun clutch-test--bytes-to-hex (bytes)
+  "Convert unibyte string BYTES to a lowercase hex string."
+  (mapconcat (lambda (b) (format "%02x" b)) bytes ""))
+
+(ert-deftest clutch-test-pbkdf2-sha256-c1-dklen32 ()
+  "PBKDF2-SHA256 c=1, dkLen=32 matches RFC 7914 vector."
+  (skip-unless (fboundp 'secure-hash))
+  (let ((result (pg--pbkdf2-sha256 "password" "salt" 1 32)))
+    (should (equal (clutch-test--bytes-to-hex result)
+                   "120fb6cffccd925779ef5d3e32ae524c1546dcc25e5ae0b9d1c97832e3e01d33"))))
+
+(ert-deftest clutch-test-pbkdf2-sha256-c4096-dklen32 ()
+  "PBKDF2-SHA256 c=4096, dkLen=32 matches RFC 7914 vector."
+  (skip-unless (fboundp 'secure-hash))
+  (let ((result (pg--pbkdf2-sha256 "password" "salt" 4096 32)))
+    (should (equal (clutch-test--bytes-to-hex result)
+                   "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"))))
+
+(ert-deftest clutch-test-pbkdf2-sha256-multi-block ()
+  "PBKDF2-SHA256 dkLen=64 exercises two-block outer loop."
+  (skip-unless (fboundp 'secure-hash))
+  (let ((result (pg--pbkdf2-sha256 "password" "salt" 1 64)))
+    (should (equal (clutch-test--bytes-to-hex result)
+                   (concat "120fb6cffccd925779ef5d3e32ae524c"
+                           "1546dcc25e5ae0b9d1c97832e3e01d33"
+                           "6f56060780b5c13be0990c24a0e0e68f"
+                           "6266c94fb5e48d88dc4d8ca0e5cb4fcf")))))
+
+(ert-deftest clutch-test-pbkdf2-sha256-output-length ()
+  "PBKDF2-SHA256 returns exactly key-length bytes for various lengths."
+  (skip-unless (fboundp 'secure-hash))
+  (dolist (dklen '(1 16 32 33 64))
+    (should (= (length (pg--pbkdf2-sha256 "pw" "salt" 1 dklen)) dklen))))
+
+;; Benchmark (uncomment and eval manually; not run by default):
+;; (ert-deftest clutch-bench-pbkdf2 () :tags '(benchmark)
+;;   (skip-unless (fboundp 'secure-hash))
+;;   (message "pbkdf2-sha256 c=4096: %.4fs"
+;;            (car (benchmark-run 1
+;;                   (pg--pbkdf2-sha256 "password" "salt" 4096 32)))))
+
+;;; Opt 4: Buffer read-offset tracking
+
+(defun clutch-test--make-mysql-conn-with-data (data)
+  "Create a minimal mysql-conn with DATA pre-loaded in its buffer.
+Use `cl-letf' to bypass `mysql--ensure-data' in tests."
+  (let* ((buf (generate-new-buffer " *clutch-test-mysql*"))
+         (conn (make-mysql-conn :buf buf :host "test" :read-timeout 1)))
+    (with-current-buffer buf
+      (set-buffer-multibyte nil)
+      (insert data))
+    conn))
+
+(defun clutch-test--mysql-conn-cleanup (conn)
+  "Kill the synthetic buffer for a test conn."
+  (when (buffer-live-p (mysql-conn-buf conn))
+    (kill-buffer (mysql-conn-buf conn))))
+
+(ert-deftest clutch-test-mysql-read-bytes-offset-advances ()
+  "mysql--read-bytes advances read-offset without deleting buffer content."
+  (let* ((data (unibyte-string #x01 #x02 #x03 #x04 #x05))
+         (conn (clutch-test--make-mysql-conn-with-data data)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'mysql--ensure-data) #'ignore))
+          (let ((r1 (mysql--read-bytes conn 2)))
+            (should (equal r1 (unibyte-string #x01 #x02)))
+            (should (= (mysql-conn-read-offset conn) 2)))
+          ;; Buffer content intact — not deleted yet
+          (with-current-buffer (mysql-conn-buf conn)
+            (should (= (- (point-max) (point-min)) 5)))
+          (let ((r2 (mysql--read-bytes conn 2)))
+            (should (equal r2 (unibyte-string #x03 #x04)))
+            (should (= (mysql-conn-read-offset conn) 4))))
+      (clutch-test--mysql-conn-cleanup conn))))
+
+(ert-deftest clutch-test-mysql-read-packet-flushes-buffer ()
+  "mysql--read-packet flushes consumed bytes in bulk and resets offset."
+  ;; Packet: len=3 (LE: 03 00 00), seq=01, payload=AA BB CC
+  (let* ((pkt (unibyte-string #x03 #x00 #x00 #x01 #xAA #xBB #xCC))
+         (conn (clutch-test--make-mysql-conn-with-data pkt)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'mysql--ensure-data) #'ignore))
+          (let ((result (mysql--read-packet conn)))
+            (should (equal result (unibyte-string #xAA #xBB #xCC)))
+            (with-current-buffer (mysql-conn-buf conn)
+              (should (= (- (point-max) (point-min)) 0)))
+            (should (= (mysql-conn-read-offset conn) 0))))
+      (clutch-test--mysql-conn-cleanup conn))))
+
+(ert-deftest clutch-test-mysql-read-packet-two-sequential ()
+  "Two sequential mysql--read-packet calls parse correctly."
+  (let* ((data (concat (unibyte-string #x03 #x00 #x00 #x01 #xAA #xBB #xCC)
+                       (unibyte-string #x02 #x00 #x00 #x02 #xDD #xEE)))
+         (conn (clutch-test--make-mysql-conn-with-data data)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'mysql--ensure-data) #'ignore))
+          (should (equal (mysql--read-packet conn)
+                         (unibyte-string #xAA #xBB #xCC)))
+          (should (equal (mysql--read-packet conn)
+                         (unibyte-string #xDD #xEE)))
+          (with-current-buffer (mysql-conn-buf conn)
+            (should (= (- (point-max) (point-min)) 0))))
+      (clutch-test--mysql-conn-cleanup conn))))
+
+(ert-deftest clutch-test-mysql-read-offset-reset-on-erase ()
+  "erase-buffer + reset-offset restores a clean state."
+  (let* ((data (unibyte-string #x01 #x02 #x03))
+         (conn (clutch-test--make-mysql-conn-with-data data)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'mysql--ensure-data) #'ignore))
+          (mysql--read-bytes conn 2)
+          (should (= (mysql-conn-read-offset conn) 2))
+          (with-current-buffer (mysql-conn-buf conn)
+            (erase-buffer)
+            (setf (mysql-conn-read-offset conn) 0))
+          (should (= (mysql-conn-read-offset conn) 0)))
+      (clutch-test--mysql-conn-cleanup conn))))
+
+(defun clutch-test--make-pg-conn-with-data (data)
+  "Create a minimal pg-conn with DATA pre-loaded in its buffer."
+  (let* ((buf (generate-new-buffer " *clutch-test-pg*"))
+         (conn (make-pg-conn :buf buf :host "test" :read-timeout 1)))
+    (with-current-buffer buf
+      (set-buffer-multibyte nil)
+      (insert data))
+    conn))
+
+(defun clutch-test--pg-conn-cleanup (conn)
+  "Kill the synthetic buffer for a test pg-conn."
+  (when (buffer-live-p (pg-conn-buf conn))
+    (kill-buffer (pg-conn-buf conn))))
+
+(ert-deftest clutch-test-pg-read-bytes-offset-advances ()
+  "pg--read-bytes advances read-offset without deleting buffer content."
+  (let* ((data (unibyte-string #x01 #x02 #x03 #x04))
+         (conn (clutch-test--make-pg-conn-with-data data)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pg--ensure-data) #'ignore))
+          (let ((r1 (pg--read-bytes conn 2)))
+            (should (equal r1 (unibyte-string #x01 #x02)))
+            (should (= (pg-conn-read-offset conn) 2)))
+          (with-current-buffer (pg-conn-buf conn)
+            (should (= (- (point-max) (point-min)) 4))))
+      (clutch-test--pg-conn-cleanup conn))))
+
+(ert-deftest clutch-test-pg-read-message-flushes-buffer ()
+  "pg--read-message flushes consumed bytes and resets offset."
+  ;; PG message: type=?T(84), len=4+3=7 (BE: 00 00 00 07), payload=AA BB CC
+  (let* ((msg (concat (unibyte-string ?T)
+                      (unibyte-string #x00 #x00 #x00 #x07)
+                      (unibyte-string #xAA #xBB #xCC)))
+         (conn (clutch-test--make-pg-conn-with-data msg)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pg--ensure-data) #'ignore))
+          (let ((result (pg--read-message conn)))
+            (should (= (car result) ?T))
+            (should (equal (cdr result) (unibyte-string #xAA #xBB #xCC)))
+            (with-current-buffer (pg-conn-buf conn)
+              (should (= (- (point-max) (point-min)) 0)))
+            (should (= (pg-conn-read-offset conn) 0))))
+      (clutch-test--pg-conn-cleanup conn))))
+
+;; Benchmark (uncomment and eval manually; not run by default):
+;; (ert-deftest clutch-bench-buffer-read () :tags '(benchmark)
+;;   (let* ((row (make-string (* 20 8) #x41))
+;;          (buf (generate-new-buffer " *bench-buf*"))
+;;          (conn (make-mysql-conn :buf buf :host "bench" :read-timeout 1)))
+;;     (with-current-buffer buf
+;;       (set-buffer-multibyte nil)
+;;       (dotimes (_ 1000) (insert row)))
+;;     (unwind-protect
+;;         (cl-letf (((symbol-function 'mysql--ensure-data) #'ignore))
+;;           (message "read-bytes 1000x20x8: %.4fs"
+;;                    (car (benchmark-run 1
+;;                           (dotimes (_ (* 1000 20))
+;;                             (mysql--read-bytes conn 8))))))
+;;       (kill-buffer buf))))
+
 (provide 'clutch-test)
 ;;; clutch-test.el ends here

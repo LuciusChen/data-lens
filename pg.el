@@ -108,6 +108,7 @@
   pid secret-key
   (parameters nil)
   (read-timeout 10)
+  (read-offset 0)
   tls
   (busy nil))
 
@@ -122,13 +123,15 @@
 ;;;; Low-level I/O primitives
 
 (defun pg--ensure-data (conn n)
-  "Ensure at least N bytes are available in CONN's input buffer."
+  "Ensure at least N bytes beyond read-offset are available in CONN's buffer.
+Waits for data, resetting the idle deadline on each arrival.
+Signals `pg-timeout' or `pg-connection-error' on failure."
   (let* ((proc (pg-conn-process conn))
          (buf (pg-conn-buf conn))
          (timeout (pg-conn-read-timeout conn))
          (deadline (+ (float-time) timeout)))
     (with-current-buffer buf
-      (while (< (- (point-max) (point-min)) n)
+      (while (< (- (point-max) (+ (point-min) (pg-conn-read-offset conn))) n)
         (let ((remaining (- deadline (float-time)))
               (prev-size (- (point-max) (point-min))))
           (when (<= remaining 0)
@@ -139,20 +142,20 @@
                 (setq deadline (+ (float-time) timeout)))
             (when (not (process-live-p proc))
               (accept-process-output nil 0.05 nil t)
-              (when (< (- (point-max) (point-min)) n)
+              (when (< (- (point-max) (+ (point-min) (pg-conn-read-offset conn))) n)
                 (signal 'pg-connection-error
                         (list "Connection closed by server"))))))))))
 
 (defun pg--read-bytes (conn n)
-  "Read N bytes from CONN's input buffer as a unibyte string."
+  "Read N bytes from CONN's input buffer as a unibyte string.
+Advances read-offset without deleting buffer content."
   (pg--ensure-data conn n)
   (with-current-buffer (pg-conn-buf conn)
-    (goto-char (point-min))
-    (let ((start (point)))
-      (forward-char n)
-      (let ((str (buffer-substring-no-properties start (point))))
-        (delete-region start (point))
-        str))))
+    (let* ((off (pg-conn-read-offset conn))
+           (start (+ (point-min) off))
+           (str (buffer-substring-no-properties start (+ start n))))
+      (setf (pg-conn-read-offset conn) (+ off n))
+      str)))
 
 (defun pg--read-byte (conn)
   "Read a single byte from CONN, returning it as an integer."
@@ -241,6 +244,12 @@ PAYLOAD is a unibyte string."
          (payload (if (> payload-len 0)
                       (pg--read-bytes conn payload-len)
                     "")))
+    ;; Bulk-flush all bytes consumed by this message; one delete-region per message.
+    (with-current-buffer (pg-conn-buf conn)
+      (let ((off (pg-conn-read-offset conn)))
+        (when (> off 0)
+          (delete-region (point-min) (+ (point-min) off))
+          (setf (pg-conn-read-offset conn) 0))))
     (cons type payload)))
 
 ;;;; Message parsing helpers
@@ -346,7 +355,7 @@ PASSWORD and SALT are unibyte strings, ITERATIONS is an integer."
   (let ((dk nil)
         (block 1)
         (hlen 32))
-    (while (< (length (apply #'concat (nreverse (copy-sequence dk)))) key-length)
+    (while (< (* (1- block) hlen) key-length)
       (let* ((u1 (pg--hmac-sha256 password
                                    (concat salt (pg--int32-be-bytes block))))
              (u-prev u1)
@@ -693,34 +702,38 @@ converted Elisp value.  Entries here override built-in parsers.")
             :minutes (string-to-number minutes)
             :seconds (string-to-number seconds)))))
 
+(defconst pg--oid-dispatch-table
+  (let ((ht (make-hash-table :test 'eql :size 16)))
+    (puthash pg-oid-bool
+             (lambda (v) (pcase v ("t" t) ("f" nil) (_ v))) ht)
+    (puthash pg-oid-int2   #'string-to-number ht)
+    (puthash pg-oid-int4   #'string-to-number ht)
+    (puthash pg-oid-int8   #'string-to-number ht)
+    (puthash pg-oid-float4 #'string-to-number ht)
+    (puthash pg-oid-float8 #'string-to-number ht)
+    (puthash pg-oid-numeric #'string-to-number ht)
+    ;; JSON availability captured at load time.  For runtime override use pg-type-parsers.
+    (let ((json-fn (if (fboundp 'json-parse-string)
+                       #'json-parse-string
+                     #'identity)))
+      (puthash pg-oid-json  json-fn ht)
+      (puthash pg-oid-jsonb json-fn ht))
+    (puthash pg-oid-date        #'pg--parse-date ht)
+    (puthash pg-oid-time        #'pg--parse-time ht)
+    (puthash pg-oid-timestamp   #'pg--parse-timestamp ht)
+    (puthash pg-oid-timestamptz #'pg--parse-timestamp ht)
+    ht)
+  "Hash table mapping PostgreSQL OID integer to a value-parser function.
+Built once at load time for O(1) dispatch.  `pg-type-parsers' takes precedence.")
+
 (defun pg--parse-value (value oid)
-  "Parse string VALUE according to PostgreSQL column OID.
-Returns the converted Elisp value."
-  (if (null value)
-      nil
+  "Parse string VALUE according to PostgreSQL column OID, or nil for null."
+  (when value
     (if-let* ((custom (alist-get oid pg-type-parsers)))
         (funcall custom value)
-      (pcase oid
-        ((pred (= pg-oid-bool))
-         (pcase value ("t" t) ("f" nil) (_ value)))
-        ((or (pred (= pg-oid-int2))
-             (pred (= pg-oid-int4))
-             (pred (= pg-oid-int8))
-             (pred (= pg-oid-float4))
-             (pred (= pg-oid-float8))
-             (pred (= pg-oid-numeric)))
-         (string-to-number value))
-        ((or (pred (= pg-oid-json))
-             (pred (= pg-oid-jsonb)))
-         (if (fboundp 'json-parse-string)
-             (json-parse-string value)
-           value))
-        ((pred (= pg-oid-date))      (pg--parse-date value))
-        ((pred (= pg-oid-time))      (pg--parse-time value))
-        ((or (pred (= pg-oid-timestamp))
-             (pred (= pg-oid-timestamptz)))
-         (pg--parse-timestamp value))
-        (_ value)))))
+      (if-let* ((parser (gethash oid pg--oid-dispatch-table)))
+          (funcall parser value)
+        value)))))
 
 ;;;; Query execution
 
@@ -823,7 +836,9 @@ Signals `pg-error' if the connection is busy (re-entrant call)."
     (signal 'pg-error
             (list "Connection busy — cannot send query while another is in progress")))
   ;; Flush any stale data left from previously interrupted queries.
-  (with-current-buffer (pg-conn-buf conn) (erase-buffer))
+  (with-current-buffer (pg-conn-buf conn)
+    (erase-buffer)
+    (setf (pg-conn-read-offset conn) 0))
   (setf (pg-conn-busy conn) t)
   (unwind-protect
       ;; Bind throw-on-input to nil so that `while-no-input' (used by

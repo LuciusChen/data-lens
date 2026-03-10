@@ -135,6 +135,7 @@
   status-flags
   (read-timeout 10)
   (sequence-id 0)
+  (read-offset 0)
   tls
   (busy nil))
 
@@ -151,17 +152,15 @@
 ;;;; Low-level I/O primitives
 
 (defun mysql--ensure-data (conn n)
-  "Ensure at least N bytes are available in CONN's input buffer.
-Waits for data from the process, signaling `mysql-timeout' if
-no new data arrives within `mysql-conn-read-timeout' seconds.
-The timeout resets each time data is received, so large result
-sets that stream continuously will not time out."
+  "Ensure at least N bytes beyond read-offset are available in CONN's buffer.
+Waits for data, resetting the idle deadline on each arrival.
+Signals `mysql-timeout' or `mysql-connection-error' on failure."
   (let* ((proc (mysql-conn-process conn))
          (buf (mysql-conn-buf conn))
          (timeout (mysql-conn-read-timeout conn))
          (deadline (+ (float-time) timeout)))
     (with-current-buffer buf
-      (while (< (- (point-max) (point-min)) n)
+      (while (< (- (point-max) (+ (point-min) (mysql-conn-read-offset conn))) n)
         (let ((remaining (- deadline (float-time)))
               (prev-size (- (point-max) (point-min))))
           (when (<= remaining 0)
@@ -175,20 +174,20 @@ sets that stream continuously will not time out."
             ;; any remaining queued output from the OS before giving up.
             (when (not (process-live-p proc))
               (accept-process-output nil 0.05 nil t)
-              (when (< (- (point-max) (point-min)) n)
+              (when (< (- (point-max) (+ (point-min) (mysql-conn-read-offset conn))) n)
                 (signal 'mysql-connection-error
                         (list "Connection closed by server"))))))))))
 
 (defun mysql--read-bytes (conn n)
-  "Read N bytes from CONN's input buffer as a unibyte string."
+  "Read N bytes from CONN's input buffer as a unibyte string.
+Advances read-offset without deleting buffer content."
   (mysql--ensure-data conn n)
   (with-current-buffer (mysql-conn-buf conn)
-    (goto-char (point-min))
-    (let ((start (point)))
-      (forward-char n)
-      (let ((str (buffer-substring-no-properties start (point))))
-        (delete-region start (point))
-        str))))
+    (let* ((off (mysql-conn-read-offset conn))
+           (start (+ (point-min) off))
+           (str (buffer-substring-no-properties start (+ start n))))
+      (setf (mysql-conn-read-offset conn) (+ off n))
+      str)))
 
 (defun mysql--read-byte (conn)
   "Read a single byte from CONN, returning it as an integer."
@@ -241,6 +240,12 @@ multiple 16 MB fragments."
         (let ((data (mysql--read-bytes conn len)))
           (push data payload))
         (setq more (= len #xffffff))))
+    ;; Bulk-flush all bytes consumed by this packet; one delete-region per packet.
+    (with-current-buffer (mysql-conn-buf conn)
+      (let ((off (mysql-conn-read-offset conn)))
+        (when (> off 0)
+          (delete-region (point-min) (+ (point-min) off))
+          (setf (mysql-conn-read-offset conn) 0))))
     (apply #'concat (nreverse payload))))
 
 (defun mysql--int-le-bytes (value n)
@@ -864,7 +869,8 @@ Signals `mysql-error' if the connection is busy (re-entrant call)."
             (list "Connection busy — cannot send query while another is in progress")))
   ;; Flush any stale data left from previously interrupted queries.
   (with-current-buffer (mysql-conn-buf conn)
-    (erase-buffer))
+    (erase-buffer)
+    (setf (mysql-conn-read-offset conn) 0))
   (setf (mysql-conn-busy conn) t)
   (unwind-protect
       ;; Bind throw-on-input to nil so that `while-no-input' (used by
@@ -1220,21 +1226,25 @@ Returns (value . new-pos)."
          (exponent (logior (ash (logand b7 #x7f) 4)
                            (ash b6 -4)))
          ;; 52-bit mantissa: b6[3:0] b5 b4 b3 b2 b1 b0
-         (mantissa (+ (* (float (logand b6 #x0f)) (expt 2.0 48))
-                      (* (float b5) (expt 2.0 40))
-                      (* (float b4) (expt 2.0 32))
-                      (* (float b3) (expt 2.0 24))
-                      (* (float b2) (expt 2.0 16))
-                      (* (float b1) (expt 2.0 8))
+         ;; Multipliers are (expt 2.0 N) pre-computed as literals:
+         ;;   48->281474976710656.0  40->1099511627776.0  32->4294967296.0
+         ;;   24->16777216.0         16->65536.0           8->256.0
+         (mantissa (+ (* (float (logand b6 #x0f)) 281474976710656.0)
+                      (* (float b5) 1099511627776.0)
+                      (* (float b4) 4294967296.0)
+                      (* (float b3) 16777216.0)
+                      (* (float b2) 65536.0)
+                      (* (float b1) 256.0)
                       (float b0))))
+    ;; 2^52 = 4503599627370496.0
     (cond
      ((= exponent 0)
       (if (= mantissa 0.0) (* sign 0.0)
-        (* sign (ldexp (/ mantissa (expt 2.0 52)) -1022))))
+        (* sign (ldexp (/ mantissa 4503599627370496.0) -1022))))
      ((= exponent #x7ff)
       (if (= mantissa 0.0) (* sign 1.0e+INF) 0.0e+NaN))
      (t
-      (* sign (ldexp (+ 1.0 (/ mantissa (expt 2.0 52))) (- exponent 1023)))))))
+      (* sign (ldexp (+ 1.0 (/ mantissa 4503599627370496.0)) (- exponent 1023)))))))
 
 (defun mysql--decode-binary-datetime (packet pos type)
   "Decode a binary DATE/DATETIME/TIMESTAMP from PACKET at POS.
