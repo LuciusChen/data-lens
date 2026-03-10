@@ -2966,9 +2966,9 @@ can offer table-specific actions on the completion candidates."
 (defun clutch-describe-table-at-point ()
   "Describe the table name at point."
   (interactive)
-  (if-let* ((table (thing-at-point 'symbol t)))
-      (clutch-describe-table table)
-    (call-interactively #'clutch-describe-table)))
+  (clutch-describe-table
+   (or (thing-at-point 'symbol t)
+       (user-error "No table name at point"))))
 
 (defun clutch-schema-describe-at-point ()
   "In schema browser, describe the table on the current line."
