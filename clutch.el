@@ -5103,7 +5103,8 @@ Accumulates input until a semicolon is found, then executes."
     ("'" "Indirect edit"  clutch-edit-indirect)]
    ["Schema"
     ("t" "List tables"    clutch-list-tables)
-    ("D" "Describe table" clutch-describe-table-at-point)]])
+    ("D" "Describe table" clutch-describe-table-at-point)
+    ("j" "Browse table"   clutch-browse-table)]])
 
 (transient-define-prefix clutch-result-dispatch ()
   "Dispatch menu for clutch result buffer."

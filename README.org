@@ -422,7 +422,7 @@ g                            ;; Refresh
 
 Requires the =transient= package (built-in since Emacs 28.1).
 
-Press =C-c ?= to open the transient menu.
+Press =C-c ?= to open the transient menu.  The *Schema* group contains =List tables=, =Describe table=, and =Browse table=.
 
 ** Org-Babel Integration
 
