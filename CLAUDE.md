@@ -95,21 +95,22 @@ Before releasing, ensure:
 - Any change to key bindings, defaults, export behavior, or user-visible workflow must update `README.org` in the same change.
 - If code and docs diverge, treat code as source of truth and fix docs immediately.
 
-## Design Docs
+## Postmortems
 
-The `doc/` directory contains design decision records. **Read them before making significant changes.**
+The `postmortem/` directory contains design decision records and lessons learned. **Read them before making significant changes.**
 
 Each file is named `NNN-topic.md` and records: background, decision, rationale, alternatives considered, and known limitations.
 
-**Write a design doc when:**
+**Write a postmortem when:**
 - Adding or changing a user-visible workflow (e.g., how mutations are committed)
 - Choosing between non-obvious architectural approaches (e.g., where to place a guard)
 - Integrating an optional dependency (e.g., Embark)
+- Reverting or abandoning an approach — especially document *why* it was wrong
 - Discovering a known limitation that is deliberately deferred
 
-**What to write:** focus on *why*, not *what*. The code already shows what was done. The doc must explain why this approach was chosen over alternatives, and what trade-offs were accepted. A doc that only restates the code adds no value.
+**What to write:** focus on *why*, not *what*. The code already shows what was done. The record must explain why this approach was chosen over alternatives, what was tried and rejected, and what trade-offs were accepted. A record that only restates the code adds no value.
 
-**Quality bar:** if a future contributor reads the doc and still has to guess why a decision was made, the doc is incomplete.
+**Quality bar:** if a future contributor reads the record and still has to guess why a decision was made, it is incomplete.
 
 ## Export and Encoding
 
