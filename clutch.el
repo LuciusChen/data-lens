@@ -2928,11 +2928,22 @@ If EXPANDED-P, also insert column detail lines using CONN."
     (goto-char (point-min))
     (forward-line (1- (min line (line-number-at-pos (point-max)))))))
 
+(defun clutch--read-table-name (prompt tables)
+  "Read a table name from TABLES with PROMPT.
+Annotates the collection with `clutch-table' category so Embark
+can offer table-specific actions on the completion candidates."
+  (completing-read prompt
+                   (lambda (str pred action)
+                     (if (eq action 'metadata)
+                         '(metadata (category . clutch-table))
+                       (complete-with-action action tables str pred)))
+                   nil t))
+
 (defun clutch-describe-table (table)
   "Show the DDL of TABLE using SHOW CREATE TABLE."
   (interactive
    (list (if-let* ((schema (clutch--schema-for-connection)))
-             (completing-read "Table: " (hash-table-keys schema) nil t)
+             (clutch--read-table-name "Table: " (hash-table-keys schema))
            (read-string "Table: "))))
   (clutch--ensure-connection)
   (let* ((conn clutch-connection)
@@ -3008,7 +3019,7 @@ Prompts for TABLE via `completing-read' using schema cache table names."
                 (tables (or (and schema (hash-table-keys schema))
                             (progn (clutch--ensure-connection)
                                    (clutch-db-list-tables clutch-connection)))))
-           (completing-read "Browse table: " tables nil t))))
+           (clutch--read-table-name "Browse table: " tables))))
   (clutch--ensure-connection)
   (let ((sql (format "SELECT * FROM %s;"
                      (clutch-db-escape-identifier clutch-connection table))))
@@ -5322,6 +5333,42 @@ Accumulates input until a semicolon is found, then executes."
     ("v" "View value" clutch-record-view-value)
     ("g" "Refresh" clutch-record-refresh)
     ("q" "Quit"    quit-window)]])
+
+;;;; Embark integration (optional)
+
+(defun clutch-copy-table-name (table)
+  "Copy TABLE name to the kill ring."
+  (interactive "sTable: ")
+  (kill-new table)
+  (message "Copied table name: %s" table))
+
+(defun clutch--embark-table-target ()
+  "Return a `clutch-table' Embark target for the table name at point.
+Works in `clutch-schema-mode' (via text property) and `clutch-mode'
+\(via symbol at point validated against the schema cache)."
+  (when (clutch--connection-alive-p clutch-connection)
+    (pcase major-mode
+      ('clutch-schema-mode
+       (when-let* ((table (clutch-schema--table-at-point))
+                   (bounds (bounds-of-thing-at-point 'symbol)))
+         `(clutch-table ,table ,@bounds)))
+      ('clutch-mode
+       (when-let* ((sym (thing-at-point 'symbol t))
+                   (schema (clutch--schema-for-connection))
+                   ((gethash sym schema))
+                   (bounds (bounds-of-thing-at-point 'symbol)))
+         `(clutch-table ,sym ,@bounds))))))
+
+(with-eval-after-load 'embark
+  (defvar-keymap clutch-embark-table-actions
+    :doc "Embark actions for clutch table names."
+    "b" #'clutch-browse-table
+    "d" #'clutch-describe-table
+    "w" #'clutch-copy-table-name)
+
+  (add-to-list 'embark-target-finders #'clutch--embark-table-target)
+  (add-to-list 'embark-keymap-alist
+               '(clutch-table . clutch-embark-table-actions)))
 
 (provide 'clutch)
 ;;; clutch.el ends here
