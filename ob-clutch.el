@@ -19,20 +19,28 @@
 
 ;;; Commentary:
 
-;; Org-Babel backend for MySQL/PostgreSQL/SQLite via clutch-db.
+;; Org-Babel backend for MySQL/PostgreSQL/SQLite/JDBC databases via clutch-db.
 ;;
 ;; Supported block types:
 ;;   #+begin_src mysql
 ;;   #+begin_src postgresql
 ;;   #+begin_src sqlite
 ;;
-;; Optional generic block:
+;; Optional generic block (supports all backends including JDBC):
 ;;   #+begin_src clutch :backend pg
+;;   #+begin_src clutch :backend oracle
+;;   #+begin_src clutch :backend sqlserver
 ;;
 ;; Header arguments:
 ;;   :connection                name from `clutch-connection-alist'
-;;   :backend                   mysql|pg|postgresql|sqlite (for src clutch)
+;;   :backend                   mysql|pg|postgresql|sqlite|oracle|sqlserver|...
 ;;   :host :port :user :password :database
+;;
+;; JDBC backends (oracle, sqlserver, db2, snowflake, redshift) require
+;; clutch-db-jdbc.el to be loaded and clutch-jdbc-agent.jar to be available.
+;; Use :connection to reference a pre-configured clutch-connection-alist entry,
+;; or supply :host/:port/:user/:database inline.  Port defaults to the JDBC
+;; driver default when omitted.
 
 ;;; Code:
 
@@ -95,7 +103,12 @@
     (append params (list :pass-entry name))))
 
 (defun ob-clutch--normalize-backend (backend)
-  "Normalize BACKEND to one of symbols: mysql, pg, sqlite."
+  "Normalize BACKEND string or symbol for clutch-db-connect.
+Pure Elisp backends are canonicalized (mysql/pg/sqlite).
+Any other symbol is passed through as-is; clutch-db-connect will signal
+an error if the backend is truly unknown.  This allows JDBC driver symbols
+(oracle, sqlserver, db2, snowflake, redshift, etc.) to work without
+ob-clutch needing to know about clutch-db-jdbc."
   (let ((sym (if (stringp backend)
                  (intern (downcase backend))
                backend)))
@@ -103,7 +116,7 @@
       ((or 'mysql 'mariadb) 'mysql)
       ((or 'pg 'postgres 'postgresql) 'pg)
       ('sqlite 'sqlite)
-      (_ (user-error "Unsupported backend: %s" backend)))))
+      (_ sym))))
 
 (defun ob-clutch--plist-without-meta (plist)
   "Return copy of PLIST excluding keys in `ob-clutch--meta-keys'."
@@ -126,17 +139,17 @@
     (_
      (let ((host (or (cdr (assq :host params)) "127.0.0.1"))
            (port (or (cdr (assq :port params))
-                     (if (eq backend 'pg) 5432 3306)))
+                     (pcase backend ('pg 5432) ('mysql 3306) (_ nil))))
            (user (cdr (assq :user params)))
            (password (cdr (assq :password params)))
            (database (cdr (assq :database params))))
        (unless user
          (user-error "Missing :user (or use :connection)"))
-       (append (list :host host
-                     :port (if (stringp port) (string-to-number port) port)
-                     :user user)
-               (when password (list :password password))
-               (when database (list :database database)))))))
+       (let ((port-num (and port (if (stringp port) (string-to-number port) port))))
+         (append (list :host host :user user)
+                 (when port-num (list :port port-num))
+                 (when password (list :password password))
+                 (when database (list :database database))))))))
 
 (defun ob-clutch--resolve-connection (params default-backend)
   "Return (BACKEND . CONN-PARAMS) from Babel PARAMS.

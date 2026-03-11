@@ -577,22 +577,33 @@ In the result buffer, the *Edit* group in the transient menu provides the unifie
 
 ** Org-Babel Integration
 
-Execute SQL directly in org files. Configuration:
+Execute SQL directly in org files.  All backends (MySQL, PostgreSQL, SQLite,
+and JDBC databases) are supported via =ob-clutch.el=.
+
+Configuration:
 
 #+begin_src emacs-lisp
 (require 'ob-clutch)
+;; For JDBC backends also load:
+(require 'clutch-db-jdbc)
+
 (with-eval-after-load 'org
   (org-babel-do-load-languages
    'org-babel-load-languages
    '((mysql . t)
      (postgresql . t)
-     (sqlite . t))))
+     (sqlite . t)
+     (clutch . t))))   ; generic block — needed for JDBC backends
 #+end_src
 
-Using a saved connection:
+Using a saved connection (works for any backend including JDBC):
 
 : #+begin_src mysql :connection dev
 : SELECT * FROM users LIMIT 5;
+: #+end_src
+
+: #+begin_src clutch :connection prod-oracle
+: SELECT * FROM employees WHERE ROWNUM <= 10;
 : #+end_src
 
 Or with inline connection parameters:
@@ -601,7 +612,7 @@ Or with inline connection parameters:
 : SHOW TABLES;
 : #+end_src
 
-PostgreSQL and SQLite blocks are also supported:
+PostgreSQL and SQLite blocks:
 
 : #+begin_src postgresql :connection dev-pg
 : SELECT now();
@@ -611,10 +622,18 @@ PostgreSQL and SQLite blocks are also supported:
 : SELECT name FROM sqlite_master WHERE type = 'table';
 : #+end_src
 
-Generic form with explicit backend:
+Generic form with explicit backend — required for JDBC databases:
 
 : #+begin_src clutch :backend pg :host 127.0.0.1 :port 5432 :user postgres :password test :database mydb
 : SELECT version();
+: #+end_src
+
+: #+begin_src clutch :backend oracle :host db.corp.com :port 1521 :user scott :password tiger :database ORCL
+: SELECT table_name FROM user_tables;
+: #+end_src
+
+: #+begin_src clutch :backend sqlserver :host sqlserver.corp.com :port 1433 :user sa :password secret :database mydb
+: SELECT TOP 10 * FROM sys.tables;
 : #+end_src
 
 Compatibility entry files:
