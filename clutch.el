@@ -255,6 +255,9 @@ Used to update the mode-line with a spinner during execution.")
 (defvar-local clutch--tables-in-buffer-cache nil
   "Cached result for `clutch--tables-in-buffer' in the current buffer.")
 
+(defvar-local clutch--tables-in-query-cache nil
+  "Cached result for `clutch--tables-in-query' in the current buffer.")
+
 (defvar-local clutch--row-start-positions nil
   "Vector mapping rendered row indices to their line start positions.")
 
@@ -2426,21 +2429,37 @@ Returns a string or nil."
 Scans only the SQL statement surrounding point, bounded by semicolons or
 blank lines.  Falls back to `clutch--tables-in-buffer' when none are found."
   (let* ((delim "\\(;\\|^[[:space:]]*$\\)")
+         (tick  (buffer-chars-modified-tick))
          (beg   (save-excursion
                   (if (re-search-backward delim nil t)
                       (match-end 0) (point-min))))
          (end   (save-excursion
                   (if (re-search-forward delim nil t)
                       (match-beginning 0) (point-max))))
-         (text  (buffer-substring-no-properties beg end))
-         (case-fold-search t)
-         (found (cl-loop for tbl in (hash-table-keys schema)
-                         when (string-match-p
-                               (format "\\b\\(from\\|join\\|update\\|into\\)[ \t\n]+%s\\b"
-                                       (regexp-quote tbl))
-                               text)
-                         collect tbl)))
-    (or found (clutch--tables-in-buffer schema))))
+         (cached clutch--tables-in-query-cache))
+    (if (and cached
+             (eq (plist-get cached :schema) schema)
+             (= (plist-get cached :tick) tick)
+             (= (plist-get cached :beg) beg)
+             (= (plist-get cached :end) end))
+        (plist-get cached :tables)
+      (let* ((text  (buffer-substring-no-properties beg end))
+             (case-fold-search t)
+             found
+             (tables
+              (progn
+                (maphash (lambda (tbl _cols)
+                           (when (string-match-p
+                                  (format "\\b\\(from\\|join\\|update\\|into\\)[ \t\n]+%s\\b"
+                                          (regexp-quote tbl))
+                                  text)
+                             (push tbl found)))
+                         schema)
+                (or (nreverse found)
+                    (clutch--tables-in-buffer schema)))))
+        (setq clutch--tables-in-query-cache
+              (list :schema schema :tick tick :beg beg :end end :tables tables))
+        tables))))
 
 (defconst clutch--sql-keywords
   '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"

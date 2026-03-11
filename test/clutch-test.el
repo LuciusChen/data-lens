@@ -953,6 +953,37 @@
         (should (equal (clutch--tables-in-buffer schema) '("users" "posts")))
         (should (= calls 4))))))
 
+(ert-deftest clutch-test-tables-in-query-caches-within-statement ()
+  "Statement table lookup should reuse cached results until statement or text changes."
+  (with-temp-buffer
+    (insert "SELECT * FROM users JOIN posts ON users.id = posts.user_id;\n\nSELECT * FROM logs")
+    (let ((schema (make-hash-table :test 'equal))
+          (calls 0)
+          (orig-string-match-p (symbol-function 'string-match-p)))
+      (puthash "users" t schema)
+      (puthash "posts" t schema)
+      (puthash "logs" t schema)
+      (cl-letf (((symbol-function 'string-match-p)
+                 (lambda (regexp string &optional start)
+                   (cl-incf calls)
+                   (funcall orig-string-match-p regexp string start))))
+        (goto-char (point-min))
+        (should (equal (sort (copy-sequence (clutch--tables-in-query schema)) #'string<)
+                       '("posts" "users")))
+        (let ((first calls))
+          (search-forward "users.id")
+          (should (equal (sort (copy-sequence (clutch--tables-in-query schema)) #'string<)
+                         '("posts" "users")))
+          (should (= calls first))
+          (goto-char (point-max))
+          (should (equal (clutch--tables-in-query schema) '("logs")))
+          (should (> calls first))
+          (let ((second calls))
+            (goto-char (point-max))
+            (insert " WHERE level = 'error'")
+            (should (equal (clutch--tables-in-query schema) '("logs")))
+            (should (> calls second))))))))
+
 (ert-deftest clutch-test-goto-cell-uses-row-start-positions ()
   "Cell navigation should use cached row starts when available."
   (with-temp-buffer
