@@ -654,9 +654,10 @@ window rather than replacing the current window."
 
 (defun clutch--format-value (val)
   "Format VAL for display in a result table.
-nil → \"NULL\", plists → formatted date/time strings."
+nil → \"NULL\", :false → \"false\", plists → formatted date/time strings."
   (cond
    ((null val) "NULL")
+   ((eq val :false) "false")
    ((stringp val) val)
    ((numberp val) (number-to-string val))
    ((listp val) (or (clutch-db-format-temporal val) (format "%S" val)))
@@ -720,6 +721,7 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
   "Return non-nil when string VAL appears to contain JSON text."
   (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
 
+
 (defun clutch--xml-like-string-p (val)
   "Return non-nil when string VAL appears to contain XML text.
 Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
@@ -740,12 +742,12 @@ Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
   "Return compact placeholder text for VAL/COL-DEF in result grid."
   (let ((cat (plist-get col-def :type-category)))
     (cond
-     ((eq cat 'blob)
-      "<BLOB>")
      ((or (eq cat 'json) (clutch--json-like-string-p val))
       "<JSON>")
      ((clutch--xml-like-string-p val)
       "<XML>")
+     ((eq cat 'blob)
+      "<BLOB>")
      (t nil))))
 
 (defun clutch--compute-column-widths (col-names rows column-defs
@@ -3259,7 +3261,7 @@ Priority: region rows > current row."
     (define-key map "A" #'clutch-result-aggregate)
     (define-key map "s" #'clutch-result-sort-by-column)
     (define-key map "S" #'clutch-result-sort-by-column-desc)
-    (define-key map "c" #'clutch-result-copy-command)
+    (define-key map "c" #'clutch-result-copy-dispatch)
     (define-key map "v" #'clutch-result-view-value)
     (define-key map "W" #'clutch-result-apply-filter)
     (define-key map (kbd "RET") #'clutch-result-open-record)
@@ -3384,7 +3386,7 @@ Navigate (row):
   \\[clutch-result-next-col-page]	Next column page
   \\[clutch-result-prev-col-page]	Previous column page
 Copy:
-  \\[clutch-result-copy-command]	Copy... (tsv/csv/insert)
+  \\[clutch-result-copy-dispatch]	Copy… (transient: choose format, -r to refine)
   \\[clutch-result-export]	Export all rows (copy/file)
   \\[clutch-preview-execution-sql]	Preview SQL to execute
 Edit:
@@ -4326,6 +4328,7 @@ Scans buffer once for this column — O(buffer)."
       (user-error "No columns left after exclusion"))
     (let ((cb clutch--refine-callback)
           (final-rect (cons row-indices col-indices)))
+      (clutch-refine--clear-overlays)
       (clutch-refine-mode -1)
       (setq tab-line-format clutch--refine-saved-tab-line
             clutch--refine-rect nil
@@ -4338,6 +4341,7 @@ Scans buffer once for this column — O(buffer)."
 (defun clutch-refine-cancel ()
   "Cancel refine mode without executing the callback."
   (interactive)
+  (clutch-refine--clear-overlays)
   (clutch-refine-mode -1)
   (setq tab-line-format clutch--refine-saved-tab-line
         clutch--refine-rect nil
@@ -4392,25 +4396,42 @@ Otherwise, copy the current cell."
     (_
      (user-error "Unsupported copy format: %s" format))))
 
-(defun clutch-result-copy-command (&optional refine)
-  "Prompt for copy FORMAT and dispatch to `clutch-result-copy'.
-With prefix arg REFINE and an active region, enter visual refine mode."
-  (interactive "P")
-  (let* ((choice (completing-read "Copy format: " '("tsv" "csv" "insert")
-                                  nil t nil nil "tsv"))
-         (fmt (pcase choice
-                ("tsv" 'tsv)
-                ("csv" 'csv)
-                ("insert" 'insert)
-                (_ 'tsv))))
-    (if refine
-        (progn
-          (unless (use-region-p)
-            (user-error "Set a region before using C-u"))
-          (clutch-result--start-refine
-           (clutch-result--region-rectangle-indices)
-           (lambda (final-rect) (clutch-result-copy fmt final-rect))))
-      (clutch-result-copy fmt))))
+(defun clutch-result--copy-fmt (fmt)
+  "Copy in FMT, entering refine mode first if --refine switch is set."
+  (if (transient-arg-value "--refine" (transient-args 'clutch-result-copy-dispatch))
+      (progn
+        (unless (use-region-p)
+          (user-error "Set a region before using refine mode"))
+        (clutch-result--start-refine
+         (clutch-result--region-rectangle-indices)
+         (lambda (final-rect) (clutch-result-copy fmt final-rect))))
+    (clutch-result-copy fmt)))
+
+(defun clutch-result-copy-tsv ()
+  "Copy as TSV."
+  (interactive)
+  (clutch-result--copy-fmt 'tsv))
+
+(defun clutch-result-copy-csv ()
+  "Copy as CSV with header."
+  (interactive)
+  (clutch-result--copy-fmt 'csv))
+
+(defun clutch-result-copy-insert ()
+  "Copy as INSERT statements."
+  (interactive)
+  (clutch-result--copy-fmt 'insert))
+
+(transient-define-prefix clutch-result-copy-dispatch ()
+  "Copy result buffer data.
+Enable --refine to exclude rows/columns interactively before copying
+\(requires an active region set with C-x SPC or mouse)."
+  ["Options"
+   ("-r" "Exclude rows/cols interactively (needs region)" "--refine")]
+  ["Copy as"
+   ("t" "TSV"             clutch-result-copy-tsv)
+   ("c" "CSV with header" clutch-result-copy-csv)
+   ("i" "INSERT"          clutch-result-copy-insert)])
 
 
 (defun clutch-result--yank-cell-value (val)
@@ -4489,6 +4510,7 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
       (push (string-join (nreverse current-values) "\t") lines))
     (let ((text (string-join (nreverse lines) "\n")))
       (kill-new text)
+      (deactivate-mark)
       (message "Copied %d cell%s from region"
                (length cells)
                (if (= (length cells) 1) "" "s")))))
@@ -4778,17 +4800,17 @@ Uses xmllint for pretty-printing when available; shows a message otherwise."
 
 (defun clutch--dispatch-view (val col-def)
   "Open the appropriate viewer for VAL given column metadata COL-DEF.
-Dispatch order: blob type → binary string; json type or {/[ content
-→ JSON; < prefix → XML; otherwise falls back to plain text viewer."
+Dispatch order: JSON content → JSON viewer; XML content → XML viewer;
+blob type with non-text value → binary string; otherwise plain text."
   (let ((cat (plist-get col-def :type-category)))
     (cond
+     ((or (eq cat 'json)
+          (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
+      (clutch--view-json-value (clutch--json-value-to-string val)))
      ((clutch--xml-like-string-p val)
       (clutch--view-xml-value val))
      ((eq cat 'blob)
       (clutch--view-binary-as-string val))
-     ((or (eq cat 'json)
-          (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
-      (clutch--view-json-value (clutch--json-value-to-string val)))
      (t
       (clutch--view-plain-value val)))))
 
@@ -4834,6 +4856,7 @@ Rows/columns: region rectangle > current cell."
          (table (or (clutch-result--detect-table) "TABLE"))
          (stmts (clutch-result--build-insert-statements indices col-indices table)))
     (kill-new (mapconcat #'identity stmts "\n"))
+    (deactivate-mark)
     (message "Copied %d INSERT statement%s (%d col%s)"
              (length stmts) (if (= (length stmts) 1) "" "s")
              (length col-indices) (if (= (length col-indices) 1) "" "s"))))
@@ -4872,6 +4895,7 @@ Includes a header row with column names."
                                    collect i)))
          (lines (clutch-result--build-csv-lines indices col-indices)))
     (kill-new (mapconcat #'identity lines "\n"))
+    (deactivate-mark)
     (message "Copied %d row%s as CSV (%d col%s)"
              (length indices) (if (= (length indices) 1) "" "s")
              (length col-indices) (if (= (length col-indices) 1) "" "s"))))
@@ -5431,8 +5455,8 @@ Accumulates input until a semicolon is found, then executes."
     ("d" "Stage delete"    clutch-result-delete-rows)
     ("C-c C-k" "Discard pending" clutch-result-discard-pending-at-point)]
    ["Copy (region/rect: C-x SPC)"
-    ("c" "Copy..."          clutch-result-copy-command)
-    ("e" "Export"           clutch-result-export)]
+    ("c" "Copy… (-r to refine rows/cols)" clutch-result-copy-dispatch)
+    ("e" "Export"                         clutch-result-export)]
    ["Other"
     ("=" "Widen column"    clutch-result-widen-column)
    ("-" "Narrow column"   clutch-result-narrow-column)

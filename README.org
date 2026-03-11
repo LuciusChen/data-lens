@@ -3,8 +3,10 @@
 
 * Overview
 
-A pure Emacs Lisp database client with an interactive data browsing UI.
-Supports MySQL (primary, daily-use), PostgreSQL, and SQLite (Emacs 29+).
+An Emacs database client with an interactive data browsing UI.
+Supports MySQL, PostgreSQL, and SQLite via pure Elisp backends, plus Oracle,
+SQL Server, DB2, Snowflake, and Amazon Redshift through a lightweight JVM
+sidecar (=clutch-jdbc-agent=, Java 11+).
 
 - =mysql.el= — pure Elisp MySQL wire protocol implementation (no external CLI needed)
 - =pg.el= — pure Elisp PostgreSQL wire protocol v3 implementation
@@ -12,6 +14,7 @@ Supports MySQL (primary, daily-use), PostgreSQL, and SQLite (Emacs 29+).
 - =clutch-db-mysql.el= — MySQL backend adapter
 - =clutch-db-pg.el= — PostgreSQL backend adapter
 - =clutch-db-sqlite.el= — SQLite backend adapter (uses Emacs 29+ built-in sqlite)
+- =clutch-db-jdbc.el= — JDBC backend adapter (Oracle, SQL Server, DB2, Snowflake, Redshift, and any JDBC-compatible database)
 - =clutch.el= — interactive UI layer: column-paged result browser, record view, FK navigation, editing, transient menus, REPL
 - =ob-clutch.el= — Org-Babel integration (mysql/postgresql/sqlite)
 
@@ -21,6 +24,7 @@ Supports MySQL (primary, daily-use), PostgreSQL, and SQLite (Emacs 29+).
 *Note:* MySQL is the primary backend — thoroughly tested and used daily.
 PostgreSQL support is functional and compatible, but has not been tested as extensively in daily use.
 SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external dependencies.
+The JDBC backend requires Java 11+ and =clutch-jdbc-agent.jar= (auto-downloaded on first use).
 
 * Features
 
@@ -80,6 +84,7 @@ SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external d
 - Emacs 28.1+ for MySQL and PostgreSQL backends
 - Emacs 29.1+ for the SQLite backend (built-in =sqlite-*= functions)
 - MySQL 5.7+ / 8.x, PostgreSQL 12+, or SQLite 3 (via Emacs built-in)
+- Java 11+ for the JDBC backend (Oracle, SQL Server, DB2, Snowflake, Redshift)
 
 * Installation
 
@@ -114,7 +119,7 @@ Clone this repository and add it to your =load-path=
                           :database "/path/to/my.db"))))
 #+end_src
 
-Each entry should specify =:backend= explicitly (=mysql=, =pg=, or =sqlite=).
+Each entry should specify =:backend= explicitly (=mysql=, =pg=, =sqlite=, or a JDBC driver symbol).
 Omitting =:backend= defaults to =mysql=, but explicit is clearer.
 SQLite connections only require =:database= (the file path); no host, port, or user.
 Use =":memory:"= for a transient in-memory database (data is lost when disconnected).
@@ -122,6 +127,9 @@ Use =":memory:"= for a transient in-memory database (data is lost when disconnec
 For MySQL/PostgreSQL, =:read-timeout= (seconds) can be set per connection entry.
 TLS can be enabled per entry with =:tls t=; see backend TLS sections above for
 verification defaults and CA trustfile configuration.
+
+JDBC backends use a driver symbol as =:backend= instead of =mysql=/=pg=.  See
+[[*JDBC Backend (clutch-db-jdbc.el)]] for the full list of supported databases and setup.
 
 *** 2. Open a query console
 
@@ -261,7 +269,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
 | =C-c C-k=     | Discard pending deletion/insertion at point   |
 | =C-c C-p=      | Preview SQL (query / pending update / selected delete) |
-| =c=            | Copy... (tsv/csv/insert; region = selected block, no region = current cell; =C-u= with region enters visual refine mode) |
+| =c=            | Open copy transient menu (choose TSV / CSV / INSERT; toggle =-r= to refine) |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
 | =e=            | Export all rows (copy / file)                     |
 | =f=            | Toggle fullscreen                             |
@@ -270,15 +278,21 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 Tip: =c= supports both regular region and rectangular selection (=C-x SPC=).
 Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
 
-*** Visual Refine Mode (=C-u c= / =C-u A=)
+*** Visual Refine Mode (=c -r= / =C-u A=)
 
-With an active region, =C-u c= or =C-u A= enters *refine mode*: the selected
-rectangle is highlighted and you interactively exclude rows or columns before
-the copy/aggregate is performed.  The tab-line at the top of the result buffer
-is replaced with a colour-coded hint for the duration of the session.
+The copy transient (=c=) offers a =-r= switch for *refine mode*.  With an
+active region, enabling =-r= before choosing a format lets you interactively
+exclude rows or columns before the copy is performed.  The tab-line at the top
+of the result buffer is replaced with a colour-coded hint for the duration of
+the session.
 
 #+begin_example
-Step 1 — select a region, then press C-u c or C-u A.
+Step 1 — select a region, then press c.
+         The transient menu appears.
+
+Step 2 — press -r to toggle refine mode (shown in the Options section).
+
+Step 3 — press t / c / i to choose the format (TSV / CSV / INSERT).
          The rect is highlighted; tab-line shows available keys.
 
   REFINE  m row   x col   RET confirm   C-g cancel     ← tab-line
@@ -290,18 +304,19 @@ Step 1 — select a region, then press C-u c or C-u A.
   3  ░ Carol ░ carol@example.com ░ 2024-07-01  ┘
   4    Dave    dave@example.com    2024-09-10     (outside rect)
 
-Step 2 — press m on row 2 to exclude it (dim + strikethrough).
+Step 4 — press m on row 2 to exclude it (dim + strikethrough).
 
   1  ░ Alice ░ alice@example.com ░ 2023-01-15
   2    Bob     bob@example.com     2023-03-22   ← excluded
   3  ░ Carol ░ carol@example.com ░ 2024-07-01
 
-Step 3 — press x on the email column to exclude it.
+Step 5 — press x on the email column to exclude it.
 
   1  ░ Alice ░ ~~email~~         ░ 2023-01-15
   3  ░ Carol ░ ~~email~~         ░ 2024-07-01
 
-Step 4 — press RET to confirm.
+Step 6 — press RET to confirm.
+         Data is copied in the chosen format.
          Result: rows {1, 3} × cols {id, name, joined}.
 #+end_example
 
@@ -444,6 +459,113 @@ Table names are recognised as targets in three contexts:
 
 Example: invoke =C-c C-j= (browse table), navigate to a candidate, then press
 the Embark key and =d= to describe it instead — without cancelling and re-running.
+
+** JDBC Backend (clutch-db-jdbc.el)
+
+=clutch-db-jdbc.el= adds support for databases that have no pure Elisp wire
+protocol implementation.  It delegates all SQL execution and metadata queries
+to =clutch-jdbc-agent=, a minimal JVM sidecar process that speaks a
+one-JSON-object-per-line protocol on stdin/stdout.  Java 11+ is required.
+
+*** Supported Databases
+
+| Backend symbol | Database            | Driver auto-install | Default port |
+|----------------+---------------------+---------------------+--------------|
+| =oracle=       | Oracle Database     | Maven Central       | 1521         |
+| =sqlserver=    | Microsoft SQL Server| Maven Central       | 1433         |
+| =redshift=     | Amazon Redshift     | Maven Central       | 5439         |
+| =snowflake=    | Snowflake           | Maven Central       | —            |
+| =db2=          | IBM DB2             | Manual download     | 50000        |
+
+Any other JDBC-compatible database (ClickHouse, TiDB, Hive, etc.) can be used
+by passing =:url "jdbc:xxx://..."= directly and placing the driver jar in the
+drivers directory.
+
+*** Setup
+
+#+begin_src emacs-lisp
+(require 'clutch-db-jdbc)
+
+;; Download clutch-jdbc-agent.jar (once):
+(clutch-jdbc-ensure-agent)
+
+;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift):
+(clutch-jdbc-install-driver 'oracle)      ; ojdbc11.jar from Maven Central
+(clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar from Maven Central
+(clutch-jdbc-install-driver 'snowflake)   ; snowflake-jdbc.jar from Maven Central
+(clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc.jar from Maven Central
+;; DB2: download db2jcc4.jar from IBM manually and place in clutch-jdbc-agents-dir/drivers/
+#+end_src
+
+Driver jars are stored in =~/.emacs.d/clutch-jdbc/drivers/=
+(configurable via =clutch-jdbc-agent-dir=).
+
+Oracle users on CJK character sets also need =orai18n.jar=:
+#+begin_src emacs-lisp
+(clutch-jdbc-install-driver 'oracle-i18n)
+#+end_src
+
+*** Connection Examples
+
+#+begin_src emacs-lisp
+(setq clutch-connection-alist
+      '(;; Oracle (service name style)
+        ("prod-oracle" . (:backend oracle
+                           :host "db.corp.com" :port 1521
+                           :database "ORCL"           ; service name or SID
+                           :user "scott" :pass-entry "prod-oracle"))
+
+        ;; Oracle (full JDBC URL override — SID style, or RAC)
+        ("prod-oracle-sid" . (:backend oracle
+                               :url "jdbc:oracle:thin:@db.corp.com:1521:ORCL"
+                               :user "scott" :pass-entry "prod-oracle"))
+
+        ;; Microsoft SQL Server
+        ("prod-mssql" . (:backend sqlserver
+                          :host "sqlserver.corp.com" :port 1433
+                          :database "AdventureWorks"
+                          :user "sa" :pass-entry "prod-mssql"))
+
+        ;; Amazon Redshift
+        ("prod-redshift" . (:backend redshift
+                             :host "cluster.abc123.us-east-1.redshift.amazonaws.com"
+                             :port 5439 :database "analytics"
+                             :user "awsuser" :pass-entry "prod-redshift"))
+
+        ;; Snowflake
+        ("prod-snowflake" . (:backend snowflake
+                              :host "myorg-myaccount"  ; account identifier
+                              :database "MYDB"
+                              :user "myuser" :pass-entry "prod-snowflake"))
+
+        ;; Generic JDBC (custom URL)
+        ("clickhouse" . (:backend oracle          ; any registered driver symbol
+                          :url "jdbc:clickhouse://ch.corp.com:8123/default"
+                          :user "default" :password ""))))
+#+end_src
+
+JDBC connections use the same =:pass-entry= auth-source integration as other
+backends.  See [[*Password Management]] for details.
+
+*** Oracle-specific Notes
+
+- Schema is automatically set to the uppercase username (Oracle convention).
+- Pagination uses =ROWNUM= subquery, compatible with all Oracle versions (9i+).
+- CJK character sets (e.g. ZHS16GBK) require =orai18n.jar= in addition to =ojdbc11.jar=.
+- Oracle =DATE= columns include a time component; the agent always uses =getTimestamp()=
+  to avoid silent data loss.
+
+*** Additional JDBC Connection Properties
+
+Pass arbitrary JDBC connection properties via =:props=:
+
+#+begin_src emacs-lisp
+("mssql-encrypt" . (:backend sqlserver
+                     :host "sqlserver.corp.com" :port 1433
+                     :database "mydb" :user "sa" :password "secret"
+                     :props (("encrypt" . "true")
+                             ("trustServerCertificate" . "true"))))
+#+end_src
 
 ** Transient Menus
 
