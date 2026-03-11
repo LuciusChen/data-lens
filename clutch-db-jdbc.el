@@ -333,14 +333,14 @@ Returns a `clutch-jdbc-conn'."
 
 (defun clutch-jdbc--fetch-all (cursor-id)
   "Fetch all remaining rows for CURSOR-ID, returning a flat list of rows."
-  (let (all-rows done)
+  (let (batches done)
     (while (not done)
       (let ((result (clutch-jdbc--rpc "fetch"
                                       `((cursor-id  . ,cursor-id)
                                         (fetch-size . ,clutch-jdbc-fetch-size)))))
-        (setq all-rows (nconc all-rows (plist-get result :rows)))
+        (push (plist-get result :rows) batches)
         (setq done (eq t (plist-get result :done)))))
-    all-rows))
+    (apply #'nconc (nreverse batches))))
 
 (defun clutch-jdbc--type-category (jdbc-type-name)
   "Map a JDBC type name string to a clutch-db type-category symbol."

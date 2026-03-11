@@ -931,6 +931,60 @@
       (clutch--build-conn '(:backend sqlite :database ":memory:"))
       (should-not (plist-member captured :read-timeout)))))
 
+(ert-deftest clutch-test-tables-in-buffer-caches-until-buffer-changes ()
+  "Table lookup in the buffer should reuse cached results until text changes."
+  (with-temp-buffer
+    (insert "SELECT * FROM users")
+    (let ((schema (make-hash-table :test 'equal))
+          (calls 0)
+          (orig-string-match-p (symbol-function 'string-match-p)))
+      (puthash "users" t schema)
+      (puthash "posts" t schema)
+      (cl-letf (((symbol-function 'string-match-p)
+                 (lambda (regexp string &optional start)
+                   (cl-incf calls)
+                   (funcall orig-string-match-p regexp string start))))
+        (should (equal (clutch--tables-in-buffer schema) '("users")))
+        (should (= calls 2))
+        (should (equal (clutch--tables-in-buffer schema) '("users")))
+        (should (= calls 2))
+        (goto-char (point-max))
+        (insert " JOIN posts")
+        (should (equal (clutch--tables-in-buffer schema) '("users" "posts")))
+        (should (= calls 4))))))
+
+(ert-deftest clutch-test-goto-cell-uses-row-start-positions ()
+  "Cell navigation should use cached row starts when available."
+  (with-temp-buffer
+    (insert "row0\nrow1\n")
+    (let* ((row0 (point-min))
+           (row1 (save-excursion
+                   (goto-char (point-min))
+                   (forward-line 1)
+                   (point)))
+           (clutch--row-start-positions (vector row0 row1)))
+      (add-text-properties (+ row0 1) (+ row0 2)
+                           '(clutch-row-idx 0 clutch-col-idx 0))
+      (add-text-properties (+ row1 2) (+ row1 3)
+                           '(clutch-row-idx 1 clutch-col-idx 7))
+      (clutch--goto-cell 1 7)
+      (should (= (point) (+ row1 2))))))
+
+(ert-deftest clutch-test-goto-cell-falls-back-to-first-cell-in-row ()
+  "Cell navigation should fall back to the first cell on the target row."
+  (with-temp-buffer
+    (insert "row0\nrow1\n")
+    (let* ((row0 (point-min))
+           (row1 (save-excursion
+                   (goto-char (point-min))
+                   (forward-line 1)
+                   (point)))
+           (clutch--row-start-positions (vector row0 row1)))
+      (add-text-properties (+ row1 3) (+ row1 4)
+                           '(clutch-row-idx 1 clutch-col-idx 2))
+      (clutch--goto-cell 1 99)
+      (should (= (point) (+ row1 3))))))
+
 (ert-deftest clutch-test-parse-error-position-supports-pg-and-oracle ()
   "Error position parsing should handle PG and Oracle/JDBC formats."
   (should (= 17 (clutch--parse-error-position "syntax error (position 17)")))

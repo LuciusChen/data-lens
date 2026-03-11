@@ -23,6 +23,7 @@
 
 (require 'ert)
 (require 'clutch-db)
+(require 'clutch-db-jdbc)
 
 ;;;; Test configuration
 
@@ -69,6 +70,18 @@
     (should (null (clutch-db-result-rows result)))
     (should (= (clutch-db-result-affected-rows result) 0))
     (should (null (clutch-db-result-last-insert-id result)))))
+
+(ert-deftest clutch-db-test-jdbc-fetch-all-preserves-row-order ()
+  "JDBC fetch-all should preserve batch order while avoiding repeated tail scans."
+  (let ((batches '((:rows ((3) (4)) :done nil)
+                   (:rows ((5)) :done t))))
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params)
+                 (should (equal op "fetch"))
+                 (should (= (alist-get 'cursor-id params) 9))
+                 (pop batches))))
+      (should (equal (clutch-jdbc--fetch-all 9)
+                     '((3) (4) (5)))))))
 
 ;;;; Unit tests — backend registry
 

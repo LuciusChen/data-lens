@@ -252,6 +252,12 @@ Used to update the mode-line with a spinner during execution.")
 (defvar-local clutch--error-banner-overlay nil
   "Overlay showing the last SQL execution error banner, or nil.")
 
+(defvar-local clutch--tables-in-buffer-cache nil
+  "Cached result for `clutch--tables-in-buffer' in the current buffer.")
+
+(defvar-local clutch--row-start-positions nil
+  "Vector mapping rendered row indices to their line start positions.")
+
 (defvar clutch--source-window nil
   "Window that initiated the current query execution.
 Dynamically bound by `clutch--execute' so result buffers open
@@ -1274,11 +1280,12 @@ EDGE-FN applies column-page edge indicators."
     (concat rn data-edged)))
 
 (defun clutch--insert-data-rows (rows visible-cols widths nw
-                                         global-first-row edge-fn)
+                                      global-first-row edge-fn row-positions)
   "Insert data ROWS into the current buffer.
 VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
 GLOBAL-FIRST-ROW is the 0-based offset for numbering.
-EDGE-FN applies column-page edge indicators."
+EDGE-FN applies column-page edge indicators.
+ROW-POSITIONS stores line starts keyed by rendered row index."
   (let ((bface 'clutch-border-face)
         (pad-str (make-string clutch-column-padding ?\s))
         (marked clutch--marked-rows)
@@ -1286,6 +1293,7 @@ EDGE-FN applies column-page edge indicators."
         (pk-indices clutch--cached-pk-indices))
     (cl-loop for row in rows
              for ridx from 0
+             do (aset row-positions ridx (point))
              for deletingp = (clutch--row-pending-delete-p row pk-indices pending-del)
              for data-row = (let ((r (funcall edge-fn
                                               (clutch--render-row
@@ -1309,15 +1317,17 @@ EDGE-FN applies column-page edge indicators."
                         pad-str
                         data-row "\n"))))
 
-(defun clutch--insert-pending-insert-rows (visible-cols widths nw nrows)
+(defun clutch--insert-pending-insert-rows (visible-cols widths nw nrows row-positions)
   "Append ghost rows for pending inserts below the real data rows.
 VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
-NROWS is the count of real rows (used to compute ghost row indices)."
+NROWS is the count of real rows (used to compute ghost row indices).
+ROW-POSITIONS stores line starts keyed by rendered row index."
   (let ((bface 'clutch-border-face)
         (pad-str (make-string clutch-column-padding ?\s)))
     (cl-loop for fields in clutch--pending-inserts
              for iidx from 0
              for ridx = (+ nrows iidx)
+             do (aset row-positions ridx (point))
              for row = (mapcar (lambda (col) (cdr (assoc col fields)))
                                clutch--result-columns)
              for data-row = (propertize
@@ -1383,13 +1393,19 @@ Preserves point position (row + column) across the render."
          (has-next (< cur-page (1- col-num-pages)))
          (edge-fn (lambda (s) (clutch--replace-edge-borders s has-prev has-next)))
          (nw (clutch--row-number-digits))
+         (row-positions (make-vector (+ (length rows)
+                                        (length clutch--pending-inserts))
+                                     nil))
          (global-first-row (* clutch--page-current clutch-result-max-rows)))
     (erase-buffer)
+    (setq clutch--row-start-positions row-positions)
     (clutch--update-result-line-formats rows col-num-pages cur-page
                                         has-prev has-next visible-cols widths nw)
     (clutch--render-pending-changes-header)
-    (clutch--insert-data-rows rows visible-cols widths nw global-first-row edge-fn)
-    (clutch--insert-pending-insert-rows visible-cols widths nw (length rows))
+    (clutch--insert-data-rows rows visible-cols widths nw global-first-row edge-fn
+                              row-positions)
+    (clutch--insert-pending-insert-rows visible-cols widths nw (length rows)
+                                        row-positions)
     (if save-ridx
         (clutch--goto-cell save-ridx save-cidx)
       (goto-char (point-min)))))
@@ -1401,21 +1417,36 @@ Preserves point position (row + column) across the render."
 (defun clutch--goto-cell (ridx cidx)
   "Move point to the cell at ROW-IDX RIDX and COL-IDX CIDX.
 Falls back to the same row (any column), then point-min."
-  (goto-char (point-min))
-  (let ((found nil))
-    (while (and (not found)
-                (setq found (text-property-search-forward
-                             'clutch-row-idx ridx #'eq)))
-      (let ((beg (prop-match-beginning found)))
-        (if (eq (get-text-property beg 'clutch-col-idx) cidx)
-            (goto-char beg)
-          (setq found nil))))
-    (unless found
-      ;; Fall back: find the same row, any column
+  (let* ((line-pos (and (vectorp clutch--row-start-positions)
+                        (integerp ridx)
+                        (<= 0 ridx)
+                        (< ridx (length clutch--row-start-positions))
+                        (aref clutch--row-start-positions ridx)))
+         found)
+    (if line-pos
+        (progn
+          (goto-char line-pos)
+          (let ((eol (line-end-position)))
+            (setq found
+                  (or (and cidx (text-property-any (point) eol 'clutch-col-idx cidx))
+                      (text-property-not-all (point) eol 'clutch-col-idx nil)))
+            (if found
+                (goto-char found)
+              (goto-char (point-min)))))
       (goto-char (point-min))
-      (if-let* ((m (text-property-search-forward 'clutch-row-idx ridx #'eq)))
-          (goto-char (prop-match-beginning m))
-        (goto-char (point-min))))))
+      (while (and (not found)
+                  (setq found (text-property-search-forward
+                               'clutch-row-idx ridx #'eq)))
+        (let ((beg (prop-match-beginning found)))
+          (if (eq (get-text-property beg 'clutch-col-idx) cidx)
+              (goto-char beg)
+            (setq found nil))))
+      (unless found
+        ;; Fall back: find the same row, any column
+        (goto-char (point-min))
+        (if-let* ((m (text-property-search-forward 'clutch-row-idx ridx #'eq)))
+            (goto-char (prop-match-beginning m))
+          (goto-char (point-min)))))))
 
 (defun clutch--row-number-digits ()
   "Return the digit width needed for row numbers."
@@ -2374,10 +2405,21 @@ Returns a string or nil."
 
 (defun clutch--tables-in-buffer (schema)
   "Return table names from SCHEMA that appear in the current buffer."
-  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-    (cl-loop for tbl in (hash-table-keys schema)
-             when (string-match-p (regexp-quote tbl) text)
-             collect tbl)))
+  (let ((tick (buffer-chars-modified-tick)))
+    (if (and clutch--tables-in-buffer-cache
+             (eq (plist-get clutch--tables-in-buffer-cache :schema) schema)
+             (= (plist-get clutch--tables-in-buffer-cache :tick) tick))
+        (plist-get clutch--tables-in-buffer-cache :tables)
+      (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+            tables)
+        (maphash (lambda (tbl _cols)
+                   (when (string-match-p (regexp-quote tbl) text)
+                     (push tbl tables)))
+                 schema)
+        (setq tables (nreverse tables))
+        (setq clutch--tables-in-buffer-cache
+              (list :schema schema :tick tick :tables tables))
+        tables))))
 
 (defun clutch--tables-in-query (schema)
   "Return known table names in FROM/JOIN/UPDATE clauses of current statement.
