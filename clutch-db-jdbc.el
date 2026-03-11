@@ -49,7 +49,7 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.1.0"
+(defcustom clutch-jdbc-agent-version "0.1.1"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
