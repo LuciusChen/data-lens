@@ -246,6 +246,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | Key            | Action                                        |
 |----------------+-----------------------------------------------|
 | =RET=          | Open record view                              |
+| =TAB= / =S-TAB= | Next cell / previous cell                   |
 | =n= / =p=     | Next row / previous row (same column)         |
 | =N= / =P=     | Next page / previous page (SQL pagination)    |
 | =M->= / =M-<= | Last page / first page                       |
@@ -283,7 +284,7 @@ Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
 The copy transient (=c=) offers a =-r= switch for *refine mode*.  With an
 active region, enabling =-r= before choosing a format lets you interactively
 exclude rows or columns before the copy is performed.  The tab-line at the top
-of the result buffer is replaced with a colour-coded hint for the duration of
+of the result buffer is replaced with a color-coded hint for the duration of
 the session.
 
 #+begin_example
@@ -538,8 +539,9 @@ Oracle users on CJK character sets also need =orai18n.jar=:
                               :database "MYDB"
                               :user "myuser" :pass-entry "prod-snowflake"))
 
-        ;; Generic JDBC (custom URL)
-        ("clickhouse" . (:backend oracle          ; any registered driver symbol
+        ;; Generic JDBC (any database with a JDBC driver jar in drivers/)
+        ;; Use :url to bypass URL construction; pick any registered JDBC symbol as :backend.
+        ("clickhouse" . (:backend sqlserver
                           :url "jdbc:clickhouse://ch.corp.com:8123/default"
                           :user "default" :password ""))))
 #+end_src
@@ -637,10 +639,28 @@ Generic form with explicit backend — required for JDBC databases:
 : #+end_src
 
 Compatibility entry files:
-- =ob-mysql.el=, =ob-postgresql.el=, =ob-sqlite.el= are thin language entry points.
-- Core execution logic lives in =ob-clutch.el=.
+- =ob-mysql.el=, =ob-postgresql.el=, =ob-sqlite.el= — thin language entry points for the named block types.
+- =ob-clutch.el= — core execution logic; also registers the generic =clutch= block type.
 
 =C-c C-c= executes the source block; results are inserted as an org table.
+
+*** Header Arguments
+
+| Argument       | Description                                                         |
+|----------------+---------------------------------------------------------------------|
+| =:connection=  | Name from =clutch-connection-alist= (overrides all inline params)   |
+| =:backend=     | =mysql=, =pg=, =sqlite=, =oracle=, =sqlserver=, =redshift=, etc.    |
+| =:host=        | Database host (default: =127.0.0.1=)                                |
+| =:port=        | Database port (omit to use driver default)                          |
+| =:user=        | Database user                                                       |
+| =:database=    | Database name or file path (SQLite)                                 |
+| =:pass-entry=  | auth-source entry name for password lookup                          |
+
+*** Connection Caching
+
+Connections are cached by parameter hash and reused across source block
+evaluations in the same Emacs session.  All cached connections are cleanly
+disconnected when Emacs exits (via =kill-emacs-hook=).
 
 ** Query Timeout and Interrupt
 
@@ -801,64 +821,6 @@ To trust private/internal CAs, configure:
   (pg-query conn "INSERT INTO users (name) VALUES ('alice')")
   (pg-query conn "INSERT INTO users (name) VALUES ('bob')"))
 #+end_src
-
-* Org-Babel Integration
-
-=ob-clutch.el= provides Org-Babel source block execution for MySQL, PostgreSQL,
-and SQLite.  Results are returned as Org tables.
-
-** Activation
-
-#+begin_src emacs-lisp
-;; Load the integration (adds handlers for mysql, postgresql, sqlite blocks)
-(require 'ob-clutch)
-#+end_src
-
-Alternatively the per-language shims can be loaded individually:
-=ob-clutch-mysql.el=, =ob-clutch-pg.el=, =ob-clutch-sqlite.el=.
-
-** Header Arguments
-
-| Argument       | Description                                      |
-|----------------+--------------------------------------------------|
-| =:backend=     | Database backend: =mysql=, =pg=, or =sqlite=     |
-| =:host=        | Database host (default: =127.0.0.1=)             |
-| =:port=        | Database port (default: backend default)         |
-| =:user=        | Database user                                    |
-| =:database=    | Database name                                    |
-| =:pass-entry=  | auth-source entry name for password lookup       |
-
-** Example Source Blocks
-
-MySQL:
-
-#+begin_src org
-,#+begin_src mysql :host 127.0.0.1 :user root :database mydb :pass-entry mydb-root
-SELECT id, name, created_at FROM users LIMIT 5;
-,#+end_src
-#+end_src
-
-PostgreSQL:
-
-#+begin_src org
-,#+begin_src postgresql :host 127.0.0.1 :user postgres :database mydb :pass-entry mydb-pg
-SELECT schemaname, tablename FROM pg_tables WHERE schemaname = 'public';
-,#+end_src
-#+end_src
-
-SQLite:
-
-#+begin_src org
-,#+begin_src sqlite :database /path/to/mydb.sqlite
-SELECT name, sql FROM sqlite_master WHERE type = 'table';
-,#+end_src
-#+end_src
-
-** Connection Caching
-
-Connections are cached by parameter hash and reused across source block
-evaluations in the same Emacs session.  All cached connections are cleanly
-disconnected when Emacs exits (via =kill-emacs-hook=).
 
 * Testing
 
