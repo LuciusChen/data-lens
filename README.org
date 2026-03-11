@@ -516,9 +516,10 @@ Oracle users on CJK character sets also need =orai18n.jar=:
                            :database "ORCL"           ; service name or SID
                            :user "scott" :pass-entry "prod-oracle"))
 
-        ;; Oracle (full JDBC URL override — SID style, or RAC)
+        ;; Oracle (SID style — use :sid instead of :database)
         ("prod-oracle-sid" . (:backend oracle
-                               :url "jdbc:oracle:thin:@db.corp.com:1521:ORCL"
+                               :host "db.corp.com" :port 1521
+                               :sid "ORCL"
                                :user "scott" :pass-entry "prod-oracle"))
 
         ;; Microsoft SQL Server
@@ -551,6 +552,10 @@ backends.  See [[*Password Management]] for details.
 
 *** Oracle-specific Notes
 
+- *SID vs service name*: use =:sid "MYSID"= for SID-style connections
+  (=@host:port:SID=); use =:database "myservice"= for service name style
+  (=@//host:port/service=).  Mixing them up causes the connection to hang.
+  When in doubt, check with your DBA or use =:url= for full control.
 - Schema is automatically set to the uppercase username (Oracle convention).
 - Pagination uses =ROWNUM= subquery, compatible with all Oracle versions (9i+).
 - CJK character sets (e.g. ZHS16GBK) require =orai18n.jar= in addition to =ojdbc11.jar=.

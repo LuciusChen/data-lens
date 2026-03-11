@@ -223,15 +223,20 @@ Signals `clutch-db-error' on agent-reported errors."
 (defun clutch-jdbc--build-url (driver params)
   "Build a JDBC URL for DRIVER using connection PARAMS plist.
 If :url is present in PARAMS it is used as-is (allows full override).
-Otherwise constructs a URL from :host, :port, and :database."
+Otherwise constructs a URL from :host, :port, and :database (service name)
+or :sid (Oracle SID-style connection)."
   (or (plist-get params :url)
       (let ((host     (or (plist-get params :host) "localhost"))
             (port     (plist-get params :port))
-            (database (plist-get params :database)))
+            (database (plist-get params :database))
+            (sid      (plist-get params :sid)))
         (pcase driver
           ('oracle
-           (format "jdbc:oracle:thin:@//%s:%d/%s"
-                   host (or port 1521) database))
+           (if sid
+               (format "jdbc:oracle:thin:@%s:%d:%s"
+                       host (or port 1521) sid)
+             (format "jdbc:oracle:thin:@//%s:%d/%s"
+                     host (or port 1521) database)))
           ('sqlserver
            (format "jdbc:sqlserver://%s:%d;databaseName=%s"
                    host (or port 1433) database))
