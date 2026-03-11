@@ -72,6 +72,14 @@ Examples:
   :type 'natnum
   :group 'clutch-jdbc)
 
+(defcustom clutch-jdbc-query-timeout 30
+  "Per-statement query timeout in seconds (passed to JDBC setQueryTimeout).
+0 means no timeout.  When a query exceeds this limit the agent returns an
+error rather than hanging indefinitely.  Increase for known long-running
+queries or set to 0 to disable."
+  :type 'natnum
+  :group 'clutch-jdbc)
+
 (defcustom clutch-jdbc-rpc-timeout 30
   "Seconds to wait for a response from the agent before giving up."
   :type 'natnum
@@ -370,9 +378,10 @@ Blob plists with :text content become plain strings."
       (condition-case err
           (let* ((result (clutch-jdbc--rpc
                           "execute"
-                          `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
-                            (sql        . ,sql)
-                            (fetch-size . ,clutch-jdbc-fetch-size))))
+                          `((conn-id       . ,(clutch-jdbc-conn-conn-id conn))
+                            (sql           . ,sql)
+                            (fetch-size    . ,clutch-jdbc-fetch-size)
+                            (query-timeout . ,clutch-jdbc-query-timeout))))
                  (type   (plist-get result :type)))
             (if (equal type "dml")
                 ;; DML: no rows, just affected-rows.
