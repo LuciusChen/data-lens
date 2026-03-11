@@ -94,6 +94,13 @@ START defaults to 0."
   "Perform post-connect initialization on CONN.
 For example, SET NAMES utf8mb4 on MySQL.")
 
+(cl-defgeneric clutch-db-eager-schema-refresh-p (conn)
+  "Return non-nil when CONN should refresh schema synchronously on connect.")
+
+(cl-defmethod clutch-db-eager-schema-refresh-p ((_conn t))
+  "Most backends refresh schema immediately after connect."
+  t)
+
 ;; Query
 
 (cl-defgeneric clutch-db-query (conn sql)

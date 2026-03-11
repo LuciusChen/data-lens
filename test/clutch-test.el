@@ -931,6 +931,81 @@
       (clutch--build-conn '(:backend sqlite :database ":memory:"))
       (should-not (plist-member captured :read-timeout)))))
 
+(ert-deftest clutch-test-parse-error-position-supports-pg-and-oracle ()
+  "Error position parsing should handle PG and Oracle/JDBC formats."
+  (should (= 17 (clutch--parse-error-position "syntax error (position 17)")))
+  (should (= 12 (clutch--parse-error-position
+                 "ORA-06550: line 2, column 3:"
+                 "SELECT 1\nFROM dual"))))
+
+(ert-deftest clutch-test-mark-sql-error-falls-back-to-statement-region ()
+  "Errors without a character position should still mark the statement."
+  (with-temp-buffer
+    (insert "SELECT missing_col FROM dual")
+    (let ((clutch--executing-sql-start (point-min))
+          (clutch--executing-sql-end (point-max)))
+      (clutch--mark-sql-error
+       (current-buffer)
+       (buffer-string)
+       "ORA-00904: \"MISSING_COL\": invalid identifier")
+      (should (overlayp clutch--error-position-overlay))
+      (should (= (overlay-start clutch--error-position-overlay) (point-min)))
+      (should (= (overlay-end clutch--error-position-overlay) (point-max))))))
+
+(ert-deftest clutch-test-mark-sql-error-uses-oracle-line-column ()
+  "Oracle line/column errors should mark the reported character."
+  (with-temp-buffer
+    (insert "SELECT 1\nFROM dual")
+    (let ((clutch--executing-sql-start (point-min))
+          (clutch--executing-sql-end (point-max)))
+      (clutch--mark-sql-error
+       (current-buffer)
+       (buffer-string)
+       "ORA-06550: line 2, column 3:")
+      (should (overlayp clutch--error-position-overlay))
+      (should (= (overlay-start clutch--error-position-overlay) 12))
+      (should (= (overlay-end clutch--error-position-overlay) 13)))))
+
+(ert-deftest clutch-test-mark-sql-error-banner-works-on-first-line ()
+  "The error banner should render above SQL that starts on the first line."
+  (with-temp-buffer
+    (insert "SELECT missing_col FROM dual")
+    (let ((clutch--executing-sql-start (point-min))
+          (clutch--executing-sql-end (point-max)))
+      (clutch--mark-sql-error
+       (current-buffer)
+       (buffer-string)
+       "ORA-00904: invalid identifier")
+      (should (overlayp clutch--error-banner-overlay))
+      (should (= (overlay-start clutch--error-banner-overlay) (point-min)))
+      (should (string-match-p
+               "SQL error: ORA-00904: invalid identifier"
+               (overlay-get clutch--error-banner-overlay 'before-string))))))
+
+(ert-deftest clutch-test-mark-sql-error-banner-anchors-to-statement-line ()
+  "The error banner should appear above the statement line, not mid-line."
+  (with-temp-buffer
+    (insert "-- heading\nSELECT 1; SELECT bad_col FROM dual")
+    (let ((clutch--executing-sql-start 20)
+          (clutch--executing-sql-end (point-max)))
+      (clutch--mark-sql-error
+       (current-buffer)
+       (buffer-substring-no-properties clutch--executing-sql-start clutch--executing-sql-end)
+       "ORA-00904: invalid identifier")
+      (should (overlayp clutch--error-banner-overlay))
+      (should (= (overlay-start clutch--error-banner-overlay) 12)))))
+
+(ert-deftest clutch-test-execute-and-mark-skips-success-overlay-on-error ()
+  "Failed execution should not mark SQL as successfully executed."
+  (with-temp-buffer
+    (insert "SELECT bad_col FROM dual")
+    (let ((marked nil))
+      (cl-letf (((symbol-function 'clutch--execute) (lambda (&rest _) nil))
+                ((symbol-function 'clutch--mark-executed-sql-region)
+                 (lambda (&rest _) (setq marked t))))
+        (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
+        (should-not marked)))))
+
 (ert-deftest clutch-test-execute-quit-disconnects-and-clears-connection ()
   "Test `clutch--execute' converts quit into recoverable interruption."
   (let ((disconnected nil)

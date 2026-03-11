@@ -137,6 +137,15 @@ Underlined to indicate clickable (RET to follow)."
   "Face for the character at the SQL error position."
   :group 'clutch)
 
+(defface clutch-error-banner-face
+  '((((class color) (background light))
+     :background "#fee2e2" :foreground "#991b1b" :extend t)
+    (((class color) (background dark))
+     :background "#451a1a" :foreground "#fecaca" :extend t)
+    (t :inherit error))
+  "Face for the inline SQL execution error banner."
+  :group 'clutch)
+
 (defcustom clutch-connection-alist nil
   "Alist of saved database connections.
 Each entry has the form:
@@ -240,6 +249,9 @@ Used to update the mode-line with a spinner during execution.")
 (defvar-local clutch--error-position-overlay nil
   "Overlay marking the error position in the last failed query, or nil.")
 
+(defvar-local clutch--error-banner-overlay nil
+  "Overlay showing the last SQL execution error banner, or nil.")
+
 (defvar clutch--source-window nil
   "Window that initiated the current query execution.
 Dynamically bound by `clutch--execute' so result buffers open
@@ -247,6 +259,10 @@ adjacent to the correct console window.")
 
 (defvar clutch--executing-sql-start nil
   "Buffer position where the currently executing SQL begins, or nil.
+Dynamically bound by `clutch--execute-and-mark'.")
+
+(defvar clutch--executing-sql-end nil
+  "Buffer position where the currently executing SQL ends, or nil.
 Dynamically bound by `clutch--execute-and-mark'.")
 
 (defvar-local clutch--conn-sql-product nil
@@ -579,7 +595,8 @@ params; see `clutch-connection-alist' for details."
           clutch--connection-params params
           clutch--conn-sql-product product)
     (clutch--update-mode-line)
-    (clutch--refresh-schema-cache conn)
+    (when (clutch-db-eager-schema-refresh-p conn)
+      (clutch--refresh-schema-cache conn))
     (message "Connected to %s" (clutch--connection-key conn))))
 
 (defun clutch-disconnect ()
@@ -637,7 +654,8 @@ window rather than replacing the current window."
               clutch--connection-params params
               clutch--conn-sql-product (plist-get params :sql-product))
         (clutch--update-mode-line)
-        (clutch--refresh-schema-cache conn)))))
+        (when (clutch-db-eager-schema-refresh-p conn)
+          (clutch--refresh-schema-cache conn))))))
 
 ;;;###autoload
 (defun clutch-switch-console ()
@@ -1713,11 +1731,9 @@ Returns the query result."
                      (clutch-db-query connection paged-sql)
                    (clutch-db-error
                     (let ((msg (error-message-string err)))
-                      (when-let* ((src-buf (window-buffer clutch--source-window))
-                                  (sql-start clutch--executing-sql-start)
-                                  (pos (clutch--parse-error-position msg)))
-                        (clutch--mark-error-position src-buf (+ sql-start (1- pos))))
-                      (user-error "Query error: %s" msg)))))
+                      (clutch--mark-sql-error (window-buffer clutch--source-window)
+                                              sql msg)
+                      (throw 'clutch--execution-aborted nil)))))
          (elapsed (- (float-time) start))
          (buf (get-buffer-create (clutch--result-buffer-name)))
          (columns (clutch-db-result-columns result))
@@ -1742,11 +1758,9 @@ Returns the query result."
                      (clutch-db-query connection sql)
                    (clutch-db-error
                     (let ((msg (error-message-string err)))
-                      (when-let* ((src-buf (window-buffer clutch--source-window))
-                                  (sql-start clutch--executing-sql-start)
-                                  (pos (clutch--parse-error-position msg)))
-                        (clutch--mark-error-position src-buf (+ sql-start (1- pos))))
-                      (user-error "Query error: %s" msg)))))
+                      (clutch--mark-sql-error (window-buffer clutch--source-window)
+                                              sql msg)
+                      (throw 'clutch--execution-aborted nil)))))
          (elapsed (- (float-time) start)))
     (clutch--display-result result sql elapsed)
     result))
@@ -1783,10 +1797,11 @@ Prompts for confirmation on destructive operations."
     (redisplay t)
     (unwind-protect
         (condition-case nil
-            (let ((clutch--source-window source-win))
-              (if (clutch--select-query-p sql)
-                  (clutch--execute-select sql connection)
-                (clutch--execute-dml sql connection)))
+            (catch 'clutch--execution-aborted
+              (let ((clutch--source-window source-win))
+                (if (clutch--select-query-p sql)
+                    (clutch--execute-select sql connection)
+                  (clutch--execute-dml sql connection))))
           (quit
            ;; A quit during network read can leave protocol state indeterminate.
            ;; Drop the connection so the next command reconnects cleanly.
@@ -1824,35 +1839,116 @@ Prompts for confirmation on destructive operations."
     (overlay-put clutch--executed-sql-overlay 'priority 1000)
     (overlay-put clutch--executed-sql-overlay 'evaporate t)))
 
-(defun clutch--parse-error-position (msg)
-  "Extract character position from error MSG string, or nil.
-Handles PG '(position N)' suffix appended by pg--error-fields-message."
-  (when (string-match "(position \\([0-9]+\\))" msg)
-    (string-to-number (match-string 1 msg))))
+(defun clutch--sql-line-column-to-position (sql line column)
+  "Return 1-based character position in SQL for LINE and COLUMN."
+  (when (and (stringp sql)
+             (integerp line) (> line 0)
+             (integerp column) (> column 0))
+    (with-temp-buffer
+      (insert sql)
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (move-to-column (1- column))
+      (1+ (- (point) (point-min))))))
+
+(defun clutch--parse-error-position (msg &optional sql)
+  "Extract a 1-based character position from error MSG, or nil.
+Handles PG '(position N)' suffix and Oracle-style 'line N, column M'."
+  (let ((case-fold-search t))
+    (or
+     (when (string-match "(position \\([0-9]+\\))" msg)
+       (string-to-number (match-string 1 msg)))
+     (when (and sql
+                (string-match "\\bline \\([0-9]+\\), column \\([0-9]+\\)\\b" msg))
+       (clutch--sql-line-column-to-position
+        sql
+        (string-to-number (match-string 1 msg))
+        (string-to-number (match-string 2 msg)))))))
 
 (defun clutch--clear-error-position-overlay ()
-  "Remove the error-position overlay from the current buffer."
+  "Remove the error overlays from the current buffer."
   (when (overlayp clutch--error-position-overlay)
     (delete-overlay clutch--error-position-overlay)
-    (setq clutch--error-position-overlay nil)))
+    (setq clutch--error-position-overlay nil))
+  (when (overlayp clutch--error-banner-overlay)
+    (delete-overlay clutch--error-banner-overlay)
+    (setq clutch--error-banner-overlay nil)))
 
-(defun clutch--mark-error-position (buf pos)
-  "Place error-position overlay in BUF at POS (buffer position, 1-based)."
+(defun clutch--format-error-banner (msg)
+  "Return a compact single-line banner string for error MSG."
+  (let* ((summary (replace-regexp-in-string
+                   "[[:space:]\n\r]+"
+                   " "
+                   (string-trim (or msg ""))))
+         (text (if (string-empty-p summary)
+                   "SQL execution failed"
+                 (format "SQL error: %s" summary))))
+    (truncate-string-to-width text 160 0 nil "...")))
+
+(defun clutch--mark-error-banner (buf pos &optional msg)
+  "Place an inline error banner overlay in BUF above the line containing POS."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (overlayp clutch--error-banner-overlay)
+        (delete-overlay clutch--error-banner-overlay))
+      (save-excursion
+        (goto-char (max (point-min) (min pos (point-max))))
+        (let* ((bol (line-beginning-position))
+               (anchor-end (min (point-max) (1+ bol)))
+               (banner (concat
+                        (propertize (clutch--format-error-banner msg)
+                                    'face 'clutch-error-banner-face)
+                        "\n")))
+          (setq clutch--error-banner-overlay
+                (make-overlay bol anchor-end nil t nil))
+          (overlay-put clutch--error-banner-overlay 'before-string banner)
+          (overlay-put clutch--error-banner-overlay 'priority 1002)
+          (overlay-put clutch--error-banner-overlay 'evaporate t)
+          (when msg
+            (overlay-put clutch--error-banner-overlay 'help-echo msg)))))))
+
+(defun clutch--mark-error-region (buf beg end &optional msg)
+  "Place an error overlay in BUF from BEG to END.
+MSG, when non-nil, is attached as overlay help text."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (clutch--clear-error-position-overlay)
-      (when (and pos (< pos (point-max)))
+      (setq beg (max (point-min) beg))
+      (setq end (min (1+ (point-max)) end))
+      (when (< beg end)
         (setq clutch--error-position-overlay
-              (make-overlay pos (1+ pos)))
+              (make-overlay beg end))
         (overlay-put clutch--error-position-overlay 'face 'clutch-error-position-face)
         (overlay-put clutch--error-position-overlay 'priority 1001)
-        (overlay-put clutch--error-position-overlay 'evaporate t)))))
+        (overlay-put clutch--error-position-overlay 'evaporate t)
+        (when msg
+          (overlay-put clutch--error-position-overlay 'help-echo msg))
+        (clutch--mark-error-banner buf beg msg)))))
+
+(defun clutch--mark-error-position (buf pos &optional msg)
+  "Place an error overlay in BUF at POS (buffer position, 1-based)."
+  (clutch--mark-error-region buf pos (1+ pos) msg))
+
+(defun clutch--mark-sql-error (buf sql msg)
+  "Mark SQL execution failure in BUF using MSG.
+Prefers an exact error position; otherwise highlights the whole statement."
+  (when (buffer-live-p buf)
+    (if-let* ((sql-start clutch--executing-sql-start)
+              (pos (clutch--parse-error-position msg sql)))
+        (clutch--mark-error-position buf (+ sql-start (1- pos)) msg)
+      (when-let* ((sql-start clutch--executing-sql-start)
+                  (sql-end clutch--executing-sql-end))
+        (clutch--mark-error-region buf sql-start sql-end msg)))))
 
 (defun clutch--execute-and-mark (sql beg end &optional conn)
   "Execute SQL and mark BEG..END on success."
-  (let ((clutch--executing-sql-start beg))
-    (clutch--execute sql conn))
-  (clutch--mark-executed-sql-region beg end))
+  (pcase-let* ((`(,trim-beg . ,trim-end)
+                 (or (clutch--trim-sql-bounds beg end)
+                     (cons beg end))))
+    (when (let ((clutch--executing-sql-start trim-beg)
+                (clutch--executing-sql-end trim-end))
+            (clutch--execute sql conn))
+      (clutch--mark-executed-sql-region beg end))))
 
 ;;;; Query-at-point detection
 
@@ -2175,7 +2271,8 @@ Only loads table names (fast).  Column info is loaded lazily."
         (remhash key clutch--table-comment-cache)
         (remhash key clutch--help-doc-cache)
         (message "Connected — %d tables" (hash-table-count schema)))
-    (clutch-db-error nil)))
+    (clutch-db-error nil)
+    (error nil)))
 
 ;;;###autoload
 (defun clutch-refresh-schema ()

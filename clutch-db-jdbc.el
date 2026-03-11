@@ -72,14 +72,6 @@ Examples:
   :type 'natnum
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-query-timeout 30
-  "Per-statement query timeout in seconds (passed to JDBC setQueryTimeout).
-0 means no timeout.  When a query exceeds this limit the agent returns an
-error rather than hanging indefinitely.  Increase for known long-running
-queries or set to 0 to disable."
-  :type 'natnum
-  :group 'clutch-jdbc)
-
 (defcustom clutch-jdbc-rpc-timeout 30
   "Seconds to wait for a response from the agent before giving up."
   :type 'natnum
@@ -126,6 +118,9 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 
 (defvar clutch-jdbc--response-queue nil
   "List of JSON response strings received from the agent, oldest first.")
+
+(defconst clutch-jdbc--json-false (make-symbol "clutch-jdbc-json-false")
+  "Sentinel used to represent JSON false distinctly from nil.")
 
 (defun clutch-jdbc--agent-jar ()
   "Return the path to the clutch-jdbc-agent jar."
@@ -215,7 +210,7 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
                            (json-parse-string line :object-type 'plist
                                               :array-type 'list
                                               :null-object nil
-                                              :false-object :false)
+                                              :false-object clutch-jdbc--json-false)
                          (error nil))))
           (when (and parsed (eql (plist-get parsed :id) id))
             (setq response parsed))))
@@ -231,7 +226,7 @@ Signals `clutch-db-error' on agent-reported errors."
   (clutch-jdbc--ensure-agent)
   (let* ((id (clutch-jdbc--send op params))
          (response (clutch-jdbc--recv-response id)))
-    (if (plist-get response :ok)
+    (if (eq t (plist-get response :ok))
         (plist-get response :result)
       (signal 'clutch-db-error
               (list (or (plist-get response :error)
@@ -283,11 +278,14 @@ Returns a `clutch-jdbc-conn'."
          (user     (plist-get params :user))
          (password (plist-get params :password))
          (props    (plist-get params :props))
+         (timeout  (or (plist-get params :read-timeout)
+                       clutch-jdbc-rpc-timeout))
          (result   (clutch-jdbc--rpc
                     "connect"
                     `((url      . ,url)
                       (user     . ,user)
                       (password . ,password)
+                      (network-timeout-seconds . ,timeout)
                       ,@(when props `((props . ,props)))))))
     (make-clutch-jdbc-conn
      :process  clutch-jdbc--agent-process
@@ -327,6 +325,10 @@ Returns a `clutch-jdbc-conn'."
 (cl-defmethod clutch-db-init-connection ((_conn clutch-jdbc-conn))
   "No post-connect initialization needed for JDBC connections.")
 
+(cl-defmethod clutch-db-eager-schema-refresh-p ((conn clutch-jdbc-conn))
+  "Oracle JDBC schema enumeration is too slow to block connect."
+  (not (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)))
+
 ;;;; Query methods
 
 (defun clutch-jdbc--fetch-all (cursor-id)
@@ -337,7 +339,7 @@ Returns a `clutch-jdbc-conn'."
                                       `((cursor-id  . ,cursor-id)
                                         (fetch-size . ,clutch-jdbc-fetch-size)))))
         (setq all-rows (nconc all-rows (plist-get result :rows)))
-        (setq done (plist-get result :done))))
+        (setq done (eq t (plist-get result :done)))))
     all-rows))
 
 (defun clutch-jdbc--type-category (jdbc-type-name)
@@ -378,10 +380,9 @@ Blob plists with :text content become plain strings."
       (condition-case err
           (let* ((result (clutch-jdbc--rpc
                           "execute"
-                          `((conn-id       . ,(clutch-jdbc-conn-conn-id conn))
-                            (sql           . ,sql)
-                            (fetch-size    . ,clutch-jdbc-fetch-size)
-                            (query-timeout . ,clutch-jdbc-query-timeout))))
+                          `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
+                            (sql        . ,sql)
+                            (fetch-size . ,clutch-jdbc-fetch-size))))
                  (type   (plist-get result :type)))
             (if (equal type "dml")
                 ;; DML: no rows, just affected-rows.
@@ -391,7 +392,7 @@ Blob plists with :text content become plain strings."
               ;; SELECT: consume remaining pages, return full result.
               (let* ((first-rows  (plist-get result :rows))
                      (cursor-id   (plist-get result :cursor-id))
-                     (done        (plist-get result :done))
+                     (done        (eq t (plist-get result :done)))
                      (all-rows    (if done first-rows
                                     (nconc first-rows
                                            (clutch-jdbc--fetch-all cursor-id))))
