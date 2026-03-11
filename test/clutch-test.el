@@ -565,37 +565,37 @@
         (clutch-result-copy 'tsv)
         (should (equal (current-kill 0) "alice"))))))
 
-(ert-deftest clutch-test-copy-command-dispatches-to-csv ()
-  "Copy command should dispatch to CSV copier when csv is selected."
+(ert-deftest clutch-test-copy-csv-command-dispatches-to-csv ()
+  "CSV copy command should dispatch to the unified copy entry."
   (with-temp-buffer
     (let (called)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _args) "csv"))
-                ((symbol-function 'clutch-result-copy)
+      (cl-letf (((symbol-function 'clutch-result-copy)
                  (lambda (fmt &optional rect)
                    (setq called (list fmt rect)))))
-        (clutch-result-copy-command)
+        (clutch-result-copy-csv)
         (should (equal called '(csv nil)))))))
 
-(ert-deftest clutch-test-copy-command-defaults-to-tsv ()
-  "Copy command should default to TSV format."
+(ert-deftest clutch-test-copy-tsv-command-dispatches-to-tsv ()
+  "TSV copy command should dispatch to the unified copy entry."
   (with-temp-buffer
     (let (called)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _args) "tsv"))
-                ((symbol-function 'clutch-result-copy)
+      (cl-letf (((symbol-function 'clutch-result-copy)
                  (lambda (fmt &optional rect)
                    (setq called (list fmt rect)))))
-        (clutch-result-copy-command)
+        (clutch-result-copy-tsv)
         (should (equal called '(tsv nil)))))))
 
-(ert-deftest clutch-test-copy-command-with-prefix-refines-region-rectangle ()
-  "C-u copy should refine rectangle and pass it into copy dispatcher."
+(ert-deftest clutch-test-copy-fmt-with-refine-uses-refined-rectangle ()
+  "Refined copy should pass the final rectangle into the unified copy entry."
   (with-temp-buffer
     (let (called)
       (cl-letf (((symbol-function 'use-region-p) (lambda () t))
-                ((symbol-function 'completing-read)
-                 (lambda (&rest _args) "csv"))
+                ((symbol-function 'transient-args)
+                 (lambda (_prefix) '("--refine")))
+                ((symbol-function 'transient-arg-value)
+                 (lambda (flag args)
+                   (and (equal flag "--refine")
+                        (member "--refine" args))))
                 ((symbol-function 'clutch-result--region-rectangle-indices)
                  (lambda () '((0 1 2) . (1 2))))
                 ((symbol-function 'clutch-result--start-refine)
@@ -604,7 +604,7 @@
                 ((symbol-function 'clutch-result-copy)
                  (lambda (fmt &optional rect)
                    (setq called (list fmt rect)))))
-        (clutch-result-copy-command t)
+        (clutch-result--copy-fmt 'csv)
         (should (equal called '(csv ((0 2) . (2)))))))))
 
 (ert-deftest clutch-test-copy-csv-via-unified-entry-uses-region-rectangle ()
