@@ -106,11 +106,18 @@ Clone this repository and add it to your =load-path=
 (add-to-list 'load-path "/path/to/clutch")
 (require 'clutch)
 
+(setq clutch-connect-timeout-seconds 10
+      clutch-read-idle-timeout-seconds 30
+      clutch-query-timeout-seconds 20
+      clutch-jdbc-rpc-timeout-seconds 15)
+
 (setq clutch-connection-alist
       '(("dev-mysql"  . (:backend mysql
                           :host "127.0.0.1" :port 3306
                           :user "root" :password "test"
-                          :database "mydb"))
+                          :database "mydb"
+                          :connect-timeout 5
+                          :read-idle-timeout 60))
         ("dev-pg"     . (:backend pg
                           :host "127.0.0.1" :port 5432
                           :user "postgres" :password "test"
@@ -124,7 +131,9 @@ Omitting =:backend= defaults to =mysql=, but explicit is clearer.
 SQLite connections only require =:database= (the file path); no host, port, or user.
 Use =":memory:"= for a transient in-memory database (data is lost when disconnected).
 =:password= is optional for network backends — see [[*Password Management]] for auth-source integration.
-For MySQL/PostgreSQL, =:read-timeout= (seconds) can be set per connection entry.
+For networked backends, you can set =:connect-timeout= and
+=:read-idle-timeout= (seconds) per connection entry.  JDBC connections also
+accept =:query-timeout= and =:rpc-timeout=.
 TLS can be enabled per entry with =:tls t=; see backend TLS sections above for
 verification defaults and CA trustfile configuration.
 
@@ -514,7 +523,11 @@ Oracle users on CJK character sets also need =orai18n.jar=:
         ("prod-oracle" . (:backend oracle
                            :host "db.corp.com" :port 1521
                            :database "ORCL"           ; service name or SID
-                           :user "scott" :pass-entry "prod-oracle"))
+                           :user "scott" :pass-entry "prod-oracle"
+                           :connect-timeout 8
+                           :read-idle-timeout 30
+                           :query-timeout 20
+                           :rpc-timeout 25))
 
         ;; Oracle (SID style — use :sid instead of :database)
         ("prod-oracle-sid" . (:backend oracle
@@ -526,7 +539,9 @@ Oracle users on CJK character sets also need =orai18n.jar=:
         ("prod-mssql" . (:backend sqlserver
                           :host "sqlserver.corp.com" :port 1433
                           :database "AdventureWorks"
-                          :user "sa" :pass-entry "prod-mssql"))
+                          :user "sa" :pass-entry "prod-mssql"
+                          :connect-timeout 8
+                          :query-timeout 15))
 
         ;; Amazon Redshift
         ("prod-redshift" . (:backend redshift
@@ -544,7 +559,8 @@ Oracle users on CJK character sets also need =orai18n.jar=:
         ;; Use :url to bypass URL construction; pick any registered JDBC symbol as :backend.
         ("clickhouse" . (:backend sqlserver
                           :url "jdbc:clickhouse://ch.corp.com:8123/default"
-                          :user "default" :password ""))))
+                          :user "default" :password ""
+                          :rpc-timeout 10))))
 #+end_src
 
 JDBC connections use the same =:pass-entry= auth-source integration as other
@@ -673,8 +689,12 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
 
 ** Query Timeout and Interrupt
 
-- =clutch-query-timeout-seconds= controls query I/O idle timeout (default: 30s).
-- MySQL/PostgreSQL connections can override timeout via connection plist key =:read-timeout=.
+- =clutch-connect-timeout-seconds= controls connect timeout (default: 30s).
+- =clutch-read-idle-timeout-seconds= controls query I/O idle timeout (default: 30s).
+- =clutch-query-timeout-seconds= controls database-side statement timeout for JDBC queries (default: 30s).
+- =clutch-jdbc-rpc-timeout-seconds= controls Emacs <-> JDBC agent RPC timeout (default: 30s).
+- MySQL/PostgreSQL connections can override via =:connect-timeout= and =:read-idle-timeout=.
+- JDBC connections can also override via =:query-timeout= and =:rpc-timeout=.
 - During long-running queries, press =C-g= to interrupt.
   - clutch will drop the current connection to avoid protocol desync.
   - the next command auto-reconnects when saved connection params are available.

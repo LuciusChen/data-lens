@@ -151,7 +151,8 @@ Underlined to indicate clickable (RET to follow)."
 Each entry has the form:
   (NAME . (:host H :port P :user U [:password P] :database D
            [:backend SYM] [:sql-product SYM] [:pass-entry STR]
-           [:read-timeout N]))
+           [:connect-timeout N] [:read-idle-timeout N]
+           [:query-timeout N] [:rpc-timeout N]))
 NAME is a string used for `completing-read'.
 :backend is a symbol (\\='mysql, \\='pg, or \\='sqlite, default \\='mysql).
 :sql-product overrides `clutch-sql-product' for this connection.
@@ -174,7 +175,10 @@ Password resolution order:
                                     (:backend symbol)
                                     (:sql-product symbol)
                                     (:pass-entry string)
-                                    (:read-timeout natnum)
+                                    (:connect-timeout natnum)
+                                    (:read-idle-timeout natnum)
+                                    (:query-timeout natnum)
+                                    (:rpc-timeout natnum)
                                     (:tls boolean))))
   :group 'clutch)
 
@@ -220,9 +224,28 @@ Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
                  (symbol :tag "Other"))
   :group 'clutch)
 
-(defcustom clutch-query-timeout-seconds 30
+(defcustom clutch-connect-timeout-seconds 30
+  "Timeout in seconds for establishing a database connection.
+Applies to networked backends.  SQLite ignores this setting."
+  :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-read-idle-timeout-seconds 30
   "Idle timeout in seconds while waiting for query I/O.
-Applies to MySQL and PostgreSQL connections.  SQLite ignores this setting."
+Applies to MySQL, PostgreSQL, and JDBC network I/O.  SQLite ignores this
+setting."
+  :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-query-timeout-seconds 30
+  "Timeout in seconds for database-side query execution.
+Currently applied by the JDBC backend.  Native MySQL/PostgreSQL backends do
+not yet enforce a server-side statement timeout."
+  :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-jdbc-rpc-timeout-seconds 30
+  "Timeout in seconds for round-trips to the JDBC agent process."
   :type 'natnum
   :group 'clutch)
 
@@ -515,6 +538,49 @@ Returns nil when no matching entry is found or auth-source-pass is absent."
       (when entry
         (cdr (assq 'secret (auth-source-pass-parse-entry entry)))))))
 
+(defconst clutch--jdbc-backends
+  '(oracle sqlserver db2 snowflake redshift)
+  "Backends routed through the JDBC agent.")
+
+(defun clutch--jdbc-backend-p (backend)
+  "Return non-nil when BACKEND is handled by JDBC."
+  (memq backend clutch--jdbc-backends))
+
+(defun clutch--normalize-timeout-params (backend params)
+  "Return PARAMS with unified timeout defaults for BACKEND.
+Signals a `user-error' when removed timeout keys are present."
+  (when (plist-member params :read-timeout)
+    (user-error "Connection parameter :read-timeout was removed; use :read-idle-timeout"))
+  (let ((normalized (copy-sequence params)))
+    (cond
+     ((memq backend '(mysql pg))
+      (setq normalized
+            (plist-put normalized :connect-timeout
+                       (or (plist-get normalized :connect-timeout)
+                           clutch-connect-timeout-seconds)))
+      (setq normalized
+            (plist-put normalized :read-idle-timeout
+                       (or (plist-get normalized :read-idle-timeout)
+                           clutch-read-idle-timeout-seconds))))
+     ((clutch--jdbc-backend-p backend)
+      (setq normalized
+            (plist-put normalized :connect-timeout
+                       (or (plist-get normalized :connect-timeout)
+                           clutch-connect-timeout-seconds)))
+      (setq normalized
+            (plist-put normalized :read-idle-timeout
+                       (or (plist-get normalized :read-idle-timeout)
+                           clutch-read-idle-timeout-seconds)))
+      (setq normalized
+            (plist-put normalized :query-timeout
+                       (or (plist-get normalized :query-timeout)
+                           clutch-query-timeout-seconds)))
+      (setq normalized
+            (plist-put normalized :rpc-timeout
+                       (or (plist-get normalized :rpc-timeout)
+                           clutch-jdbc-rpc-timeout-seconds)))))
+    normalized))
+
 (defun clutch--resolve-password (params)
   "Return the password for connection PARAMS.
 Checks in order:
@@ -542,16 +608,13 @@ Returns nil when nothing is found (caller should prompt if needed)."
   "Connect to a database using PARAMS, resolving the password via auth-source.
 Returns a live connection object or signals a `user-error'."
   (let* ((backend  (or (plist-get params :backend) 'mysql))
+         (params   (clutch--normalize-timeout-params backend params))
          (password (clutch--resolve-password params))
          (db-params (cl-loop for (k v) on params by #'cddr
                              unless (memq k '(:sql-product :backend :password :pass-entry))
                              append (list k v)))
          (db-params (if password
                         (append db-params (list :password password))
-                      db-params))
-         (db-params (if (memq backend '(mysql pg))
-                        (append db-params
-                                (list :read-timeout clutch-query-timeout-seconds))
                       db-params)))
     (condition-case err
         (clutch-db-connect backend db-params)

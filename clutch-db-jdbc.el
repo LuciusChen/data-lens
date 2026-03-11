@@ -49,7 +49,7 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.1.1"
+(defcustom clutch-jdbc-agent-version "0.1.2"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
@@ -72,10 +72,8 @@ Examples:
   :type 'natnum
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-rpc-timeout 30
-  "Seconds to wait for a response from the agent before giving up."
-  :type 'natnum
-  :group 'clutch-jdbc)
+(defvar clutch-jdbc-rpc-timeout-seconds 30
+  "Seconds to wait for a response from the agent before giving up.")
 
 ;;;; Driver sources (for automatic installation from Maven Central)
 
@@ -198,9 +196,11 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
     (process-send-string clutch-jdbc--agent-process (concat msg "\n"))
     id))
 
-(defun clutch-jdbc--recv-response (id)
-  "Wait for and return the response with matching ID as a plist."
-  (let ((deadline (+ (float-time) clutch-jdbc-rpc-timeout))
+(defun clutch-jdbc--recv-response (id &optional timeout-seconds)
+  "Wait for and return the response with matching ID as a plist.
+TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'."
+  (let ((deadline (+ (float-time)
+                     (or timeout-seconds clutch-jdbc-rpc-timeout-seconds)))
         response)
     (while (and (not response) (< (float-time) deadline))
       ;; Drain any queued lines.
@@ -220,12 +220,12 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
       (error "clutch-jdbc-agent: timeout waiting for response to request %d" id))
     response))
 
-(defun clutch-jdbc--rpc (op params)
+(defun clutch-jdbc--rpc (op params &optional timeout-seconds)
   "Send OP with PARAMS to the agent and return the result plist.
 Signals `clutch-db-error' on agent-reported errors."
   (clutch-jdbc--ensure-agent)
   (let* ((id (clutch-jdbc--send op params))
-         (response (clutch-jdbc--recv-response id)))
+         (response (clutch-jdbc--recv-response id timeout-seconds)))
     (if (eq t (plist-get response :ok))
         (plist-get response :result)
       (signal 'clutch-db-error
@@ -278,15 +278,21 @@ Returns a `clutch-jdbc-conn'."
          (user     (plist-get params :user))
          (password (plist-get params :password))
          (props    (plist-get params :props))
-         (timeout  (or (plist-get params :read-timeout)
-                       clutch-jdbc-rpc-timeout))
+         (rpc-timeout (or (plist-get params :rpc-timeout)
+                          clutch-jdbc-rpc-timeout-seconds))
+         (connect-timeout (or (plist-get params :connect-timeout)
+                              rpc-timeout))
+         (read-idle-timeout (plist-get params :read-idle-timeout))
          (result   (clutch-jdbc--rpc
                     "connect"
                     `((url      . ,url)
                       (user     . ,user)
                       (password . ,password)
-                      (network-timeout-seconds . ,timeout)
-                      ,@(when props `((props . ,props)))))))
+                      (connect-timeout-seconds . ,connect-timeout)
+                      ,@(when read-idle-timeout
+                          `((network-timeout-seconds . ,read-idle-timeout)))
+                      ,@(when props `((props . ,props))))
+                    connect-timeout)))
     (make-clutch-jdbc-conn
      :process  clutch-jdbc--agent-process
      :conn-id  (plist-get result :conn-id)
@@ -331,13 +337,16 @@ Returns a `clutch-jdbc-conn'."
 
 ;;;; Query methods
 
-(defun clutch-jdbc--fetch-all (cursor-id)
-  "Fetch all remaining rows for CURSOR-ID, returning a flat list of rows."
-  (let (batches done)
+(defun clutch-jdbc--fetch-all (conn cursor-id)
+  "Fetch all remaining rows for CURSOR-ID on CONN, returning a flat list."
+  (let ((rpc-timeout (or (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
+                         clutch-jdbc-rpc-timeout-seconds))
+        batches done)
     (while (not done)
       (let ((result (clutch-jdbc--rpc "fetch"
                                       `((cursor-id  . ,cursor-id)
-                                        (fetch-size . ,clutch-jdbc-fetch-size)))))
+                                        (fetch-size . ,clutch-jdbc-fetch-size))
+                                      rpc-timeout)))
         (push (plist-get result :rows) batches)
         (setq done (eq t (plist-get result :done)))))
     (apply #'nconc (nreverse batches))))
@@ -378,11 +387,17 @@ Blob plists with :text content become plain strings."
   (setf (clutch-jdbc-conn-busy conn) t)
   (unwind-protect
       (condition-case err
-          (let* ((result (clutch-jdbc--rpc
+          (let* ((query-timeout (plist-get (clutch-jdbc-conn-params conn) :query-timeout))
+                 (rpc-timeout (or (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
+                                  clutch-jdbc-rpc-timeout-seconds))
+                 (result (clutch-jdbc--rpc
                           "execute"
                           `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
                             (sql        . ,sql)
-                            (fetch-size . ,clutch-jdbc-fetch-size))))
+                            (fetch-size . ,clutch-jdbc-fetch-size)
+                            ,@(when query-timeout
+                                `((query-timeout-seconds . ,query-timeout))))
+                          rpc-timeout))
                  (type   (plist-get result :type)))
             (if (equal type "dml")
                 ;; DML: no rows, just affected-rows.
@@ -395,7 +410,7 @@ Blob plists with :text content become plain strings."
                      (done        (eq t (plist-get result :done)))
                      (all-rows    (if done first-rows
                                     (nconc first-rows
-                                           (clutch-jdbc--fetch-all cursor-id))))
+                                           (clutch-jdbc--fetch-all conn cursor-id))))
                      (columns     (clutch-jdbc--make-columns
                                    (plist-get result :columns)
                                    (plist-get result :col-types))))

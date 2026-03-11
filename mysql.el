@@ -133,7 +133,7 @@
   capability-flags
   character-set
   status-flags
-  (read-timeout 10)
+  (read-idle-timeout 30)
   (sequence-id 0)
   (read-offset 0)
   tls
@@ -157,7 +157,7 @@ Waits for data, resetting the idle deadline on each arrival.
 Signals `mysql-timeout' or `mysql-connection-error' on failure."
   (let* ((proc (mysql-conn-process conn))
          (buf (mysql-conn-buf conn))
-         (timeout (mysql-conn-read-timeout conn))
+         (timeout (mysql-conn-read-idle-timeout conn))
          (deadline (+ (float-time) timeout)))
     (with-current-buffer buf
       (while (< (- (point-max) (+ (point-min) (mysql-conn-read-offset conn))) n)
@@ -723,38 +723,67 @@ PASSWORD is the plaintext password; TLS non-nil means upgrade to TLS first."
                         (mysql--build-handshake-response conn password salt auth-plugin))
     (mysql--handle-auth-response conn password salt auth-plugin)))
 
-(defun mysql--open-connection (host port)
+(defun mysql--wait-for-connect (proc host port connect-timeout)
+  "Wait for PROC to connect to HOST:PORT within CONNECT-TIMEOUT seconds."
+  (let ((deadline (and connect-timeout
+                       (+ (float-time) connect-timeout))))
+    (while (eq (process-status proc) 'connect)
+      (let ((remaining (if deadline
+                           (- deadline (float-time))
+                         0.05)))
+        (when (and deadline (<= remaining 0))
+          (delete-process proc)
+          (signal 'mysql-connection-error
+                  (list (format "Timed out connecting to %s:%s" host port))))
+        (accept-process-output proc (if deadline
+                                        (max 0.05 remaining)
+                                      0.05))))
+    (unless (memq (process-status proc) '(open run))
+      (signal 'mysql-connection-error
+              (list (format "Failed to connect to %s:%s" host port))))))
+
+(defun mysql--open-connection (host port &optional connect-timeout)
   "Open a raw TCP connection to HOST:PORT for MySQL.
 Returns (PROCESS . BUFFER)."
   (let ((buf (generate-new-buffer " *mysql-input*")))
     (with-current-buffer buf
       (set-buffer-multibyte nil))
-    (let ((proc (open-network-stream "mysql" buf host port
-                                     :type 'plain
-                                     :coding 'binary)))
+    (let ((proc (make-network-process :name "mysql"
+                                      :buffer buf
+                                      :host host
+                                      :service port
+                                      :nowait t
+                                      :type 'plain
+                                      :coding 'binary)))
       (set-process-coding-system proc 'binary 'binary)
       (set-process-filter proc
                           (lambda (_proc data)
                             (with-current-buffer buf
                               (goto-char (point-max))
                               (insert data))))
+      (mysql--wait-for-connect proc host port connect-timeout)
       (cons proc buf))))
 
-(cl-defun mysql-connect (&key (host "127.0.0.1") (port 3306) user password database tls)
+(cl-defun mysql-connect (&key (host "127.0.0.1") (port 3306) user password
+                                database tls (read-idle-timeout 30)
+                                (connect-timeout 30))
   "Connect to a MySQL server and authenticate.
 Returns a `mysql-conn' struct on success.
 
 HOST defaults to \"127.0.0.1\", PORT defaults to 3306.
 USER, PASSWORD, and DATABASE are strings (DATABASE is optional).
-When TLS is non-nil, upgrade the connection to TLS before authenticating."
+When TLS is non-nil, upgrade the connection to TLS before authenticating.
+READ-IDLE-TIMEOUT limits query I/O stalls.  CONNECT-TIMEOUT limits the initial
+TCP connection wait."
   (unless user
     (signal 'mysql-connection-error (list "No user specified")))
   (when (and tls (not (mysql--tls-available-p)))
     (signal 'mysql-connection-error (list "TLS requested but GnuTLS is not available")))
-  (pcase-let ((`(,proc . ,buf) (mysql--open-connection host port)))
+  (pcase-let ((`(,proc . ,buf) (mysql--open-connection host port connect-timeout)))
     (let ((conn (make-mysql-conn :process proc :buf buf
                                  :host host :port port
-                                 :user user :database database)))
+                                 :user user :database database
+                                 :read-idle-timeout read-idle-timeout)))
       (condition-case err
           (progn
             (mysql--authenticate conn password tls)

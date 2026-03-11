@@ -74,14 +74,61 @@
 (ert-deftest clutch-db-test-jdbc-fetch-all-preserves-row-order ()
   "JDBC fetch-all should preserve batch order while avoiding repeated tail scans."
   (let ((batches '((:rows ((3) (4)) :done nil)
-                   (:rows ((5)) :done t))))
+                   (:rows ((5)) :done t)))
+        (conn (make-clutch-jdbc-conn :params '(:rpc-timeout 9))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params)
+               (lambda (op params &optional timeout-seconds)
                  (should (equal op "fetch"))
                  (should (= (alist-get 'cursor-id params) 9))
+                 (should (= timeout-seconds 9))
                  (pop batches))))
-      (should (equal (clutch-jdbc--fetch-all 9)
+      (should (equal (clutch-jdbc--fetch-all conn 9)
                      '((3) (4) (5)))))))
+
+(ert-deftest clutch-db-test-jdbc-connect-maps-timeouts ()
+  "JDBC connect should map explicit timeout phases to the agent call."
+  (let (captured-op captured-params captured-timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional timeout-seconds)
+                 (setq captured-op op
+                       captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:conn-id 7))))
+      (let ((conn (clutch-db-jdbc-connect
+                   'oracle
+                   '(:host "db"
+                     :port 1521
+                     :database "svc"
+                     :user "scott"
+                     :password "tiger"
+                     :connect-timeout 11
+                     :read-idle-timeout 12
+                     :rpc-timeout 13))))
+        (should (equal captured-op "connect"))
+        (should (= captured-timeout 11))
+        (should (= (alist-get 'connect-timeout-seconds captured-params) 11))
+        (should (= (alist-get 'network-timeout-seconds captured-params) 12))
+        (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 13))
+        (should (= (clutch-jdbc-conn-conn-id conn) 7))))))
+
+(ert-deftest clutch-db-test-jdbc-query-maps-query-and-rpc-timeouts ()
+  "JDBC query should send query timeout separately from RPC timeout."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 4
+                                     :params '(:rpc-timeout 15
+                                               :query-timeout 16)))
+        captured-op captured-params captured-timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional timeout-seconds)
+                 (setq captured-op op
+                       captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:type "dml" :affected-rows 1))))
+      (let ((result (clutch-db-query conn "delete from t")))
+        (should (equal captured-op "execute"))
+        (should (= captured-timeout 15))
+        (should (= (alist-get 'query-timeout-seconds captured-params) 16))
+        (should (= (clutch-db-result-affected-rows result) 1))))))
 
 ;;;; Unit tests — backend registry
 

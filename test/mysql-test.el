@@ -385,7 +385,7 @@
                                :user "root" :database "test")))
     (should (equal (mysql-conn-host conn) "localhost"))
     (should (= (mysql-conn-port conn) 3306))
-    (should (= (mysql-conn-read-timeout conn) 10))
+    (should (= (mysql-conn-read-idle-timeout conn) 30))
     (should (= (mysql-conn-sequence-id conn) 0)))
   (let ((result (make-mysql-result :status "OK" :affected-rows 5)))
     (should (equal (mysql-result-status result) "OK"))

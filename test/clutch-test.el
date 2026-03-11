@@ -903,9 +903,10 @@
 
 ;;;; Unit tests — connection timeout / interruption handling
 
-(ert-deftest clutch-test-build-conn-includes-read-timeout-for-network-backends ()
-  "Test that `clutch--build-conn' passes :read-timeout to mysql/pg."
-  (let ((clutch-query-timeout-seconds 42)
+(ert-deftest clutch-test-build-conn-includes-native-timeouts-for-network-backends ()
+  "Test that `clutch--build-conn' passes timeout defaults to mysql/pg."
+  (let ((clutch-connect-timeout-seconds 11)
+        (clutch-read-idle-timeout-seconds 42)
         captured)
     (cl-letf (((symbol-function 'clutch--resolve-password)
                (lambda (_params) nil))
@@ -914,13 +915,35 @@
                  (setq captured params)
                  'fake-conn)))
       (clutch--build-conn '(:backend mysql :host "127.0.0.1" :port 3306 :user "u"))
-      (should (equal (plist-get captured :read-timeout) 42))
+      (should (equal (plist-get captured :connect-timeout) 11))
+      (should (equal (plist-get captured :read-idle-timeout) 42))
       (clutch--build-conn '(:backend pg :host "127.0.0.1" :port 5432 :user "u"))
-      (should (equal (plist-get captured :read-timeout) 42)))))
+      (should (equal (plist-get captured :connect-timeout) 11))
+      (should (equal (plist-get captured :read-idle-timeout) 42)))))
 
-(ert-deftest clutch-test-build-conn-skips-read-timeout-for-sqlite ()
-  "Test that `clutch--build-conn' does not pass :read-timeout to sqlite."
-  (let ((clutch-query-timeout-seconds 42)
+(ert-deftest clutch-test-build-conn-includes-jdbc-timeouts ()
+  "Test that `clutch--build-conn' passes timeout defaults to JDBC backends."
+  (let ((clutch-connect-timeout-seconds 11)
+        (clutch-read-idle-timeout-seconds 12)
+        (clutch-query-timeout-seconds 13)
+        (clutch-jdbc-rpc-timeout-seconds 14)
+        captured)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (_backend params)
+                 (setq captured params)
+                 'fake-conn)))
+      (clutch--build-conn '(:backend oracle :host "db" :port 1521 :user "u"))
+      (should (equal (plist-get captured :connect-timeout) 11))
+      (should (equal (plist-get captured :read-idle-timeout) 12))
+      (should (equal (plist-get captured :query-timeout) 13))
+      (should (equal (plist-get captured :rpc-timeout) 14)))))
+
+(ert-deftest clutch-test-build-conn-skips-timeouts-for-sqlite ()
+  "Test that `clutch--build-conn' does not pass network timeout keys to sqlite."
+  (let ((clutch-connect-timeout-seconds 11)
+        (clutch-read-idle-timeout-seconds 42)
         captured)
     (cl-letf (((symbol-function 'clutch--resolve-password)
                (lambda (_params) nil))
@@ -929,7 +952,17 @@
                  (setq captured params)
                  'fake-conn)))
       (clutch--build-conn '(:backend sqlite :database ":memory:"))
-      (should-not (plist-member captured :read-timeout)))))
+      (should-not (plist-member captured :connect-timeout))
+      (should-not (plist-member captured :read-idle-timeout))
+      (should-not (plist-member captured :query-timeout))
+      (should-not (plist-member captured :rpc-timeout)))))
+
+(ert-deftest clutch-test-build-conn-rejects-removed-read-timeout ()
+  "Test that removed timeout keys fail fast with a clear error."
+  (should-error
+   (clutch--build-conn '(:backend mysql :host "127.0.0.1" :port 3306
+                         :user "u" :read-timeout 5))
+   :type 'user-error))
 
 (ert-deftest clutch-test-tables-in-buffer-caches-until-buffer-changes ()
   "Table lookup in the buffer should reuse cached results until text changes."
@@ -1791,7 +1824,7 @@ Expected value verified with Python hashlib.pbkdf2_hmac."
   "Create a minimal mysql-conn with DATA pre-loaded in its buffer.
 Use `cl-letf' to bypass `mysql--ensure-data' in tests."
   (let* ((buf (generate-new-buffer " *clutch-test-mysql*"))
-         (conn (make-mysql-conn :buf buf :host "test" :read-timeout 1)))
+         (conn (make-mysql-conn :buf buf :host "test" :read-idle-timeout 1)))
     (with-current-buffer buf
       (set-buffer-multibyte nil)
       (insert data))
@@ -1865,7 +1898,7 @@ Use `cl-letf' to bypass `mysql--ensure-data' in tests."
 (defun clutch-test--make-pg-conn-with-data (data)
   "Create a minimal pg-conn with DATA pre-loaded in its buffer."
   (let* ((buf (generate-new-buffer " *clutch-test-pg*"))
-         (conn (make-pg-conn :buf buf :host "test" :read-timeout 1)))
+         (conn (make-pg-conn :buf buf :host "test" :read-idle-timeout 1)))
     (with-current-buffer buf
       (set-buffer-multibyte nil)
       (insert data))
@@ -1910,7 +1943,7 @@ Use `cl-letf' to bypass `mysql--ensure-data' in tests."
 ;; (ert-deftest clutch-bench-buffer-read () :tags '(benchmark)
 ;;   (let* ((row (make-string (* 20 8) #x41))
 ;;          (buf (generate-new-buffer " *bench-buf*"))
-;;          (conn (make-mysql-conn :buf buf :host "bench" :read-timeout 1)))
+;;          (conn (make-mysql-conn :buf buf :host "bench" :read-idle-timeout 1)))
 ;;     (with-current-buffer buf
 ;;       (set-buffer-multibyte nil)
 ;;       (dotimes (_ 1000) (insert row)))

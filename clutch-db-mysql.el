@@ -94,16 +94,13 @@ Each output plist has :name and :type-category."
 
 (defun clutch-db-mysql-connect (params)
   "Connect to MySQL using PARAMS plist.
-PARAMS keys: :host, :port, :user, :password, :database, :tls, :read-timeout."
+PARAMS keys: :host, :port, :user, :password, :database, :tls,
+:connect-timeout, :read-idle-timeout."
   (condition-case err
-      (let* ((read-timeout (plist-get params :read-timeout))
-             (conn (apply #'mysql-connect
-                          (cl-loop for (k v) on params by #'cddr
-                                   unless (memq k '(:sql-product :backend :read-timeout))
-                                   append (list k v)))))
-        (when read-timeout
-          (setf (mysql-conn-read-timeout conn) read-timeout))
-        conn)
+      (apply #'mysql-connect
+             (cl-loop for (k v) on params by #'cddr
+                      unless (memq k '(:sql-product :backend))
+                      append (list k v)))
     (mysql-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))

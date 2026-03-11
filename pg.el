@@ -107,7 +107,7 @@
   server-version
   pid secret-key
   (parameters nil)
-  (read-timeout 10)
+  (read-idle-timeout 30)
   (read-offset 0)
   tls
   (busy nil))
@@ -128,7 +128,7 @@ Waits for data, resetting the idle deadline on each arrival.
 Signals `pg-timeout' or `pg-connection-error' on failure."
   (let* ((proc (pg-conn-process conn))
          (buf (pg-conn-buf conn))
-         (timeout (pg-conn-read-timeout conn))
+         (timeout (pg-conn-read-idle-timeout conn))
          (deadline (+ (float-time) timeout)))
     (with-current-buffer buf
       (while (< (- (point-max) (+ (point-min) (pg-conn-read-offset conn))) n)
@@ -590,21 +590,45 @@ Returns the server's response character (?S or ?N)."
 
 ;;;; Connection
 
-(defun pg--open-connection (host port)
+(defun pg--wait-for-connect (proc host port connect-timeout)
+  "Wait for PROC to connect to HOST:PORT within CONNECT-TIMEOUT seconds."
+  (let ((deadline (and connect-timeout
+                       (+ (float-time) connect-timeout))))
+    (while (eq (process-status proc) 'connect)
+      (let ((remaining (if deadline
+                           (- deadline (float-time))
+                         0.05)))
+        (when (and deadline (<= remaining 0))
+          (delete-process proc)
+          (signal 'pg-connection-error
+                  (list (format "Timed out connecting to %s:%s" host port))))
+        (accept-process-output proc (if deadline
+                                        (max 0.05 remaining)
+                                      0.05))))
+    (unless (memq (process-status proc) '(open run))
+      (signal 'pg-connection-error
+              (list (format "Failed to connect to %s:%s" host port))))))
+
+(defun pg--open-connection (host port &optional connect-timeout)
   "Open a raw TCP connection to HOST:PORT for PostgreSQL.
 Returns (PROCESS . BUFFER)."
   (let ((buf (generate-new-buffer " *pg-input*")))
     (with-current-buffer buf
       (set-buffer-multibyte nil))
-    (let ((proc (open-network-stream "pg" buf host port
-                                     :type 'plain
-                                     :coding 'binary)))
+    (let ((proc (make-network-process :name "pg"
+                                      :buffer buf
+                                      :host host
+                                      :service port
+                                      :nowait t
+                                      :type 'plain
+                                      :coding 'binary)))
       (set-process-coding-system proc 'binary 'binary)
       (set-process-filter proc
                           (lambda (_proc data)
                             (with-current-buffer buf
                               (goto-char (point-max))
                               (insert data))))
+      (pg--wait-for-connect proc host port connect-timeout)
       (cons proc buf))))
 
 (defun pg--negotiate-tls (conn)
@@ -617,21 +641,26 @@ Returns (PROCESS . BUFFER)."
       (_ (signal 'pg-connection-error
                  (list (format "Unexpected SSL response: %c" response)))))))
 
-(cl-defun pg-connect (&key (host "127.0.0.1") (port 5432) user password database tls)
+(cl-defun pg-connect (&key (host "127.0.0.1") (port 5432) user password
+                             database tls (read-idle-timeout 30)
+                             (connect-timeout 30))
   "Connect to a PostgreSQL server and authenticate.
 Returns a `pg-conn' struct on success.
 
 HOST defaults to \"127.0.0.1\", PORT defaults to 5432.
 USER, PASSWORD, and DATABASE are strings.
-When TLS is non-nil, attempt TLS upgrade before authenticating."
+When TLS is non-nil, attempt TLS upgrade before authenticating.
+READ-IDLE-TIMEOUT limits query I/O stalls.  CONNECT-TIMEOUT limits the initial
+TCP connection wait."
   (unless user
     (signal 'pg-connection-error (list "No user specified")))
   (when (and tls (not (pg--tls-available-p)))
     (signal 'pg-connection-error (list "TLS requested but GnuTLS is not available")))
-  (pcase-let ((`(,proc . ,buf) (pg--open-connection host port)))
+  (pcase-let ((`(,proc . ,buf) (pg--open-connection host port connect-timeout)))
     (let ((conn (make-pg-conn :process proc :buf buf
                               :host host :port port
-                              :user user :database database)))
+                              :user user :database database
+                              :read-idle-timeout read-idle-timeout)))
       (condition-case err
           (progn
             (when tls (pg--negotiate-tls conn))
