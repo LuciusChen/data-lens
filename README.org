@@ -552,6 +552,10 @@ backends.  See [[*Password Management]] for details.
 
 *** Oracle-specific Notes
 
+- *Oracle 11g*: use =ojdbc8= instead of =ojdbc11=.  ojdbc11 has LOB compatibility
+  issues with Oracle 11g that cause queries involving BLOB/CLOB columns to hang.
+  Install with =(clutch-jdbc-install-driver 'oracle-8)= and remove =ojdbc11.jar=
+  from the drivers directory (having both causes driver conflicts).
 - *SID vs service name*: use =:sid "MYSID"= for SID-style connections
   (=@host:port:SID=); use =:database "myservice"= for service name style
   (=@//host:port/service=).  Mixing them up causes the connection to hang.

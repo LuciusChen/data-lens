@@ -78,6 +78,9 @@
                   :filename "snowflake-jdbc.jar"))
     (oracle    . (:maven "com.oracle.database.jdbc:ojdbc11:21.13.0.0"
                   :filename "ojdbc11.jar"))
+    ;; ojdbc8 (19c driver) — use for Oracle 11g/12c; ojdbc11 has LOB compatibility issues with 11g.
+    (oracle-8  . (:maven "com.oracle.database.jdbc:ojdbc8:19.21.0.0"
+                  :filename "ojdbc8.jar"))
     (oracle-i18n . (:maven "com.oracle.database.nls:orai18n:21.13.0.0"
                     :filename "orai18n.jar"))
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
