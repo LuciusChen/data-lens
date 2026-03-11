@@ -76,13 +76,14 @@
                   :filename "mssql-jdbc.jar"))
     (snowflake . (:maven "net.snowflake:snowflake-jdbc:3.14.4"
                   :filename "snowflake-jdbc.jar"))
-    (oracle    . (:manual "https://www.oracle.com/database/technologies/appdev/jdbc.html"
+    (oracle    . (:maven "com.oracle.database.jdbc:ojdbc11:21.13.0.0"
                   :filename "ojdbc11.jar"))
+    (oracle-i18n . (:maven "com.oracle.database.nls:orai18n:21.13.0.0"
+                    :filename "orai18n.jar"))
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
                   :filename "db2jcc4.jar")))
   "Known JDBC driver sources.
-:maven entries can be auto-downloaded; :manual entries require the user to
-place the jar in `clutch-jdbc-drivers-dir' manually.")
+All entries support auto-download via `clutch-jdbc-install-driver'.")
 
 ;;;; Drivers that default to JDBC backend
 
@@ -195,7 +196,7 @@ place the jar in `clutch-jdbc-drivers-dir' manually.")
                            (json-parse-string line :object-type 'plist
                                               :array-type 'list
                                               :null-object nil
-                                              :false-object nil)
+                                              :false-object :false)
                          (error nil))))
           (when (and parsed (eql (plist-get parsed :id) id))
             (setq response parsed))))
@@ -240,6 +241,9 @@ Otherwise constructs a URL from :host, :port, and :database."
           ('snowflake
            (format "jdbc:snowflake://%s.snowflakecomputing.com/?db=%s"
                    host database))
+          ('redshift
+           (format "jdbc:redshift://%s:%d/%s"
+                   host (or port 5439) database))
           (_
            (error "clutch-db-jdbc: unknown driver %s; provide :url directly" driver))))))
 
@@ -254,11 +258,13 @@ Returns a `clutch-jdbc-conn'."
   (let* ((url      (clutch-jdbc--build-url driver params))
          (user     (plist-get params :user))
          (password (plist-get params :password))
+         (props    (plist-get params :props))
          (result   (clutch-jdbc--rpc
                     "connect"
                     `((url      . ,url)
                       (user     . ,user)
-                      (password . ,password)))))
+                      (password . ,password)
+                      ,@(when props `((props . ,props)))))))
     (make-clutch-jdbc-conn
      :process  clutch-jdbc--agent-process
      :conn-id  (plist-get result :conn-id)
@@ -318,9 +324,9 @@ Returns a `clutch-jdbc-conn'."
      ((string-match-p "BOOL" t-upper)                           'text)
      ((string-match-p "JSON" t-upper)                           'json)
      ((string-match-p "BLOB\\|BINARY\\|VARBINARY\\|RAW\\|IMAGE" t-upper) 'blob)
+     ((string-match-p "TIMESTAMP\\|DATETIME" t-upper)           'datetime)
      ((string-match-p "DATE" t-upper)                           'date)
      ((string-match-p "TIME$" t-upper)                          'time)
-     ((string-match-p "TIMESTAMP\\|DATETIME" t-upper)           'datetime)
      (t                                                         'text))))
 
 (defun clutch-jdbc--make-columns (col-names col-types)
@@ -329,6 +335,17 @@ Returns a `clutch-jdbc-conn'."
                (list :name name
                      :type-category (clutch-jdbc--type-category type)))
              col-names col-types))
+
+(defun clutch-jdbc--normalize-row (row)
+  "Convert JDBC-specific value representations in ROW to generic forms.
+Blob plists with :text content become plain strings."
+  (mapcar (lambda (val)
+            (if (and (listp val)
+                     (equal (plist-get val :__type) "blob")
+                     (plist-get val :text))
+                (plist-get val :text)
+              val))
+          row))
 
 (cl-defmethod clutch-db-query ((conn clutch-jdbc-conn) sql)
   "Execute SQL on JDBC CONN and return a `clutch-db-result'."
@@ -359,30 +376,48 @@ Returns a `clutch-jdbc-conn'."
                 (make-clutch-db-result
                  :connection conn
                  :columns    columns
-                 :rows       all-rows))))
+                 :rows       (mapcar #'clutch-jdbc--normalize-row all-rows)))))
         (clutch-db-error (signal (car err) (cdr err))))
     (setf (clutch-jdbc-conn-busy conn) nil)))
+
+(defun clutch-jdbc--build-oracle-paged-sql (conn base offset page-size order-by)
+  "Build Oracle ROWNUM-based pagination SQL.
+Compatible with all Oracle versions (9i+).
+Page N (OFFSET>0) adds an rn column as a side effect."
+  (let ((inner (if order-by
+                   (format "%s ORDER BY %s %s" base
+                           (clutch-db-escape-identifier conn (car order-by))
+                           (cdr order-by))
+                 base)))
+    (if (= offset 0)
+        (format "SELECT * FROM (%s) WHERE ROWNUM <= %d" inner page-size)
+      (format (concat "SELECT * FROM ("
+                      "SELECT t.*, ROWNUM rn FROM (%s) t "
+                      "WHERE ROWNUM <= %d"
+                      ") WHERE rn > %d")
+              inner (+ offset page-size) offset))))
 
 (cl-defmethod clutch-db-build-paged-sql ((conn clutch-jdbc-conn) base-sql
                                          page-num page-size
                                          &optional order-by)
   "Build a paginated SQL query for JDBC connections.
-Uses the SQL:2011 OFFSET/FETCH syntax supported by Oracle 12c+,
-SQL Server 2012+, DB2, and Snowflake."
+Oracle uses ROWNUM subquery (compatible with all Oracle versions).
+Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server 2012+, DB2)."
   (if (clutch-db-sql-has-top-level-limit-p base-sql)
       base-sql
     (let* ((trimmed (string-trim-right
                      (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
            (offset  (* page-num page-size))
-           (order-clause (if order-by
-                             (format " ORDER BY %s %s"
-                                     (clutch-db-escape-identifier
-                                      conn (car order-by))
-                                     (cdr order-by))
-                           ;; SQL:2011 FETCH requires ORDER BY; use a no-op.
-                           " ORDER BY (SELECT NULL)")))
-      (format "%s%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY"
-              trimmed order-clause offset page-size))))
+           (oracle-p (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)))
+      (if oracle-p
+          (clutch-jdbc--build-oracle-paged-sql conn trimmed offset page-size order-by)
+        (let ((order-clause (if order-by
+                                (format " ORDER BY %s %s"
+                                        (clutch-db-escape-identifier conn (car order-by))
+                                        (cdr order-by))
+                              " ORDER BY (SELECT NULL)")))
+          (format "%s%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY"
+                  trimmed order-clause offset page-size))))))
 
 ;;;; SQL dialect methods
 
@@ -396,26 +431,37 @@ SQL Server 2012+, DB2, and Snowflake."
 
 ;;;; Schema methods
 
+(defun clutch-jdbc--default-schema (conn)
+  "Return a default schema filter for CONN, or nil for no filtering.
+Oracle uses the username as schema (uppercased).  Other backends return nil."
+  (when (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)
+    (when-let* ((user (plist-get (clutch-jdbc-conn-params conn) :user)))
+      (upcase user))))
+
 (cl-defmethod clutch-db-list-tables ((conn clutch-jdbc-conn))
-  "Return table names for JDBC CONN using DatabaseMetaData."
-  (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (plist-get params :schema))
-         (result (clutch-jdbc--rpc
-                  "get-tables"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    ,@(when schema `((schema . ,schema)))))))
+  "Return table names for JDBC CONN using DatabaseMetaData.
+For Oracle, defaults the schema filter to the connected username to avoid
+returning tables from SYS/SYSTEM and other visible schemas."
+  (let* ((params  (clutch-jdbc-conn-params conn))
+         (schema  (or (plist-get params :schema)
+                      (clutch-jdbc--default-schema conn)))
+         (result  (clutch-jdbc--rpc
+                   "get-tables"
+                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                     ,@(when schema `((schema . ,schema)))))))
     (mapcar (lambda (tbl) (plist-get tbl :name))
             (plist-get result :tables))))
 
 (cl-defmethod clutch-db-list-columns ((conn clutch-jdbc-conn) table)
   "Return column names for TABLE on JDBC CONN using DatabaseMetaData."
-  (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (plist-get params :schema))
-         (result (clutch-jdbc--rpc
-                  "get-columns"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    (table   . ,table)
-                    ,@(when schema `((schema . ,schema)))))))
+  (let* ((params  (clutch-jdbc-conn-params conn))
+         (schema  (or (plist-get params :schema)
+                      (clutch-jdbc--default-schema conn)))
+         (result  (clutch-jdbc--rpc
+                   "get-columns"
+                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                     (table   . ,table)
+                     ,@(when schema `((schema . ,schema)))))))
     (mapcar (lambda (col) (plist-get col :name))
             (plist-get result :columns))))
 
@@ -423,7 +469,7 @@ SQL Server 2012+, DB2, and Snowflake."
   "Return a best-effort DDL for TABLE on JDBC CONN.
 Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
   (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (plist-get params :schema))
+         (schema (or (plist-get params :schema) (clutch-jdbc--default-schema conn)))
          (result (clutch-jdbc--rpc
                   "get-columns"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -448,7 +494,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 (cl-defmethod clutch-db-primary-key-columns ((conn clutch-jdbc-conn) table)
   "Return primary key columns for TABLE on JDBC CONN."
   (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (plist-get params :schema))
+         (schema (or (plist-get params :schema) (clutch-jdbc--default-schema conn)))
          (result (clutch-jdbc--rpc
                   "get-primary-keys"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -459,7 +505,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-jdbc-conn) table)
   "Return foreign key info for TABLE on JDBC CONN."
   (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (plist-get params :schema))
+         (schema (or (plist-get params :schema) (clutch-jdbc--default-schema conn)))
          (result (clutch-jdbc--rpc
                   "get-foreign-keys"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -474,7 +520,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 (cl-defmethod clutch-db-column-details ((conn clutch-jdbc-conn) table)
   "Return detailed column info for TABLE on JDBC CONN."
   (let* ((params  (clutch-jdbc-conn-params conn))
-         (schema  (plist-get params :schema))
+         (schema  (or (plist-get params :schema) (clutch-jdbc--default-schema conn)))
          (pk-cols (clutch-db-primary-key-columns conn table))
          (fks     (clutch-db-foreign-keys conn table))
          (result  (clutch-jdbc--rpc
@@ -546,9 +592,7 @@ Fetches from GitHub Releases."
         (message "Downloaded to %s" jar)))))
 
 (defun clutch-jdbc-install-driver (driver)
-  "Install the JDBC driver for DRIVER symbol.
-For drivers available on Maven Central (sqlserver, snowflake), downloads
-automatically.  For others (oracle, db2), shows download instructions."
+  "Download the JDBC driver for DRIVER symbol from Maven Central."
   (interactive
    (list (intern (completing-read "Driver: "
                                   (mapcar #'car clutch-jdbc--driver-sources)
