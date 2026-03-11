@@ -59,6 +59,14 @@
   :type 'string
   :group 'clutch-jdbc)
 
+(defcustom clutch-jdbc-agent-jvm-args '("-Xss512k")
+  "Extra JVM arguments passed when starting clutch-jdbc-agent.
+Examples:
+  (\"-Xss512k\")          — smaller thread stack, faster startup (default)
+  (\"-Xss512k\" \"-Xmx256m\") — also cap heap at 256 MB"
+  :type '(repeat string)
+  :group 'clutch-jdbc)
+
 (defcustom clutch-jdbc-fetch-size 500
   "Number of rows fetched per batch from the agent."
   :type 'natnum
@@ -154,9 +162,9 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
            (proc (make-process
                   :name "clutch-jdbc-agent"
                   :buffer buf
-                  :command (list clutch-jdbc-agent-java-executable
-                                 "-jar" jar
-                                 (clutch-jdbc--drivers-dir))
+                  :command (append (list clutch-jdbc-agent-java-executable)
+                                  clutch-jdbc-agent-jvm-args
+                                  (list "-jar" jar (clutch-jdbc--drivers-dir)))
                   :connection-type 'pipe
                   :filter #'clutch-jdbc--agent-filter
                   :stderr (get-buffer-create "*clutch-jdbc-agent-stderr*")
