@@ -1981,10 +1981,11 @@ Returns the query result."
       (clutch-result-mode)
       (let ((col-names (clutch--init-result-state
                         connection sql columns rows elapsed)))
+        (setq clutch--cached-pk-indices (clutch-result--detect-primary-key))
+        (clutch--load-fk-info)
         (when col-names
           (clutch--display-select-result col-names rows columns)))
-      (clutch--load-fk-info)
-      (setq clutch--cached-pk-indices (clutch-result--detect-primary-key)))
+      )
     (clutch--show-result-buffer buf)
     result))
 
@@ -5904,43 +5905,44 @@ Accumulates input until a semicolon is found, then executes."
 (transient-define-prefix clutch-result-dispatch ()
   "Dispatch menu for clutch result buffer."
   [["Navigate"
-    ("TAB" "Next cell"     clutch-result-next-cell)
+    ("TAB" "Next cell"       clutch-result-next-cell)
     ("<backtab>" "Prev cell" clutch-result-prev-cell)
-    ("n" "Down row"        clutch-result-down-cell)
-    ("p" "Up row"          clutch-result-up-cell)
-    ("RET" "Open record"   clutch-result-open-record)
-    ("C" "Go to column"    clutch-result-goto-column)]
-   ["Pages"
-    ("N" "Next page"       clutch-result-next-page)
-    ("P" "Prev page"       clutch-result-prev-page)
-    ("M-<" "First page"    clutch-result-first-page)
-    ("M->" "Last page"     clutch-result-last-page)
-    ("#" "Count total"     clutch-result-count-total)
-    ("]" "Next col page"   clutch-result-next-col-page)
-    ("[" "Prev col page"   clutch-result-prev-col-page)]
+    ("n" "Down row"          clutch-result-down-cell)
+    ("p" "Up row"            clutch-result-up-cell)
+    ("RET" "Open record"     clutch-result-open-record)
+    ("C" "Go to column"      clutch-result-goto-column)]
+   ["Query"
+    ("g" "Re-execute"        clutch-result-rerun)
+    ("x" "Preview SQL"       clutch-preview-execution-sql)
+    ("#" "Count total"       clutch-result-count-total)
+    ("A" "Aggregate"         clutch-result-aggregate)]
    ["Filter / Sort"
-    ("/" "Filter rows"     clutch-result-filter)
-    ("W" "WHERE filter"    clutch-result-apply-filter)
-    ("A" "Aggregate"       clutch-result-aggregate)
-    ("s" "Sort ASC"        clutch-result-sort-by-column)
-    ("S" "Sort DESC"       clutch-result-sort-by-column-desc)]]
-  [["Edit"
-    ("C-c '" "Edit cell"   clutch-result-edit-cell)
-    ("C-c C-c" "Commit"    clutch-result-commit)
-    ("i" "Stage insert"    clutch-result-insert-row)
-    ("d" "Stage delete"    clutch-result-delete-rows)
+    ("/" "Filter rows"       clutch-result-filter)
+    ("W" "WHERE filter"      clutch-result-apply-filter)
+    ("s" "Sort ASC"          clutch-result-sort-by-column)
+    ("S" "Sort DESC"         clutch-result-sort-by-column-desc)]]
+  [["Pages"
+    ("N" "Next page"         clutch-result-next-page)
+    ("P" "Prev page"         clutch-result-prev-page)
+    ("M-<" "First page"      clutch-result-first-page)
+    ("M->" "Last page"       clutch-result-last-page)
+    ("]" "Next col page"     clutch-result-next-col-page)
+    ("[" "Prev col page"     clutch-result-prev-col-page)]
+   ["Mutate"
+    ("C-c '" "Edit cell"     clutch-result-edit-cell)
+    ("i" "Stage insert"      clutch-result-insert-row)
+    ("d" "Stage delete"      clutch-result-delete-rows)
+    ("C-c C-c" "Commit"      clutch-result-commit)
     ("C-c C-k" "Discard pending" clutch-result-discard-pending-at-point)]
-   ["Copy (region/rect: C-x SPC)"
+   ["Layout"
+    ("=" "Widen column"      clutch-result-widen-column)
+    ("-" "Narrow column"     clutch-result-narrow-column)
+    ("C-c p" "Pin column"    clutch-result-pin-column)
+    ("C-c P" "Unpin column"  clutch-result-unpin-column)
+    ("f" "Fullscreen"        clutch-result-fullscreen-toggle)]]
+  [["Copy / Export (region/rect: C-x SPC)"
     ("c" "Copy… (-r to refine rows/cols)" clutch-result-copy-dispatch)
-    ("e" "Export"                         clutch-result-export)]
-   ["Other"
-    ("=" "Widen column"    clutch-result-widen-column)
-   ("-" "Narrow column"   clutch-result-narrow-column)
-   ("C-c p" "Pin column"  clutch-result-pin-column)
-   ("C-c P" "Unpin column" clutch-result-unpin-column)
-   ("g" "Re-execute"      clutch-result-rerun)
-    ("x" "Preview SQL"     clutch-preview-execution-sql)
-    ("f" "Fullscreen"      clutch-result-fullscreen-toggle)]])
+    ("e" "Export"                         clutch-result-export)]])
 
 (transient-define-prefix clutch-record-dispatch ()
   "Dispatch menu for clutch record buffer."

@@ -384,6 +384,42 @@
       (should (string-match-p "PK missing" footer))
       (should (string-match-p "users: edit/delete off" footer)))))
 
+(ert-deftest clutch-test-execute-select-detects-primary-key-before-first-render ()
+  "Primary key cache should be ready before the first result render."
+  (let ((clutch--source-window (selected-window))
+        (captured-pk :unset))
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (_conn sql _page-num _page-size &optional _order-by) sql))
+              ((symbol-function 'clutch-db-query)
+               (lambda (_conn _sql)
+                 (make-clutch-db-result
+                  :columns '((:name "id") (:name "name"))
+                  :rows '((1 "a")))))
+              ((symbol-function 'clutch--result-buffer-name)
+               (lambda () "*clutch-test-result*"))
+              ((symbol-function 'clutch--show-result-buffer) #'ignore)
+              ((symbol-function 'clutch--init-result-state)
+               (lambda (_conn sql columns rows elapsed)
+                 (setq-local clutch-connection 'fake-conn
+                             clutch--last-query sql
+                             clutch--result-columns (mapcar (lambda (c) (plist-get c :name)) columns)
+                             clutch--result-column-defs columns
+                             clutch--result-rows rows
+                             clutch--query-elapsed elapsed)
+                 clutch--result-columns))
+              ((symbol-function 'clutch-result--detect-primary-key)
+               (lambda () '(0)))
+              ((symbol-function 'clutch--load-fk-info) #'ignore)
+              ((symbol-function 'clutch--display-select-result)
+               (lambda (&rest _args)
+                 (setq captured-pk clutch--cached-pk-indices))))
+      (unwind-protect
+          (progn
+            (clutch--execute-select "SELECT * FROM users" 'fake-conn)
+            (should (equal captured-pk '(0))))
+        (when-let* ((buf (get-buffer "*clutch-test-result*")))
+          (kill-buffer buf))))))
+
 (ert-deftest clutch-test-refresh-schema-cache-records-ready-status ()
   "Schema refresh should record ready state and table count."
   (let ((clutch--schema-cache (make-hash-table :test 'equal))

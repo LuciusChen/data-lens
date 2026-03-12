@@ -24,8 +24,10 @@
   "Number of iterations per query benchmark.")
 
 (defvar clutch-bench-mysql-params
-  '(:host "127.0.0.1" :port 3306 :user "root" :password "test" :database "clutch_demo")
-  "MySQL benchmark connection parameters.")
+  '(:host "127.0.0.1" :port 3306 :user "root" :password "test" :database "mysql")
+  "MySQL benchmark connection parameters.
+Uses the built-in `mysql' database so the benchmark does not imply a
+project-shipped demo schema.")
 
 (defvar clutch-bench-pg-params
   '(:host "127.0.0.1" :port 5432 :user "postgres" :password "test" :database "postgres")

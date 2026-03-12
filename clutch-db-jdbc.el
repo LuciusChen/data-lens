@@ -80,16 +80,16 @@ Examples:
   :group 'clutch-jdbc)
 
 (defvar clutch-connect-timeout-seconds 10
-  "Declared in clutch.el.")
+  "Forward declaration; defined as `defcustom' in clutch.el.")
 
 (defvar clutch-read-idle-timeout-seconds 30
-  "Declared in clutch.el.")
+  "Forward declaration; defined as `defcustom' in clutch.el.")
 
 (defvar clutch-query-timeout-seconds 30
-  "Declared in clutch.el.")
+  "Forward declaration; defined as `defcustom' in clutch.el.")
 
 (defvar clutch-jdbc-rpc-timeout-seconds 30
-  "Declared in clutch.el.")
+  "Forward declaration; defined as `defcustom' in clutch.el.")
 
 ;;;; Driver sources (for automatic installation from Maven Central)
 
