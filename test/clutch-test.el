@@ -543,6 +543,205 @@
               (should-not (clutch-result-insert-completion-at-point)))))
       (kill-buffer result-buf))))
 
+(ert-deftest clutch-test-insert-buffer-labels-show_field_metadata ()
+  "Insert buffer labels should show field metadata without changing parsed names."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("id" "severity" "postmortem" "is_ship_blocked" "opened_at")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "severity" :type-category text)
+                                                     (:name "postmortem" :type-category json)
+                                                     (:name "is_ship_blocked" :type-category numeric)
+                                                     (:name "opened_at" :type-category datetime))))
+          (with-temp-buffer
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "id" :type "int" :generated t :nullable nil)
+                               (list :name "severity" :type "enum('low','medium')" :nullable nil)
+                               (list :name "postmortem" :type "json" :nullable t)
+                               (list :name "is_ship_blocked" :type "tinyint(1)" :default "0" :nullable nil)
+                               (list :name "opened_at" :type "datetime" :nullable nil)))))
+              (clutch-result-insert--populate-buffer "shipping_incidents"
+                                                    '("id" "severity" "postmortem" "is_ship_blocked" "opened_at"))
+              (let ((rendered (buffer-string)))
+                (should (string-match-p "^id \\[generated\\]: $" rendered))
+                (should (string-match-p "^severity \\[enum required\\]: $" rendered))
+                (should (string-match-p "^postmortem \\[json\\]: $" rendered))
+                (should (string-match-p "^is_ship_blocked \\[default=0 bool\\]: $" rendered))
+                (should (string-match-p "^opened_at \\[required\\]: $" rendered)))
+              (goto-char (point-min))
+              (should (get-text-property (point) 'read-only))
+              (should (eq (get-text-property (point) 'face) 'clutch-header-face))
+              (search-forward "[generated]")
+              (should (eq (get-text-property (1- (point)) 'face)
+                          'clutch-insert-field-tag-face))
+              (goto-char (point-min))
+              (search-forward "severity")
+              (goto-char (clutch-result-insert--current-field-value-position))
+              (insert "low")
+              (goto-char (point-min))
+              (let ((fields (clutch-result-insert--parse-fields)))
+                (should (equal fields '(("severity" . "low"))))))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-populate-buffer-reuses-read-only-buffer ()
+  "Repopulating an insert buffer should work when prefixes are already read-only."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("severity" "owner")
+                        clutch--result-column-defs '((:name "severity" :type-category text)
+                                                     (:name "owner" :type-category text))))
+          (with-temp-buffer
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "severity"
+                                     :type "enum('low','medium','high')")
+                               (list :name "owner" :type "varchar(64)")))))
+              (clutch-result-insert--populate-buffer
+               "shipping_incidents" '("severity" "owner"))
+              (should (get-text-property (point-min) 'read-only))
+              (clutch-result-insert--populate-buffer
+               "shipping_incidents" '("severity" "owner")
+               '(("severity" . "high")))
+              (should (string-match-p "^severity \\[enum required\\]: high$"
+                                      (buffer-string))))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-commit-validates-enum-bool-and-json-before-stage ()
+  "Insert staging should reject invalid enum/bool/json values locally."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+    (unwind-protect
+        (let (fields-after)
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("severity" "is_ship_blocked" "postmortem")
+                        clutch--result-column-defs '((:name "severity" :type-category text)
+                                                     (:name "is_ship_blocked" :type-category numeric)
+                                                     (:name "postmortem" :type-category json))
+                        clutch--pending-inserts nil))
+          (with-temp-buffer
+            (insert "severity: nope\nis_ship_blocked: 7\npostmortem: not-json\n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "severity" :type "enum('low','medium')")
+                               (list :name "is_ship_blocked" :type "tinyint(1)")
+                               (list :name "postmortem" :type "json")))))
+              (should-error (clutch-result-insert-commit) :type 'user-error)))
+          (setq fields-after
+                (with-current-buffer result-buf clutch--pending-inserts))
+          (should (buffer-live-p result-buf))
+          (should-not fields-after))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-commit-validates-temporal-before-stage ()
+  "Insert staging should reject invalid date/time/datetime values locally."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+    (unwind-protect
+        (let (fields-after err-msg)
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("opened_at" "due_on" "starts_at")
+                        clutch--result-column-defs '((:name "opened_at" :type-category datetime)
+                                                     (:name "due_on" :type-category date)
+                                                     (:name "starts_at" :type-category time))
+                        clutch--pending-inserts nil))
+          (with-temp-buffer
+            (insert "opened_at: ss\ndue_on: 2026-02-30\nstarts_at: 25:61\n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "opened_at" :type "datetime")
+                               (list :name "due_on" :type "date")
+                               (list :name "starts_at" :type "time")))))
+              (setq err-msg
+                    (should-error (clutch-result-insert-commit)
+                                  :type 'user-error))
+              (should (string-match-p "Field opened_at expects YYYY-MM-DD HH:MM\\[:SS\\]"
+                                      (error-message-string err-msg)))))
+          (setq fields-after
+                (with-current-buffer result-buf clutch--pending-inserts))
+          (should-not fields-after))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-commit-validates-numeric-before-stage ()
+  "Insert staging should reject invalid numeric values locally."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+    (unwind-protect
+        (let (fields-after err-msg)
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("impact_score")
+                        clutch--result-column-defs '((:name "impact_score" :type-category numeric))
+                        clutch--pending-inserts nil))
+          (with-temp-buffer
+            (insert "impact_score: xx\n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "impact_score" :type "decimal(5,1)")))))
+              (setq err-msg
+                    (should-error (clutch-result-insert-commit)
+                                  :type 'user-error))
+              (should (string-match-p "Field impact_score expects a numeric value"
+                                      (error-message-string err-msg)))))
+          (setq fields-after
+                (with-current-buffer result-buf clutch--pending-inserts))
+          (should-not fields-after))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-complete-field-falls-back-to-completing-read ()
+  "Insert completion command should fall back when CAPF does not handle it."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
+        (insert-buf (generate-new-buffer "*clutch-insert-temp*"))
+        completion-called)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("severity")
+                        clutch--result-column-defs '((:name "severity" :type-category text))))
+          (with-current-buffer insert-buf
+            (erase-buffer)
+            (insert "severity: \n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'completion-at-point) (lambda () nil))
+                      ((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "severity"
+                                     :type "enum('low','medium','high','critical')"))))
+                      ((symbol-function 'completing-read)
+                       (lambda (&rest _args)
+                         (setq completion-called t)
+                         "critical")))
+              (goto-char (point-min))
+              (goto-char (clutch-result-insert--current-field-value-start))
+              (clutch-result-insert-complete-field)
+              (should completion-called)
+              (should (equal (buffer-string) "severity: critical\n")))))
+      (kill-buffer result-buf)
+      (kill-buffer insert-buf))))
+
 (ert-deftest clutch-test-execute-select-detects-primary-key-before-first-render ()
   "Primary key cache should be ready before the first result render."
   (let ((clutch--source-window (selected-window))

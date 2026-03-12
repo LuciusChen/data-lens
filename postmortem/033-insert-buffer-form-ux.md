@@ -20,6 +20,18 @@ Treat the insert buffer like a small Emacs form:
 
 This keeps navigation and completion separate in the normal Emacs way.
 
+Completion still goes through normal Emacs mechanisms first.  If a completion
+frontend such as Corfu or Company handles the field, clutch stays out of the
+way.  If not, the command falls back to a simple chooser so enum / bool fields
+do not become inconsistent or frontend-dependent.
+
+The field prefix is also part of the form UI now:
+
+- field names use the same header face as result-table column headers
+- metadata tags such as =generated= / =default= / =enum= / =json= / =required=
+  are visible but dimmer
+- the prefix is read-only, so editing stays focused on the value area
+
 **Staged insert repair**
 
 Database validation failures are common for enum / JSON / generated-default
@@ -44,3 +56,16 @@ Pending insert rows can now show:
 
 These are display-only hints. The staged INSERT SQL is still built from fields
 the user explicitly entered.
+
+**Local validation**
+
+The insert buffer now validates obvious field-shape errors before staging:
+
+- enum values must be one of the declared choices
+- bool-like values must match the backend representation
+- JSON must parse
+- numeric fields must look numeric
+- date / time / datetime fields must match the expected format
+
+This keeps the staged result buffer cleaner and moves common input mistakes
+closer to the field that caused them.

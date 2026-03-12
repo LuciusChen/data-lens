@@ -315,10 +315,14 @@ while completion stays on Emacs' completion keys.
 | Key                  | Action                                          |
 |----------------------+-------------------------------------------------|
 | =TAB= / =S-TAB=      | Next field / previous field                     |
-| =M-TAB= / =C-M-i=    | Complete current field value (enum / bool etc.) |
+| =M-TAB= / =C-M-i=    | Complete current field value (prefers CAPF; falls back to chooser) |
 | =C-c .=              | Fill current date/time field with "now"         |
 | =C-c C-c=            | Stage new row / update staged insert            |
 | =C-c C-k=            | Cancel                                          |
+
+Field labels are read-only and may show tags such as =generated=,
+=default=..., =enum=, =bool=, =json=, and =required=.  =C-c C-c= validates
+obvious enum / bool / json / numeric / date-time mistakes before staging.
 
 *** Visual Refine Mode (=c -r= / =C-u A=)
 
@@ -429,9 +433,10 @@ Step 6 — press RET to confirm.
 1. SELECT * FROM users;      → C-c C-c to execute
 2. i                          → opens insert buffer with all column fields
 3. TAB / S-TAB                → move between fields
-4. M-TAB / C-M-i              → complete enum / bool-like fields
+                               field labels are read-only and can show tags like [enum], [json], [default=...]
+4. M-TAB / C-M-i              → complete enum / bool-like fields (falls back to a chooser if needed)
 5. C-c .                      → fill current date/time field with "now"
-6. C-c C-c                    → stage (C-c C-k cancels)
+6. C-c C-c                    → validate locally, then stage (C-c C-k cancels)
                                staged rows appear as green ghost rows in result buffer
                                missing generated/defaulted columns render as <generated> / <default>
 7. C-c ' on a green ghost row → re-open that staged insert with its previous values

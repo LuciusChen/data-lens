@@ -57,8 +57,13 @@
   :prefix "clutch-")
 
 (defface clutch-header-face
-  '((t :inherit bold))
+  '((t :inherit font-lock-keyword-face :weight bold))
   "Face for column headers in result tables."
+  :group 'clutch)
+
+(defface clutch-insert-field-tag-face
+  '((t :inherit shadow))
+  "Face for metadata tags in the insert buffer."
   :group 'clutch)
 
 (defface clutch-pinned-header-face
@@ -4486,12 +4491,16 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 ;;;; Insert row
 
+(defconst clutch-result-insert--field-line-re
+  "^\\([^:\n[]+\\)\\(?: \\[[^]]+\\]\\)?: "
+  "Regexp matching an insert buffer field line prefix.")
+
 (defvar clutch-result-insert-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "TAB") #'clutch-result-insert-next-field)
     (define-key map (kbd "<backtab>") #'clutch-result-insert-prev-field)
-    (define-key map (kbd "M-TAB") #'completion-at-point)
-    (define-key map (kbd "C-M-i") #'completion-at-point)
+    (define-key map (kbd "M-TAB") #'clutch-result-insert-complete-field)
+    (define-key map (kbd "C-M-i") #'clutch-result-insert-complete-field)
     (define-key map (kbd "C-c .") #'clutch-result-insert-fill-current-time)
     (define-key map (kbd "C-c C-c") #'clutch-result-insert-commit)
     (define-key map (kbd "C-c C-k") #'clutch-result-insert-cancel)
@@ -4515,12 +4524,25 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 (defvar-local clutch-result-insert--pending-index nil
   "Pending insert index being edited, or nil for a new staged insertion.")
 
-(defun clutch-result-insert--current-field-value-position ()
-  "Return point for the current insert field value, or nil."
+(defun clutch-result-insert--field-name-at-line ()
+  "Return the insert field name for the current line, or nil."
   (save-excursion
     (beginning-of-line)
-    (when (looking-at "^.+: ")
-      (goto-char (match-end 0))
+    (when (looking-at clutch-result-insert--field-line-re)
+      (string-trim-right (match-string-no-properties 1)))))
+
+(defun clutch-result-insert--current-field-value-start ()
+  "Return the start position of the current insert field value, or nil."
+  (save-excursion
+    (beginning-of-line)
+    (when (looking-at clutch-result-insert--field-line-re)
+      (match-end 0))))
+
+(defun clutch-result-insert--current-field-value-position ()
+  "Return point for the current insert field value, or nil."
+  (when-let* ((pos (clutch-result-insert--current-field-value-start)))
+    (save-excursion
+      (goto-char pos)
       (line-end-position))))
 
 (defun clutch-result-insert--adjacent-field-value-position (&optional backward)
@@ -4531,9 +4553,9 @@ next field. Returns nil when no matching field exists."
     (let ((step (if backward -1 1)))
       (forward-line step)
       (while (and (not (if backward (bobp) (eobp)))
-                  (not (looking-at-p ".+: ")))
+                  (not (looking-at-p clutch-result-insert--field-line-re)))
         (forward-line step))
-      (when (looking-at "^.+: ")
+      (when (looking-at clutch-result-insert--field-line-re)
         (goto-char (match-end 0))
         (line-end-position)))))
 
@@ -4541,12 +4563,11 @@ next field. Returns nil when no matching field exists."
   "Return the current insert field name, or nil."
   (save-excursion
     (beginning-of-line)
-    (when (looking-at "\\([^:\n]+\\): ")
-      (match-string-no-properties 1))))
+    (clutch-result-insert--field-name-at-line)))
 
 (defun clutch-result-insert--current-field-value-bounds ()
   "Return value bounds of the current insert field, or nil."
-  (when-let* ((pos (clutch-result-insert--current-field-value-position)))
+  (when-let* ((pos (clutch-result-insert--current-field-value-start)))
     (save-excursion
       (goto-char pos)
       (cons pos (line-end-position)))))
@@ -4614,6 +4635,58 @@ TIME defaults to `current-time'."
       ('datetime (format-time-string "%Y-%m-%d %H:%M:%S" ts))
       (_ nil))))
 
+(defun clutch-result-insert--field-tag-list (col-name)
+  "Return display tags for insert field COL-NAME."
+  (let* ((detail (clutch-result-insert--column-detail col-name))
+         (col-def (clutch-result-insert--column-def col-name))
+         (type (downcase (or (plist-get detail :type) "")))
+         tags)
+    (when (plist-get detail :generated)
+      (push "generated" tags))
+    (when-let* ((default (plist-get detail :default)))
+      (push (format "default=%s" default) tags))
+    (when (clutch-result-insert--enum-candidates type)
+      (push "enum" tags))
+    (when (or (member type '("boolean" "bool"))
+              (member type '("tinyint(1)" "bit(1)")))
+      (push "bool" tags))
+    (when (or (eq (plist-get col-def :type-category) 'json)
+              (string= type "json"))
+      (push "json" tags))
+    (when (and detail
+               (not (plist-get detail :nullable))
+               (not (plist-get detail :generated))
+               (not (plist-get detail :default)))
+      (push "required" tags))
+    (nreverse tags)))
+
+(defun clutch-result-insert--field-label (col-name)
+  "Return a propertized insert label for COL-NAME with metadata tags."
+  (let* ((tags (clutch-result-insert--field-tag-list col-name))
+         (name-part (propertize col-name 'face 'clutch-header-face))
+         (tag-part (when tags
+                     (propertize (format " [%s]" (string-join tags " "))
+                                 'face 'clutch-insert-field-tag-face))))
+    (concat name-part tag-part)))
+
+(defun clutch-result-insert--line-prefix-end ()
+  "Return the end position of the current insert field prefix."
+  (save-excursion
+    (beginning-of-line)
+    (when (looking-at clutch-result-insert--field-line-re)
+      (match-end 0))))
+
+(defun clutch-result-insert--field-prefix-read-only-p ()
+  "Return non-nil when point is inside the read-only insert field prefix."
+  (when-let* ((prefix-end (clutch-result-insert--line-prefix-end)))
+    (< (point) prefix-end)))
+
+(defun clutch-result-insert--normalize-point ()
+  "Keep point out of the read-only insert field prefix."
+  (when (clutch-result-insert--field-prefix-read-only-p)
+    (goto-char (or (clutch-result-insert--current-field-value-start)
+                   (point)))))
+
 (defun clutch-result-insert-next-field ()
   "Move point to the next insert field value."
   (interactive)
@@ -4627,6 +4700,28 @@ TIME defaults to `current-time'."
   (if-let* ((pos (clutch-result-insert--adjacent-field-value-position 'backward)))
       (goto-char pos)
     (user-error "No previous insert field")))
+
+(defun clutch-result-insert-complete-field ()
+  "Complete the current insert field.
+First try standard `completion-at-point' so Corfu/Company can integrate.
+If nothing handles the completion, fall back to `completing-read'."
+  (interactive)
+  (let ((handled (condition-case nil
+                     (completion-at-point)
+                   (error nil))))
+    (unless handled
+      (let* ((field-name (or (clutch-result-insert--current-field-name)
+                             (user-error "Point is not on an insert field")))
+             (candidates (or (clutch-result-insert--field-candidates field-name)
+                             (user-error "No completion candidates for %s" field-name)))
+             (bounds (or (clutch-result-insert--current-field-value-bounds)
+                         (user-error "Cannot edit field %s" field-name)))
+             (current (buffer-substring-no-properties (car bounds) (cdr bounds)))
+             (choice (completing-read (format "%s: " field-name)
+                                      candidates nil t current nil current)))
+        (delete-region (car bounds) (cdr bounds))
+        (goto-char (car bounds))
+        (insert choice)))))
 
 (defun clutch-result-insert-fill-current-time ()
   "Fill the current insert field with a current date/time value."
@@ -4647,12 +4742,16 @@ TIME defaults to `current-time'."
 
 (defun clutch-result-insert--populate-buffer (table col-names &optional fields)
   "Populate the current insert buffer for TABLE and COL-NAMES using FIELDS."
-  (erase-buffer)
-  (dolist (col col-names)
-    (insert (propertize col 'face 'clutch-header-face)
-            ": "
-            (or (cdr (assoc col fields)) "")
-            "\n"))
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (dolist (col col-names)
+      (let ((prefix-start (point)))
+        (insert (clutch-result-insert--field-label col)
+                ": ")
+        (add-text-properties prefix-start (point)
+                             '(read-only t front-sticky t rear-nonsticky t))
+        (insert (or (cdr (assoc col fields)) "")
+                "\n"))))
   (setq-local header-line-format
               (format " INSERT into %s  |  TAB/S-TAB: field  M-TAB: complete  C-c .: now  C-c C-c: stage  C-c C-k: cancel"
                       table))
@@ -4672,6 +4771,7 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
                   clutch-result-insert--pending-index pending-index
                   completion-at-point-functions
                   '(clutch-result-insert-completion-at-point))
+      (add-hook 'post-command-hook #'clutch-result-insert--normalize-point nil t)
       (clutch-result-insert--populate-buffer table col-names fields))
     (pop-to-buffer buf)))
 
@@ -4690,15 +4790,108 @@ Skips columns with empty values."
     (save-excursion
       (goto-char (point-min))
       (while (not (eobp))
-        (let ((line (buffer-substring-no-properties
-                     (line-beginning-position) (line-end-position))))
-          (when (string-match "\\`\\(.+?\\): \\(.*\\)\\'" line)
-            (let ((col (match-string 1 line))
-                  (val (match-string 2 line)))
-              (unless (string-empty-p val)
-                (push (cons col val) fields)))))
+        (when-let* ((col (clutch-result-insert--field-name-at-line))
+                    (value-beg (clutch-result-insert--current-field-value-start)))
+          (let ((val (buffer-substring-no-properties value-beg (line-end-position))))
+            (unless (string-empty-p val)
+              (push (cons col val) fields))))
         (forward-line 1)))
     (nreverse fields)))
+
+(defun clutch-result-insert--validate-json (field-name value)
+  "Signal `user-error' when VALUE is not valid JSON for FIELD-NAME."
+  (condition-case nil
+      (progn
+        (ignore (json-parse-string value :object-type 'alist
+                                   :array-type 'list
+                                   :null-object nil))
+        t)
+    (error
+     (user-error "Field %s expects valid JSON" field-name))))
+
+(defun clutch-result-insert--valid-date-value-p (value)
+  "Return non-nil when VALUE is a valid YYYY-MM-DD date."
+  (when (string-match
+         "\\`\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)\\'"
+         value)
+    (let ((year (string-to-number (match-string 1 value)))
+          (month (string-to-number (match-string 2 value)))
+          (day (string-to-number (match-string 3 value))))
+      (condition-case nil
+          (pcase-let ((`(,_sec ,_min ,_hour ,parsed-day ,parsed-month ,parsed-year . ,_)
+                       (decode-time (encode-time 0 0 0 day month year))))
+            (and (= parsed-year year)
+                 (= parsed-month month)
+                 (= parsed-day day)))
+        (error nil)))))
+
+(defun clutch-result-insert--valid-time-value-p (value)
+  "Return non-nil when VALUE is a valid HH:MM[:SS] time."
+  (when (string-match
+         "\\`\\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)\\(?::\\([0-9]\\{2\\}\\)\\)?\\'"
+         value)
+    (let ((hour (string-to-number (match-string 1 value)))
+          (minute (string-to-number (match-string 2 value)))
+          (second (if (match-string 3 value)
+                      (string-to-number (match-string 3 value))
+                    0)))
+      (and (<= 0 hour 23)
+           (<= 0 minute 59)
+           (<= 0 second 59)))))
+
+(defun clutch-result-insert--valid-datetime-value-p (value)
+  "Return non-nil when VALUE is a valid YYYY-MM-DD HH:MM[:SS] datetime."
+  (when (string-match "\\`\\(.+\\) \\(.+\\)\\'" value)
+    (let ((date-part (match-string 1 value))
+          (time-part (match-string 2 value)))
+      (and (clutch-result-insert--valid-date-value-p date-part)
+           (clutch-result-insert--valid-time-value-p time-part)))))
+
+(defun clutch-result-insert--valid-numeric-value-p (value)
+  "Return non-nil when VALUE looks like a valid numeric literal."
+  (string-match-p
+   "\\`[+-]?\\(?:[0-9]+\\(?:\\.[0-9]*\\)?\\|\\.[0-9]+\\)\\(?:[eE][+-]?[0-9]+\\)?\\'"
+   value))
+
+(defun clutch-result-insert--validate-field (field-name value)
+  "Validate VALUE for FIELD-NAME in the current insert buffer."
+  (when-let* ((detail (clutch-result-insert--column-detail field-name)))
+    (let* ((col-def (clutch-result-insert--column-def field-name))
+           (type-category (plist-get col-def :type-category))
+           (type (downcase (or (plist-get detail :type) "")))
+           (enum-candidates (clutch-result-insert--enum-candidates type)))
+      (cond
+       (enum-candidates
+        (unless (member value enum-candidates)
+          (user-error "Field %s must be one of: %s"
+                      field-name
+                      (string-join enum-candidates ", "))))
+       ((member type '("boolean" "bool"))
+        (unless (member (downcase value) '("true" "false"))
+          (user-error "Field %s expects true/false" field-name)))
+       ((member type '("tinyint(1)" "bit(1)"))
+        (unless (member value '("0" "1"))
+          (user-error "Field %s expects 0/1" field-name)))
+       ((and (eq type-category 'numeric)
+             (not (clutch-result-insert--valid-numeric-value-p value)))
+        (user-error "Field %s expects a numeric value" field-name))
+       ((and (eq type-category 'date)
+             (not (clutch-result-insert--valid-date-value-p value)))
+        (user-error "Field %s expects YYYY-MM-DD" field-name))
+       ((and (eq type-category 'time)
+             (not (clutch-result-insert--valid-time-value-p value)))
+        (user-error "Field %s expects HH:MM[:SS]" field-name))
+       ((and (eq type-category 'datetime)
+             (not (clutch-result-insert--valid-datetime-value-p value)))
+        (user-error "Field %s expects YYYY-MM-DD HH:MM[:SS]" field-name))
+       ((or (eq type-category 'json)
+            (string= type "json"))
+        (clutch-result-insert--validate-json field-name value))))))
+
+(defun clutch-result-insert--validate-fields (fields)
+  "Validate staged insert FIELDS in the current insert buffer."
+  (dolist (field fields)
+    (clutch-result-insert--validate-field (car field) (cdr field))))
 
 (defun clutch-result-insert--build-sql (conn table fields)
   "Build an INSERT SQL string for TABLE with FIELDS using CONN.
@@ -4723,6 +4916,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     (unless fields (user-error "No values entered"))
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
+    (clutch-result-insert--validate-fields fields)
     (quit-window 'kill)
     (with-current-buffer result-buf
       (if pending-index
