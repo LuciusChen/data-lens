@@ -368,6 +368,16 @@
     (should (null (pg-result-rows result)))
     (should (null (pg-result-affected-rows result)))))
 
+(ert-deftest pg-test-transaction-control-query-p ()
+  "Transaction control statements should bypass timeout wrapping."
+  (should (pg--transaction-control-query-p "BEGIN"))
+  (should (pg--transaction-control-query-p " start transaction"))
+  (should (pg--transaction-control-query-p "ROLLBACK"))
+  (should (pg--transaction-control-query-p "ROLLBACK TO SAVEPOINT s1"))
+  (should (pg--transaction-control-query-p "COMMIT"))
+  (should-not (pg--transaction-control-query-p "SELECT 1"))
+  (should-not (pg--transaction-control-query-p "INSERT INTO t VALUES (1)")))
+
 (ert-deftest pg-test-open-connection-does-not-force-plain-type ()
   "Opening a PostgreSQL socket should not force an unsupported process type."
   (let (captured-args)
@@ -561,6 +571,31 @@ Skips if `pg-test-password' is nil."
         (error "Intentional error")))
     (let ((result (pg-query conn "SELECT COUNT(*) FROM _pg_el_tx2")))
       (should (= (car (car (pg-result-rows result))) 0)))))
+
+(ert-deftest pg-test-live-query-timeout-and-rollback-recovery ()
+  :tags '(:pg-live)
+  "Statement timeout should not prevent rollback recovery."
+  (if (null pg-test-password)
+      (ert-skip "Set pg-test-password to enable live tests")
+    (let ((conn (pg-connect :host pg-test-host
+                            :port pg-test-port
+                            :user pg-test-user
+                            :password pg-test-password
+                            :database pg-test-database
+                            :query-timeout 1)))
+      (unwind-protect
+          (progn
+            (should-error (pg-query conn "SELECT pg_sleep(2)")
+                          :type 'pg-query-error)
+            (let ((result (pg-query conn "SELECT 1 AS v")))
+              (should (= (car (car (pg-result-rows result))) 1)))
+            (pg-query conn "BEGIN")
+            (should-error (pg-query conn "SELECT * FROM definitely_missing_table")
+                          :type 'pg-query-error)
+            (pg-query conn "ROLLBACK")
+            (let ((result (pg-query conn "SELECT 1 AS v")))
+              (should (= (car (car (pg-result-rows result))) 1))))
+        (pg-disconnect conn)))))
 
 (ert-deftest pg-test-live-empty-result ()
   :tags '(:pg-live)

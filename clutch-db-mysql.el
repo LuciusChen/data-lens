@@ -146,13 +146,16 @@ Appends LIMIT/OFFSET directly to BASE-SQL.  ORDER-BY is (COL . DIR) or nil."
       base-sql
     (let* ((trimmed (string-trim-right
                      (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
+           (sortable-sql (if order-by
+                             (clutch-db-sql-strip-top-level-order-by trimmed)
+                           trimmed))
            (offset (* page-num page-size))
            (order-clause (when order-by
                            (format " ORDER BY %s %s"
                                    (mysql-escape-identifier (car order-by))
                                    (cdr order-by)))))
       (format "%s%s LIMIT %d OFFSET %d"
-              trimmed (or order-clause "") page-size offset))))
+              sortable-sql (or order-clause "") page-size offset))))
 
 ;;;; SQL dialect methods
 

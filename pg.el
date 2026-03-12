@@ -108,6 +108,7 @@
   pid secret-key
   (parameters nil)
   (read-idle-timeout 30)
+  query-timeout
   (read-offset 0)
   tls
   (busy nil))
@@ -642,6 +643,7 @@ Returns (PROCESS . BUFFER)."
 
 (cl-defun pg-connect (&key (host "127.0.0.1") (port 5432) user password
                              database tls (read-idle-timeout 30)
+                             query-timeout
                              (connect-timeout 10))
   "Connect to a PostgreSQL server and authenticate.
 Returns a `pg-conn' struct on success.
@@ -649,7 +651,9 @@ Returns a `pg-conn' struct on success.
 HOST defaults to \"127.0.0.1\", PORT defaults to 5432.
 USER, PASSWORD, and DATABASE are strings.
 When TLS is non-nil, attempt TLS upgrade before authenticating.
-READ-IDLE-TIMEOUT limits query I/O stalls.  CONNECT-TIMEOUT limits the initial
+READ-IDLE-TIMEOUT limits query I/O stalls.  QUERY-TIMEOUT sets PostgreSQL
+statement_timeout in seconds for queries on this connection.
+CONNECT-TIMEOUT limits the initial
 TCP connection wait."
   (unless user
     (signal 'pg-connection-error (list "No user specified")))
@@ -659,7 +663,8 @@ TCP connection wait."
     (let ((conn (make-pg-conn :process proc :buf buf
                               :host host :port port
                               :user user :database database
-                              :read-idle-timeout read-idle-timeout)))
+                              :read-idle-timeout read-idle-timeout
+                              :query-timeout query-timeout)))
       (condition-case err
           (progn
             (when tls (pg--negotiate-tls conn))
@@ -856,6 +861,26 @@ Handles RowDescription, DataRow, CommandComplete, and ErrorResponse."
      :rows (nreverse rows)
      :affected-rows affected-rows)))
 
+(defun pg--simple-query (conn sql)
+  "Execute SQL on CONN using the simple query protocol."
+  (pg--send-message conn ?Q (pg--encode-string sql))
+  (pg--collect-query-result conn))
+
+(defun pg--set-statement-timeout (conn timeout-seconds)
+  "Set PostgreSQL statement_timeout for CONN to TIMEOUT-SECONDS.
+When TIMEOUT-SECONDS is nil, restore the server default."
+  (pg--simple-query
+   conn
+   (if timeout-seconds
+       (format "SET statement_timeout = %d" (* timeout-seconds 1000))
+     "SET statement_timeout = DEFAULT")))
+
+(defun pg--transaction-control-query-p (sql)
+  "Return non-nil when SQL is a top-level transaction control statement."
+  (string-match-p
+   "\\`\\s-*\\(?:BEGIN\\|START\\s-+TRANSACTION\\|COMMIT\\|END\\|ROLLBACK\\(?:\\s-+TO\\b.*\\)?\\|ABORT\\|SAVEPOINT\\|RELEASE\\b\\)"
+   sql))
+
 (defun pg-query (conn sql)
   "Execute SQL query on CONN using the simple query protocol.
 Returns a `pg-result'.
@@ -872,9 +897,25 @@ Signals `pg-error' if the connection is busy (re-entrant call)."
       ;; Bind throw-on-input to nil so that `while-no-input' (used by
       ;; completion frameworks) cannot abort mid-response and corrupt
       ;; the connection state.
-      (let ((throw-on-input nil))
-        (pg--send-message conn ?Q (pg--encode-string sql))
-        (pg--collect-query-result conn))
+      (let ((throw-on-input nil)
+            (timeout (pg-conn-query-timeout conn))
+            (apply-timeout (and (pg-conn-query-timeout conn)
+                                (not (pg--transaction-control-query-p sql))))
+            result err)
+        (when apply-timeout
+          (pg--set-statement-timeout conn timeout))
+        (unwind-protect
+            (condition-case e
+                (setq result (pg--simple-query conn sql))
+              (error
+               (setq err e)))
+          (when apply-timeout
+            (condition-case nil
+                (pg--set-statement-timeout conn nil)
+              (pg-error nil))))
+        (if err
+            (signal (car err) (cdr err))
+          result))
     (setf (pg-conn-busy conn) nil)))
 
 ;;;; Ping

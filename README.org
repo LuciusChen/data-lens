@@ -60,7 +60,7 @@ The JDBC backend requires Java 11+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 
 - Column-paged result display (no horizontal scrolling)
 - SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
-  - =tab-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, and active filters (with =nerd-icons=, Unicode fallback)
+  - =tab-line=: row count, schema state, page, elapsed time, sort state, staged-change summary, aggregate status, and active filters (with =nerd-icons=, Unicode fallback)
   - =header-line=: column names with =│= borders and underlined labels
 - After execution, focus stays in the SQL buffer while results refresh below
 - Last successfully executed SQL region is highlighted in the editor
@@ -78,6 +78,7 @@ The JDBC backend requires Java 11+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 - Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
+- Schema refresh state is explicit: eager backends refresh on connect, lazy backends start stale, and query console buffer names surface =schema...= / =schema~= / =schema!= / =schema 42t= style state markers
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
 - Value viewer (=v=): auto-detects JSON (pretty-printed with =json-ts-mode=), XML (formatted via =xmllint= if available, rendered with =nxml-mode=), or BLOB (concise text/hex preview); XML/BLOB size is shown in viewer header-line (without polluting content highlighting)
 - REPL mode (comint-based)
@@ -293,7 +294,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =d=            | Stage row(s) for deletion (supports region)   |
 | =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
 | =C-c C-k=     | Discard pending deletion/insertion at point   |
-| =C-c C-p=      | Preview SQL (query / pending update / selected delete) |
+| =C-c C-p=      | Preview SQL (current effective query / pending update / selected delete) |
 | =c=            | Open copy transient menu (choose TSV / CSV / INSERT; toggle =-r= to refine) |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
 | =e=            | Export all rows (copy / file)                     |
@@ -721,9 +722,10 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
 
 - =clutch-connect-timeout-seconds= controls connect timeout (default: 10s).
 - =clutch-read-idle-timeout-seconds= controls query I/O idle timeout (default: 30s).
-- =clutch-query-timeout-seconds= controls database-side statement timeout for JDBC queries (default: 30s).
+- =clutch-query-timeout-seconds= controls database-side statement timeout for JDBC and native PostgreSQL queries (default: 30s).
 - =clutch-jdbc-rpc-timeout-seconds= controls Emacs <-> JDBC agent RPC timeout (default: 30s).
-- MySQL/PostgreSQL connections can override via =:connect-timeout= and =:read-idle-timeout=.
+- MySQL connections can override via =:connect-timeout= and =:read-idle-timeout=.
+- PostgreSQL connections can override via =:connect-timeout=, =:read-idle-timeout=, and =:query-timeout=.
 - JDBC connections can override via =:connect-timeout=, =:read-idle-timeout=, =:query-timeout=, and =:rpc-timeout=.
 - During long-running queries, press =C-g= to interrupt.
   - clutch will drop the current connection to avoid protocol desync.

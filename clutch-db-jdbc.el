@@ -515,17 +515,20 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server 2012+, DB2)."
       base-sql
     (let* ((trimmed (string-trim-right
                      (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
+           (sortable-sql (if order-by
+                             (clutch-db-sql-strip-top-level-order-by trimmed)
+                           trimmed))
            (offset  (* page-num page-size))
            (oracle-p (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)))
       (if oracle-p
-          (clutch-jdbc--build-oracle-paged-sql conn trimmed offset page-size order-by)
+          (clutch-jdbc--build-oracle-paged-sql conn sortable-sql offset page-size order-by)
         (let ((order-clause (if order-by
                                 (format " ORDER BY %s %s"
                                         (clutch-db-escape-identifier conn (car order-by))
                                         (cdr order-by))
                               " ORDER BY (SELECT NULL)")))
           (format "%s%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY"
-                  trimmed order-clause offset page-size))))))
+                  sortable-sql order-clause offset page-size))))))
 
 ;;;; SQL dialect methods
 

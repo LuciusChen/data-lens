@@ -80,6 +80,17 @@ START defaults to 0."
   "Return non-nil when SQL has a top-level LIMIT clause."
   (clutch-db-sql-has-top-level-clause-p sql "LIMIT"))
 
+(defun clutch-db-sql-has-top-level-offset-p (sql)
+  "Return non-nil when SQL has a top-level OFFSET clause."
+  (clutch-db-sql-has-top-level-clause-p sql "OFFSET"))
+
+(defun clutch-db-sql-strip-top-level-order-by (sql)
+  "Strip a top-level ORDER BY tail from SQL.
+Leaves nested ORDER BY clauses inside subqueries or window functions intact."
+  (if-let* ((order-pos (clutch-db-sql-find-top-level-clause sql "ORDER\\s-+BY")))
+      (string-trim-right (substring sql 0 order-pos))
+    sql))
+
 ;;;; Generic interface — 18 methods dispatched on connection type
 
 ;; Lifecycle

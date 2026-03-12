@@ -373,6 +373,51 @@
       (should (string-match-p "1 edit, 1 deletion, 1 insertion" footer))
       (should (string-match-p "C-c C-c" footer)))))
 
+(ert-deftest clutch-test-refresh-schema-cache-records-ready-status ()
+  "Schema refresh should record ready state and table count."
+  (let ((clutch--schema-cache (make-hash-table :test 'equal))
+        (clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--table-comment-cache (make-hash-table :test 'equal))
+        (clutch--help-doc-cache (make-hash-table :test 'equal))
+        (clutch--schema-status-cache (make-hash-table :test 'equal)))
+    (cl-letf (((symbol-function 'clutch-db-list-tables)
+               (lambda (_conn) '("users" "orders")))
+              ((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "fake"))
+              ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore))
+      (should (clutch--refresh-schema-cache 'fake-conn))
+      (should (eq (plist-get (gethash "fake" clutch--schema-status-cache) :state)
+                  'ready))
+      (should (= (plist-get (gethash "fake" clutch--schema-status-cache) :tables)
+                 2)))))
+
+(ert-deftest clutch-test-schema-affecting-query-p ()
+  "DDL-like statements should mark schema stale."
+  (should (clutch--schema-affecting-query-p "CREATE TABLE t (id INT)"))
+  (should (clutch--schema-affecting-query-p "alter table t add column x int"))
+  (should (clutch--schema-affecting-query-p "DROP VIEW v"))
+  (should-not (clutch--schema-affecting-query-p "DELETE FROM t"))
+  (should-not (clutch--schema-affecting-query-p "SELECT * FROM t")))
+
+(ert-deftest clutch-test-console-buffer-name-reflects-schema-status ()
+  "Console buffer names should expose schema status."
+  (let ((clutch--schema-status-cache (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (clutch-mode)
+      (setq-local clutch--console-name "dev"
+                  clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "dev-key")))
+        (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
+        (clutch--update-console-buffer-name)
+        (should (equal (buffer-name) "*clutch: dev* [schema~]"))
+        (puthash "dev-key" '(:state refreshing) clutch--schema-status-cache)
+        (clutch--update-console-buffer-name)
+        (should (equal (buffer-name) "*clutch: dev* [schema...]"))
+        (puthash "dev-key" '(:state ready :tables 42) clutch--schema-status-cache)
+        (clutch--update-console-buffer-name)
+        (should (equal (buffer-name) "*clutch: dev* [schema 42t]"))))))
+
 (ert-deftest clutch-test-icon-supports-octicon-family ()
   "Icon helper should dispatch octicon names when nerd-icons is available."
   (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
@@ -754,6 +799,100 @@
         (clutch-preview-execution-sql)
         (should (string-match-p "UPDATE t SET name='v' WHERE id=1;" captured))))))
 
+(ert-deftest clutch-test-result-effective-query-applies-where-filter ()
+  "Result workflows should reuse the filtered SQL, not just display the filter."
+  (with-temp-buffer
+    (setq-local clutch--base-query "SELECT * FROM t"
+                clutch--last-query "SELECT * FROM t WHERE id > 0"
+                clutch--where-filter "id = 1")
+    (cl-letf (((symbol-function 'clutch--apply-where)
+               (lambda (sql filter)
+                 (format "FILTER[%s]{%s}" filter sql))))
+      (should (equal (clutch-result--effective-query)
+                     "FILTER[id = 1]{SELECT * FROM t}")))))
+
+(ert-deftest clutch-test-execute-page-uses-effective-filtered-query ()
+  "Paging should continue using the active WHERE filter."
+  (with-temp-buffer
+    (let (captured-base)
+      (setq-local clutch-connection 'fake-conn
+                  clutch--base-query "SELECT * FROM t"
+                  clutch--where-filter "id = 1"
+                  clutch-result-max-rows 500)
+      (cl-letf (((symbol-function 'clutch--apply-where)
+                 (lambda (sql filter)
+                   (format "FILTER[%s]{%s}" filter sql)))
+                ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+                ((symbol-function 'clutch--build-paged-sql)
+                 (lambda (sql _page-num _page-size &optional _order-by)
+                   (setq captured-base sql)
+                   "SELECT * FROM paged"))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (_conn _sql)
+                   (make-clutch-db-result :columns nil :rows nil)))
+                ((symbol-function 'clutch--update-page-state) #'ignore)
+                ((symbol-function 'clutch--refresh-display) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-page 0)
+        (should (equal captured-base "FILTER[id = 1]{SELECT * FROM t}"))))))
+
+(ert-deftest clutch-test-count-total-uses-effective-filtered-query ()
+  "COUNT should run against the filtered SQL when a WHERE filter is active."
+  (with-temp-buffer
+    (let (captured-base)
+      (setq-local clutch-connection 'fake-conn
+                  clutch--base-query "SELECT * FROM t"
+                  clutch--where-filter "id = 1")
+      (cl-letf (((symbol-function 'clutch--apply-where)
+                 (lambda (sql filter)
+                   (format "FILTER[%s]{%s}" filter sql)))
+                ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+                ((symbol-function 'clutch--build-count-sql)
+                 (lambda (sql)
+                   (setq captured-base sql)
+                   "SELECT COUNT(*)"))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (_conn _sql)
+                   (make-clutch-db-result :rows '((7)))))
+                ((symbol-function 'clutch--refresh-display) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (clutch-result-count-total)
+        (should (equal captured-base "FILTER[id = 1]{SELECT * FROM t}"))
+        (should (= clutch--page-total-rows 7))))))
+
+(ert-deftest clutch-test-result-rerun-uses-effective-filtered-query ()
+  "Rerun should preserve the current WHERE filter."
+  (with-temp-buffer
+    (let (executed)
+      (setq-local clutch-connection 'fake-conn
+                  clutch--base-query "SELECT * FROM t"
+                  clutch--where-filter "id = 1")
+      (cl-letf (((symbol-function 'clutch--apply-where)
+                 (lambda (sql filter)
+                   (format "FILTER[%s]{%s}" filter sql)))
+                ((symbol-function 'clutch--execute)
+                 (lambda (sql conn)
+                   (setq executed (list sql conn)))))
+        (clutch-result-rerun)
+        (should (equal executed
+                       '("FILTER[id = 1]{SELECT * FROM t}" fake-conn)))))))
+
+(ert-deftest clutch-test-preview-execution-sql-uses-effective-filtered-query ()
+  "Preview should show the filtered SQL in result mode."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (let (captured)
+      (setq-local clutch--base-query "SELECT * FROM t"
+                  clutch--where-filter "id = 1")
+      (cl-letf (((symbol-function 'clutch--apply-where)
+                 (lambda (sql filter)
+                   (format "FILTER[%s]{%s}" filter sql)))
+                ((symbol-function 'clutch--preview-sql-buffer)
+                 (lambda (sql)
+                   (setq captured sql))))
+        (clutch-preview-execution-sql)
+        (should (equal captured "FILTER[id = 1]{SELECT * FROM t}"))))))
+
 (ert-deftest clutch-test-select-query-p ()
   "Test SELECT query detection."
   (should (clutch--select-query-p "SELECT * FROM users"))
@@ -846,12 +985,12 @@
              result))
     (should-not (string-match-p ";\\s-*) AS _clutch_filter" result))))
 
-(ert-deftest clutch-test-build-count-sql-strips-order-and-limit ()
-  "Count SQL should strip top-level ORDER BY / LIMIT / OFFSET clauses."
+(ert-deftest clutch-test-build-count-sql-preserves-top-level-limit-offset ()
+  "Count SQL should count the current limited result set."
   (let ((result (clutch--build-count-sql
                  "SELECT id, name FROM users ORDER BY created_at DESC LIMIT 10 OFFSET 20")))
     (should (string-match-p
-             "^SELECT COUNT(\\*) FROM (SELECT id, name FROM users) AS _clutch_count\\'"
+             "^SELECT COUNT(\\*) FROM (SELECT id, name FROM users ORDER BY created_at DESC LIMIT 10 OFFSET 20) AS _clutch_count\\'"
              result))))
 
 (ert-deftest clutch-test-build-count-sql-with-cte ()
@@ -886,18 +1025,18 @@
     (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
 
 (ert-deftest clutch-test-build-count-sql-with-union-limit-offset ()
-  "Count SQL should strip top-level LIMIT/OFFSET on UNION queries."
+  "Count SQL should preserve top-level LIMIT/OFFSET on UNION queries."
   (let* ((sql "(SELECT id FROM a) UNION ALL (SELECT id FROM b) LIMIT 50 OFFSET 100")
          (result (clutch--build-count-sql sql)))
     (should (string-match-p "UNION ALL" result))
-    (should-not (string-match-p "LIMIT 50\\s-+OFFSET 100\\s-*) AS _clutch_count\\'" result))))
+    (should (string-match-p "LIMIT 50\\s-+OFFSET 100\\s-*) AS _clutch_count\\'" result))))
 
 (ert-deftest clutch-test-build-count-sql-keeps-window-order-by ()
   "Count SQL should keep ORDER BY inside window OVER clauses."
   (let* ((sql "SELECT row_number() OVER (ORDER BY created_at DESC) AS rn FROM t ORDER BY rn LIMIT 5")
          (result (clutch--build-count-sql sql)))
     (should (string-match-p "OVER (ORDER BY created_at DESC)" result))
-    (should-not (string-match-p "ORDER BY rn\\s-+LIMIT 5\\s-*) AS _clutch_count\\'" result))))
+    (should (string-match-p "ORDER BY rn\\s-+LIMIT 5\\s-*) AS _clutch_count\\'" result))))
 
 (ert-deftest clutch-test-build-count-sql-strips-trailing-semicolon ()
   "Count SQL should normalize trailing semicolons."
@@ -911,6 +1050,63 @@
          (result (clutch--build-count-sql sql)))
     (should (string-prefix-p "SELECT COUNT(*) FROM (SELECT id FROM t)" result))
     (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
+
+(ert-deftest clutch-test-build-paged-sql-wraps-limited-query-result-set ()
+  "Paging should wrap queries with top-level LIMIT so paging stays correct."
+  (let ((clutch-connection 'fake-conn)
+        captured)
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (_conn sql page-num page-size &optional order-by)
+                 (setq captured (list sql page-num page-size order-by))
+                 "SELECT * FROM page")))
+      (clutch--build-paged-sql
+       "SELECT * FROM users ORDER BY created_at DESC LIMIT 1000" 1 500)
+      (should (equal captured
+                     '("SELECT * FROM (SELECT * FROM users ORDER BY created_at DESC LIMIT 1000) AS _clutch_page"
+                       1 500 nil))))))
+
+(ert-deftest clutch-test-build-paged-sql-wraps-limited-query-before-resort ()
+  "Resorting a limited query should sort the limited result set, not append to it."
+  (let ((clutch-connection 'fake-conn)
+        captured)
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (_conn sql page-num page-size &optional order-by)
+                 (setq captured (list sql page-num page-size order-by))
+                 "SELECT * FROM page")))
+      (clutch--build-paged-sql
+       "SELECT * FROM users ORDER BY created_at DESC LIMIT 1000" 0 500 '("name" . "ASC"))
+      (should (equal captured
+                     '("SELECT * FROM (SELECT * FROM users ORDER BY created_at DESC LIMIT 1000) AS _clutch_page"
+                       0 500 ("name" . "ASC")))))))
+
+(ert-deftest clutch-test-build-render-state-creates-fast-lookups ()
+  "Render-state tables should preserve pending edit/delete/mark semantics."
+  (with-temp-buffer
+    (setq-local clutch--pending-edits '(((0 . 1) . "edited")))
+    (setq-local clutch--pending-deletes '([1]))
+    (setq-local clutch--marked-rows '(0 2))
+    (setq-local clutch--cached-pk-indices '(0))
+    (let* ((state (clutch--build-render-state))
+           (edits (plist-get state :edits))
+           (marked (plist-get state :marked))
+           (deletes (plist-get state :deletes)))
+      (should (equal (gethash '(0 . 1) edits)
+                     '((0 . 1) . "edited")))
+      (should (gethash 0 marked))
+      (should (gethash 2 marked))
+      (should (gethash [1] deletes)))))
+
+(ert-deftest clutch-test-render-cell-uses-render-state-edits ()
+  "Cell rendering should use render-state lookups instead of alist scans."
+  (with-temp-buffer
+    (setq-local clutch--result-column-defs '((:name "id" :type-category numeric)
+                                             (:name "name" :type-category text)))
+    (let* ((clutch--pending-edits '(((0 . 1) . "edited")))
+           (render-state (clutch--build-render-state))
+           (cell (clutch--render-cell '(1 "before") 0 1 [4 8] render-state)))
+      (should (string-match-p "edited" cell))
+      (should (eq (get-text-property 3 'clutch-col-idx cell) 1))
+      (should (equal (get-text-property 3 'clutch-full-value cell) "edited")))))
 
 ;;;; Unit tests — separator rendering
 
@@ -928,19 +1124,22 @@
   "Test that `clutch--build-conn' passes timeout defaults to mysql/pg."
   (let ((clutch-connect-timeout-seconds 11)
         (clutch-read-idle-timeout-seconds 42)
+        (clutch-query-timeout-seconds 13)
         captured)
     (cl-letf (((symbol-function 'clutch--resolve-password)
                (lambda (_params) nil))
               ((symbol-function 'clutch-db-connect)
-               (lambda (_backend params)
+                (lambda (_backend params)
                  (setq captured params)
                  'fake-conn)))
       (clutch--build-conn '(:backend mysql :host "127.0.0.1" :port 3306 :user "u"))
       (should (equal (plist-get captured :connect-timeout) 11))
       (should (equal (plist-get captured :read-idle-timeout) 42))
+      (should-not (plist-member captured :query-timeout))
       (clutch--build-conn '(:backend pg :host "127.0.0.1" :port 5432 :user "u"))
       (should (equal (plist-get captured :connect-timeout) 11))
-      (should (equal (plist-get captured :read-idle-timeout) 42)))))
+      (should (equal (plist-get captured :read-idle-timeout) 42))
+      (should (equal (plist-get captured :query-timeout) 13)))))
 
 (ert-deftest clutch-test-build-conn-includes-jdbc-timeouts ()
   "Test that `clutch--build-conn' passes timeout defaults to JDBC backends."

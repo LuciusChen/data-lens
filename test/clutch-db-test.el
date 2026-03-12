@@ -334,6 +334,13 @@
                                               '("name" . "ASC"))))
       (should (string-match-p "ORDER BY" sql))
       (should (string-match-p "ASC" sql)))
+    ;; Replacing existing ORDER BY for result-driven sort
+    (let ((sql (clutch-db-build-paged-sql
+                conn
+                "SELECT * FROM t ORDER BY created_at DESC"
+                0 10 '("name" . "ASC"))))
+      (should (string-match-p "ORDER BY `name` ASC" sql))
+      (should-not (string-match-p "ORDER BY created_at DESC.*ORDER BY" sql)))
     ;; Already has LIMIT — no modification
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t LIMIT 5" 0 10)))
       (should (equal sql "SELECT * FROM t LIMIT 5")))
@@ -363,6 +370,13 @@
                                               '("id" . "DESC"))))
       (should (string-match-p "ORDER BY" sql))
       (should (string-match-p "DESC" sql)))
+    ;; Replacing existing ORDER BY for result-driven sort
+    (let ((sql (clutch-db-build-paged-sql
+                conn
+                "SELECT * FROM t ORDER BY created_at DESC"
+                0 10 '("id" . "ASC"))))
+      (should (string-match-p "ORDER BY \"id\" ASC" sql))
+      (should-not (string-match-p "ORDER BY created_at DESC.*ORDER BY" sql)))
     ;; Query with trailing semicolon
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t;" 0 10)))
       (should (string-match-p "LIMIT 10" sql))
