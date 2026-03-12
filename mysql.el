@@ -45,6 +45,8 @@
 
 (require 'cl-lib)
 
+(declare-function gnutls-negotiate "gnutls" (&rest _spec))
+
 ;;;; Error types
 
 (define-error 'mysql-error "MySQL error")
@@ -196,9 +198,12 @@ Advances read-offset without deleting buffer content."
 (defun mysql--read-int-le (conn n)
   "Read an N-byte little-endian integer from CONN."
   (let ((bytes (mysql--read-bytes conn n))
-        (val 0))
-    (dotimes (i n val)
-      (setq val (logior val (ash (aref bytes i) (* i 8)))))))
+        (val 0)
+        (i 0))
+    (while (< i n)
+      (setq val (logior val (ash (aref bytes i) (* i 8))))
+      (setq i (1+ i)))
+    val))
 
 (defun mysql--read-lenenc-int (conn)
   "Read a length-encoded integer from CONN."
@@ -250,9 +255,12 @@ multiple 16 MB fragments."
 
 (defun mysql--int-le-bytes (value n)
   "Encode VALUE as an N-byte little-endian unibyte string."
-  (let ((bytes (make-string n 0)))
-    (dotimes (i n bytes)
-      (aset bytes i (logand (ash value (* i -8)) #xff)))))
+  (let ((bytes (make-string n 0))
+        (i 0))
+    (while (< i n)
+      (aset bytes i (logand (ash value (* i -8)) #xff))
+      (setq i (1+ i)))
+    bytes))
 
 (defun mysql--lenenc-int-bytes (value)
   "Encode VALUE as a length-encoded integer unibyte string."
@@ -300,9 +308,12 @@ Handles splitting payloads larger than 0xFFFFFF."
 (defun mysql--xor-strings (a b)
   "XOR two equal-length unibyte strings A and B."
   (let* ((len (length a))
-         (result (make-string len 0)))
-    (dotimes (i len result)
-      (aset result i (logxor (aref a i) (aref b i))))))
+         (result (make-string len 0))
+         (i 0))
+    (while (< i len)
+      (aset result i (logxor (aref a i) (aref b i)))
+      (setq i (1+ i)))
+    result))
 
 (defun mysql--auth-mysql-native-password (password salt)
   "Compute mysql_native_password auth response.
@@ -338,9 +349,12 @@ Algorithm: SHA256(password) XOR SHA256(SHA256(SHA256(password)) + salt)"
 
 (defun mysql--read-le-uint (packet pos n)
   "Read an N-byte little-endian unsigned integer from PACKET at POS."
-  (let ((val 0))
-    (dotimes (i n val)
-      (setq val (logior val (ash (aref packet (+ pos i)) (* i 8)))))))
+  (let ((val 0)
+        (i 0))
+    (while (< i n)
+      (setq val (logior val (ash (aref packet (+ pos i)) (* i 8))))
+      (setq i (1+ i)))
+    val))
 
 (defun mysql--parse-handshake-salt (conn packet pos salt-part1 auth-data-len)
   "Parse the second salt part and auth plugin from handshake PACKET at POS.
@@ -692,6 +706,7 @@ Returns the converted Elisp value, or nil for SQL NULL."
 (defun mysql--upgrade-to-tls (conn)
   "Upgrade CONN's network connection to TLS using GnuTLS."
   (let ((proc (mysql-conn-process conn)))
+    (require 'gnutls)
     (gnutls-negotiate
      :process proc
      :hostname (mysql-conn-host conn)

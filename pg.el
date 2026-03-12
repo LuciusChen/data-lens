@@ -580,6 +580,7 @@ Returns the server's response character (?S or ?N)."
 (defun pg--upgrade-to-tls (conn)
   "Upgrade CONN's network connection to TLS."
   (let ((proc (pg-conn-process conn)))
+    (require 'gnutls)
     (gnutls-negotiate
      :process proc
      :hostname (pg-conn-host conn)

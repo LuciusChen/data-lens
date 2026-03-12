@@ -722,14 +722,19 @@ Skips unless both `mysql-test-password' and `mysql-test-tls-enabled' are set."
                                   :port mysql-test-port
                                   :user mysql-test-user
                                   :password mysql-test-password
-                                  :database mysql-test-database)))
+                                  :database mysql-test-database
+                                  :tls t)))
         (unwind-protect
             (progn
               (condition-case nil
                   (mysql-query admin "DROP USER '_mysql_el_sha2test'@'%'")
                 (mysql-query-error nil))
-              (mysql-query admin
-                "CREATE USER '_mysql_el_sha2test'@'%' IDENTIFIED WITH caching_sha2_password BY 'testpw'")
+              (condition-case err
+                  (mysql-query admin
+                    "CREATE USER '_mysql_el_sha2test'@'%' IDENTIFIED WITH caching_sha2_password BY 'testpw'")
+                (mysql-query-error
+                 (ert-skip (format "Server does not support caching_sha2_password: %s"
+                                   (cadr err)))))
               (mysql-query admin "GRANT ALL ON *.* TO '_mysql_el_sha2test'@'%'")
               (mysql-query admin "FLUSH PRIVILEGES"))
           (mysql-disconnect admin)))
@@ -752,7 +757,8 @@ Skips unless both `mysql-test-password' and `mysql-test-tls-enabled' are set."
                                   :port mysql-test-port
                                   :user mysql-test-user
                                   :password mysql-test-password
-                                  :database mysql-test-database)))
+                                  :database mysql-test-database
+                                  :tls t)))
         (unwind-protect
             (condition-case nil
                 (mysql-query admin "DROP USER '_mysql_el_sha2test'@'%'")
