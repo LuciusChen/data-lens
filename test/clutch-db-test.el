@@ -522,6 +522,15 @@ Skips if `clutch-db-test-mysql-password' is nil."
     (should-error (clutch-db-query conn "SELEC BAD")
                   :type 'clutch-db-error)))
 
+(ert-deftest clutch-db-test-mysql-show-create-table-empty-rows-errors-cleanly ()
+  "MySQL show-create-table should signal `clutch-db-error' on empty row sets."
+  (let ((conn (make-mysql-conn :host "localhost")))
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn _sql)
+                 (make-mysql-result :rows nil))))
+      (should-error (clutch-db-show-create-table conn "missing_table")
+                    :type 'clutch-db-error))))
+
 ;;;; Live integration tests — PostgreSQL
 
 (defmacro clutch-db-test--with-pg (var &rest body)

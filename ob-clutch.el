@@ -71,16 +71,6 @@
   '(:backend :sql-product :pass-entry)
   "Connection plist keys not passed to backend connect functions.")
 
-(defun ob-clutch--pass-secret-by-suffix (suffix)
-  "Return pass secret from the first entry whose path ends with SUFFIX."
-  (when (and (fboundp 'auth-source-pass-entries)
-             (fboundp 'auth-source-pass-parse-entry))
-    (let* ((re (format "\\(^\\|/\\)%s$" (regexp-quote suffix)))
-           (entry (cl-find-if (lambda (e) (string-match-p re e))
-                              (auth-source-pass-entries))))
-      (when entry
-        (cdr (assq 'secret (auth-source-pass-parse-entry entry)))))))
-
 (defun ob-clutch--resolve-password (params)
   "Resolve password for PARAMS via :password, pass, then auth-source."
   (let ((pw (plist-get params :password))
@@ -88,7 +78,7 @@
     (cond
      ((and (stringp pw) (> (length pw) 0)) pw)
      (t
-      (or (and entry (ob-clutch--pass-secret-by-suffix entry))
+      (or (and entry (clutch-db--pass-secret-by-suffix entry))
           (when-let* ((found (car (auth-source-search
                                    :host (plist-get params :host)
                                    :user (plist-get params :user)

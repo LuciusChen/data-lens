@@ -198,6 +198,9 @@ Appends LIMIT/OFFSET directly to BASE-SQL.  ORDER-BY is (COL . DIR) or nil."
                       (format "SHOW CREATE TABLE %s"
                               (mysql-escape-identifier table))))
              (rows (mysql-result-rows result)))
+        (unless rows
+          (signal 'clutch-db-error
+                  (list (format "SHOW CREATE TABLE returned no rows for %s" table))))
         (pcase-let ((`(,_ ,ddl) (car rows)))
           ddl))
     (mysql-error

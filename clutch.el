@@ -581,18 +581,6 @@ using the stored params.  Signals a user-error if not recoverable."
          (t "DB[disconnected]")))
   (force-mode-line-update))
 
-(defun clutch--pass-secret-by-suffix (suffix)
-  "Return the password from the first pass entry whose path ends with SUFFIX.
-Matches e.g. \\='dev-mysql\\=' against \\='mysql/dev-mysql\\='.
-Returns nil when no matching entry is found or auth-source-pass is absent."
-  (when (and (fboundp 'auth-source-pass-entries)
-             (fboundp 'auth-source-pass-parse-entry))
-    (let* ((re    (format "\\(^\\|/\\)%s$" (regexp-quote suffix)))
-           (entry (cl-find-if (lambda (e) (string-match-p re e))
-                              (auth-source-pass-entries))))
-      (when entry
-        (cdr (assq 'secret (auth-source-pass-parse-entry entry)))))))
-
 (defconst clutch--jdbc-backends
   '(oracle sqlserver db2 snowflake redshift)
   "Backends routed through the JDBC agent.")
@@ -663,7 +651,7 @@ Returns nil when nothing is found (caller should prompt if needed)."
     (cond
      ((and (stringp pw) (not (string-empty-p pw))) pw)
      (t
-      (or (and entry (clutch--pass-secret-by-suffix entry))
+      (or (and entry (clutch-db--pass-secret-by-suffix entry))
           (when-let* ((found  (car (auth-source-search
                                     :host (plist-get params :host)
                                     :user (plist-get params :user)

@@ -58,13 +58,13 @@
   ;; explicit
   (should (equal (ob-clutch--resolve-password '(:password "p1")) "p1"))
   ;; pass
-  (cl-letf (((symbol-function 'ob-clutch--pass-secret-by-suffix)
+  (cl-letf (((symbol-function 'clutch-db--pass-secret-by-suffix)
              (lambda (_suffix) "p2"))
             ((symbol-function 'auth-source-search)
              (lambda (&rest _args) nil)))
     (should (equal (ob-clutch--resolve-password '(:pass-entry "dev")) "p2")))
   ;; auth-source function secret
-  (cl-letf (((symbol-function 'ob-clutch--pass-secret-by-suffix)
+  (cl-letf (((symbol-function 'clutch-db--pass-secret-by-suffix)
              (lambda (_suffix) nil))
             ((symbol-function 'auth-source-search)
              (lambda (&rest _args)
