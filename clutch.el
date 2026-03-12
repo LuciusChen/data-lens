@@ -287,6 +287,12 @@ Used to update the mode-line with a spinner during execution.")
 (defvar-local clutch--row-start-positions nil
   "Vector mapping rendered row indices to their line start positions.")
 
+(defconst clutch--schema-inline-table-limit 3
+  "Maximum number of statement tables for synchronous schema hints.")
+
+(defconst clutch--schema-inline-min-prefix-length 2
+  "Minimum symbol prefix length before loading column hints synchronously.")
+
 (defvar clutch--source-window nil
   "Window that initiated the current query execution.
 Dynamically bound by `clutch--execute' so result buffers open
@@ -1220,6 +1226,44 @@ Returns a list of propertized strings (may be empty)."
                      (propertize clutch--filter-pattern
                                  'face 'font-lock-string-face)))))))
 
+(defun clutch--footer-sort-part ()
+  "Build footer part for active SQL ORDER BY state."
+  (when-let* ((order clutch--order-by))
+    (pcase-let ((`(,column . ,direction) order))
+      (let ((dim 'font-lock-comment-face)
+            (hi 'font-lock-keyword-face))
+        (concat (propertize (concat (clutch--icon '(codicon . "nf-cod-sort_desc") "↕") " ")
+                            'face dim)
+                (propertize column 'face hi)
+                (propertize " " 'face dim)
+                (propertize (upcase direction) 'face hi))))))
+
+(defun clutch--footer-pending-part ()
+  "Build footer part for staged edits, deletions, or insertions."
+  (let (parts)
+    (when clutch--pending-edits
+      (push (format "%d edit%s"
+                    (length clutch--pending-edits)
+                    (if (= (length clutch--pending-edits) 1) "" "s"))
+            parts))
+    (when clutch--pending-deletes
+      (push (format "%d deletion%s"
+                    (length clutch--pending-deletes)
+                    (if (= (length clutch--pending-deletes) 1) "" "s"))
+            parts))
+    (when clutch--pending-inserts
+      (push (format "%d insertion%s"
+                    (length clutch--pending-inserts)
+                    (if (= (length clutch--pending-inserts) 1) "" "s"))
+            parts))
+    (when parts
+      (concat
+       (propertize (concat (clutch--icon '(codicon . "nf-cod-diff_modified") "✎") " ")
+                   'face 'clutch-modified-face)
+       (propertize (mapconcat #'identity (nreverse parts) ", ")
+                   'face 'clutch-modified-face)
+       (propertize "  C-c C-c" 'face 'font-lock-comment-face)))))
+
 (defun clutch--footer-main-parts (row-count page-num page-size
                                              total-rows col-num-pages col-cur-page)
   "Return list of main footer part strings for pagination state."
@@ -1241,6 +1285,8 @@ Returns a list of propertized strings (may be empty)."
              (concat (propertize (concat (clutch--icon '(codicon . "nf-cod-split_horizontal") "⫼") " ")
                                  'face dim)
                      (propertize (format "%d/%d" col-cur-page col-num-pages) 'face hi)))
+           (clutch--footer-sort-part)
+           (clutch--footer-pending-part)
            (when clutch--query-elapsed
              (concat (propertize (concat (clutch--icon '(mdicon . "nf-md-timer_outline") "⏱") " ")
                                  'face dim)
@@ -1425,27 +1471,6 @@ ROW-POSITIONS stores line starts keyed by rendered row index."
                                            has-prev has-next
                                            clutch--header-active-col))))
 
-(defun clutch--render-pending-changes-header ()
-  "Insert a notification line if there are any pending changes."
-  (let (parts)
-    (when clutch--pending-edits
-      (push (format "%d edit%s" (length clutch--pending-edits)
-                    (if (= (length clutch--pending-edits) 1) "" "s"))
-            parts))
-    (when clutch--pending-deletes
-      (push (format "%d deletion%s" (length clutch--pending-deletes)
-                    (if (= (length clutch--pending-deletes) 1) "" "s"))
-            parts))
-    (when clutch--pending-inserts
-      (push (format "%d insertion%s" (length clutch--pending-inserts)
-                    (if (= (length clutch--pending-inserts) 1) "" "s"))
-            parts))
-    (when parts
-      (insert (propertize
-               (format "-- %s pending — C-c C-c to commit\n"
-                       (mapconcat #'identity (nreverse parts) ", "))
-               'face 'clutch-modified-face)))))
-
 (defun clutch--render-result ()
   "Render the result buffer content using column paging.
 Preserves point position (row + column) across the render."
@@ -1470,7 +1495,6 @@ Preserves point position (row + column) across the render."
     (setq clutch--row-start-positions row-positions)
     (clutch--update-result-line-formats rows col-num-pages cur-page
                                         has-prev has-next visible-cols widths nw)
-    (clutch--render-pending-changes-header)
     (clutch--insert-data-rows rows visible-cols widths nw global-first-row edge-fn
                               row-positions)
     (clutch--insert-pending-insert-rows visible-cols widths nw (length rows)
@@ -2490,42 +2514,68 @@ Returns a string or nil."
               (list :schema schema :tick tick :tables tables))
         tables))))
 
-(defun clutch--tables-in-query (schema)
-  "Return known table names in FROM/JOIN/UPDATE clauses of current statement.
-Scans only the SQL statement surrounding point, bounded by semicolons or
-blank lines.  Falls back to `clutch--tables-in-buffer' when none are found."
-  (let* ((delim "\\(;\\|^[[:space:]]*$\\)")
-         (tick  (buffer-chars-modified-tick))
-         (beg   (save-excursion
-                  (if (re-search-backward delim nil t)
-                      (match-end 0) (point-min))))
-         (end   (save-excursion
-                  (if (re-search-forward delim nil t)
-                      (match-beginning 0) (point-max))))
-         (cached clutch--tables-in-query-cache))
+(defun clutch--statement-bounds ()
+  "Return (BEG . END) for the SQL statement surrounding point."
+  (let ((delim "\\(;\\|^[[:space:]]*$\\)"))
+    (cons
+     (save-excursion
+       (if (re-search-backward delim nil t)
+           (match-end 0)
+         (point-min)))
+     (save-excursion
+       (if (re-search-forward delim nil t)
+           (match-beginning 0)
+         (point-max))))))
+
+(defun clutch--compute-tables-in-query-cache (schema)
+  "Return a fresh cache plist for table-name analysis on SCHEMA."
+  (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
+    (let* ((tick (buffer-chars-modified-tick))
+           (text (buffer-substring-no-properties beg end))
+           (case-fold-search t)
+           found
+           (statement-tables
+            (progn
+              (maphash
+               (lambda (tbl _cols)
+                 (when (string-match-p
+                        (format "\\b\\(from\\|join\\|update\\|into\\)[ \t\n]+%s\\b"
+                                (regexp-quote tbl))
+                        text)
+                   (push tbl found)))
+               schema)
+              (nreverse found))))
+    (list :schema schema
+          :tick tick
+          :beg beg
+          :end end
+          :statement-tables statement-tables
+          :tables (or statement-tables
+                      (clutch--tables-in-buffer schema))))))
+
+(defun clutch--tables-in-query-cache-entry (schema)
+  "Return the cache entry for table analysis on SCHEMA, refreshing if needed."
+  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
+               (tick (buffer-chars-modified-tick))
+               (cached clutch--tables-in-query-cache))
     (if (and cached
              (eq (plist-get cached :schema) schema)
              (= (plist-get cached :tick) tick)
              (= (plist-get cached :beg) beg)
              (= (plist-get cached :end) end))
-        (plist-get cached :tables)
-      (let* ((text  (buffer-substring-no-properties beg end))
-             (case-fold-search t)
-             found
-             (tables
-              (progn
-                (maphash (lambda (tbl _cols)
-                           (when (string-match-p
-                                  (format "\\b\\(from\\|join\\|update\\|into\\)[ \t\n]+%s\\b"
-                                          (regexp-quote tbl))
-                                  text)
-                             (push tbl found)))
-                         schema)
-                (or (nreverse found)
-                    (clutch--tables-in-buffer schema)))))
-        (setq clutch--tables-in-query-cache
-              (list :schema schema :tick tick :beg beg :end end :tables tables))
-        tables))))
+        cached
+      (setq clutch--tables-in-query-cache
+            (clutch--compute-tables-in-query-cache schema)))))
+
+(defun clutch--tables-in-current-statement (schema)
+  "Return known table names mentioned in the current statement only."
+  (plist-get (clutch--tables-in-query-cache-entry schema) :statement-tables))
+
+(defun clutch--tables-in-query (schema)
+  "Return known table names in FROM/JOIN/UPDATE clauses of current statement.
+Scans only the SQL statement surrounding point, bounded by semicolons or
+blank lines.  Falls back to `clutch--tables-in-buffer' when none are found."
+  (plist-get (clutch--tables-in-query-cache-entry schema) :tables))
 
 (defconst clutch--sql-keywords
   '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"
@@ -3010,6 +3060,7 @@ when completion triggers during an in-flight query)."
               (bounds (bounds-of-thing-at-point 'symbol)))
     (let* ((beg (car bounds))
            (end (cdr bounds))
+           (prefix-len (- end beg))
            (line-before (buffer-substring-no-properties
                          (line-beginning-position) beg))
            ;; After FROM/JOIN/INTO/UPDATE → table names only
@@ -3018,12 +3069,19 @@ when completion triggers during an in-flight query)."
              "\\b\\(FROM\\|JOIN\\|INTO\\|UPDATE\\|TABLE\\|DESCRIBE\\|DESC\\)\\s-+\\S-*\\'"
              (upcase line-before)))
            (busy (clutch-db-busy-p conn))
+           (context-tables
+            (unless (or table-context-p busy
+                        (< prefix-len clutch--schema-inline-min-prefix-length))
+              (let ((tables (clutch--tables-in-current-statement schema)))
+                (when (and tables
+                           (<= (length tables) clutch--schema-inline-table-limit))
+                  tables))))
            (candidates
-            (if (or table-context-p busy)
+            (if (not context-tables)
                 (hash-table-keys schema)
               ;; Load columns only for tables in the current statement
               (let ((all (copy-sequence (hash-table-keys schema))))
-                (dolist (tbl (clutch--tables-in-query schema))
+                (dolist (tbl context-tables)
                   (when-let* ((cols (clutch--ensure-columns
                                      conn schema tbl)))
                     (setq all (nconc all (copy-sequence cols)))))
@@ -3050,10 +3108,14 @@ Matches SYM as a table name first, then as a column in any visible table."
               (when comment
                 (propertize (format "  — %s" comment) 'face 'shadow)))))
    (t
-    (cl-loop for tbl in (clutch--tables-in-buffer schema)
-             for cols = (clutch--ensure-columns conn schema tbl)
-             when (and cols (member sym cols))
-             return (clutch--eldoc-column-string conn tbl sym)))))
+    (when (>= (length sym) clutch--schema-inline-min-prefix-length)
+      (let ((tables (clutch--tables-in-current-statement schema)))
+        (when (and tables
+                   (<= (length tables) clutch--schema-inline-table-limit))
+          (cl-loop for tbl in tables
+                   for cols = (clutch--ensure-columns conn schema tbl)
+                   when (and cols (member sym cols))
+                   return (clutch--eldoc-column-string conn tbl sym))))))))
 
 (defun clutch--eldoc-function (&rest _)
   "Eldoc backend for `clutch-mode'.

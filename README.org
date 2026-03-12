@@ -57,7 +57,7 @@ The JDBC backend requires Java 11+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 
 - Column-paged result display (no horizontal scrolling)
 - SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
-  - =tab-line=: row count, page, elapsed time, aggregate status, and active filters (with =nerd-icons=, Unicode fallback)
+  - =tab-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, and active filters (with =nerd-icons=, Unicode fallback)
   - =header-line=: column names with =│= borders and underlined labels
 - After execution, focus stays in the SQL buffer while results refresh below
 - Last successfully executed SQL region is highlighted in the editor
@@ -71,7 +71,7 @@ The JDBC backend requires Java 11+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 - Pin/unpin columns, adjust column widths
 - CSV/Org export, copy as INSERT
 - Schema browser with expandable column details (=TAB= to expand/collapse)
-- SQL completion: table/column names scoped to the FROM clause of the current statement, plus keywords
+- SQL completion: table/column names scoped to the current statement, with synchronous column loading kept conservative for large schemas, plus keywords
 - Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
@@ -364,6 +364,7 @@ Step 6 — press RET to confirm.
               → Appends WHERE clause, re-queries from page 1
 7. /          Client-side filter: type a pattern to narrow visible rows instantly
 8. s          Sort by current column (SQL ORDER BY), re-queries from page 1
+              → tab-line adds current ORDER BY state
 9. A          Aggregate selected cells/current cell
               → tab-line adds aggregate status (sum/avg/min/max + [rows/cells/skipped])
 10. W         Enter empty string → clears filter, restores original query
@@ -385,7 +386,7 @@ Step 6 — press RET to confirm.
 2. Move cursor to the cell to modify
 3. C-c '                      → opens edit buffer
 4. Edit the value, C-c C-c to stage (C-c C-k to cancel)
-                               echo area shows "N pending edits — C-c C-c to commit"
+                               tab-line shows staged edit/delete/insert summary
 5. Repeat for other cells — modified cells are highlighted
 6. C-c C-c in result buffer  → confirmation prompt showing the UPDATE statements
 #+end_src
