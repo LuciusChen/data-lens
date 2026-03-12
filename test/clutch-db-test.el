@@ -155,6 +155,59 @@
         (should (= (alist-get 'query-timeout-seconds captured-params) 16))
         (should (= (clutch-db-result-affected-rows result) 1))))))
 
+(ert-deftest clutch-db-test-jdbc-validate-agent-jar-rejects-mismatch ()
+  "JDBC agent startup should reject a jar with the wrong checksum."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
+         (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
+         (clutch-jdbc-agent-dir tmpdir)
+         (clutch-jdbc-agent-version "0.1.2")
+         (clutch-jdbc-agent-sha256 "deadbeef"))
+    (unwind-protect
+        (progn
+          (with-temp-file jar
+            (insert "not a release jar"))
+          (should-error (clutch-jdbc--validate-agent-jar jar) :type 'user-error))
+      (delete-directory tmpdir t))))
+
+(ert-deftest clutch-db-test-jdbc-ensure-agent-cleans-stale-jars ()
+  "Ensuring the agent should keep only the current versioned jar."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
+         (clutch-jdbc-agent-dir tmpdir)
+         (clutch-jdbc-agent-version "0.1.2")
+         (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
+         (stale-a (expand-file-name "clutch-jdbc-agent-0.1.0.jar" tmpdir))
+         (stale-b (expand-file-name "clutch-jdbc-agent-0.1.1.jar" tmpdir))
+         (clutch-jdbc-agent-sha256 nil))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "drivers" tmpdir) t)
+          (with-temp-file jar
+            (insert "current"))
+          (with-temp-file stale-a
+            (insert "old-a"))
+          (with-temp-file stale-b
+            (insert "old-b"))
+          (clutch-jdbc-ensure-agent)
+          (should (file-exists-p jar))
+          (should-not (file-exists-p stale-a))
+          (should-not (file-exists-p stale-b)))
+      (delete-directory tmpdir t))))
+
+(ert-deftest clutch-db-test-jdbc-ensure-agent-allows-custom-jar-when-checksum-disabled ()
+  "Checksum verification can be disabled for a local custom jar."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
+         (clutch-jdbc-agent-dir tmpdir)
+         (clutch-jdbc-agent-version "0.1.2")
+         (clutch-jdbc-agent-sha256 nil)
+         (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir)))
+    (unwind-protect
+        (progn
+          (with-temp-file jar
+            (insert "custom build"))
+          (should (clutch-jdbc--agent-jar-valid-p jar))
+          (should (progn (clutch-jdbc--validate-agent-jar jar) t)))
+      (delete-directory tmpdir t))))
+
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()

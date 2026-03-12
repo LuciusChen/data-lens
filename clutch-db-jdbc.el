@@ -54,6 +54,13 @@
   :type 'string
   :group 'clutch-jdbc)
 
+(defcustom clutch-jdbc-agent-sha256
+  "cf857f7e9bfa6247b756c071133710760a9e054c2c5f0a6c6c5d48b9212fc0c9"
+  "Expected SHA-256 for the bundled clutch-jdbc-agent jar.
+Set this to nil to disable checksum verification for a locally built jar."
+  :type '(choice (const :tag "Disable verification" nil) string)
+  :group 'clutch-jdbc)
+
 (defcustom clutch-jdbc-agent-java-executable "java"
   "Java executable used to launch clutch-jdbc-agent."
   :type 'string
@@ -139,6 +146,42 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
   "Return the drivers/ directory path."
   (expand-file-name "drivers" clutch-jdbc-agent-dir))
 
+(defun clutch-jdbc--agent-jar-sha256 (&optional jar)
+  "Return the SHA-256 of JAR.
+JAR defaults to `clutch-jdbc--agent-jar'."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally (or jar (clutch-jdbc--agent-jar)))
+    (secure-hash 'sha256 (current-buffer))))
+
+(defun clutch-jdbc--agent-jar-valid-p (&optional jar)
+  "Return non-nil if JAR matches `clutch-jdbc-agent-sha256'.
+If verification is disabled, return non-nil."
+  (or (null clutch-jdbc-agent-sha256)
+      (string-equal (clutch-jdbc--agent-jar-sha256 jar)
+                    clutch-jdbc-agent-sha256)))
+
+(defun clutch-jdbc--validate-agent-jar (&optional jar)
+  "Signal `user-error' unless JAR exists and passes checksum verification.
+JAR defaults to `clutch-jdbc--agent-jar'."
+  (let ((jar (or jar (clutch-jdbc--agent-jar))))
+    (unless (file-exists-p jar)
+      (user-error "clutch-jdbc-agent jar not found: %s\nRun M-x clutch-jdbc-ensure-agent" jar))
+    (unless (clutch-jdbc--agent-jar-valid-p jar)
+      (user-error (concat "clutch-jdbc-agent checksum mismatch: %s\n"
+                          "Run M-x clutch-jdbc-ensure-agent to refresh it,\n"
+                          "or set `clutch-jdbc-agent-sha256' to nil for a custom jar")
+                  jar))))
+
+(defun clutch-jdbc--cleanup-stale-agent-jars ()
+  "Delete stale versioned clutch-jdbc-agent jars from `clutch-jdbc-agent-dir'."
+  (let ((current (file-name-nondirectory (clutch-jdbc--agent-jar)))
+        (files (directory-files clutch-jdbc-agent-dir t
+                                "\\`clutch-jdbc-agent-.*\\.jar\\'")))
+    (dolist (file files)
+      (unless (string-equal (file-name-nondirectory file) current)
+        (delete-file file)))))
+
 (defun clutch-jdbc--agent-live-p ()
   "Return non-nil if the agent process is running."
   (and clutch-jdbc--agent-process
@@ -164,8 +207,7 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 (defun clutch-jdbc--start-agent ()
   "Start the clutch-jdbc-agent process and wait for its ready signal."
   (let ((jar (clutch-jdbc--agent-jar)))
-    (unless (file-exists-p jar)
-      (user-error "clutch-jdbc-agent jar not found: %s\nRun M-x clutch-jdbc-ensure-agent" jar))
+    (clutch-jdbc--validate-agent-jar jar)
     (unless (executable-find clutch-jdbc-agent-java-executable)
       (user-error "Java not found.  Set `clutch-jdbc-agent-java-executable'"))
     (let* ((buf (generate-new-buffer " *clutch-jdbc-agent*"))
@@ -306,7 +348,6 @@ Returns a `clutch-jdbc-conn'."
          (user     (plist-get normalized-params :user))
          (password (plist-get normalized-params :password))
          (props    (plist-get normalized-params :props))
-         (rpc-timeout (plist-get normalized-params :rpc-timeout))
          (connect-timeout (plist-get normalized-params :connect-timeout))
          (read-idle-timeout (plist-get normalized-params :read-idle-timeout))
          (result   (clutch-jdbc--rpc
@@ -646,16 +687,22 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 Fetches from GitHub Releases."
   (interactive)
   (let ((jar (clutch-jdbc--agent-jar)))
-    (if (file-exists-p jar)
-        (message "clutch-jdbc-agent already at %s" jar)
-      (make-directory clutch-jdbc-agent-dir t)
-      (make-directory (clutch-jdbc--drivers-dir) t)
+    (make-directory clutch-jdbc-agent-dir t)
+    (make-directory (clutch-jdbc--drivers-dir) t)
+    (if (and (file-exists-p jar)
+             (clutch-jdbc--agent-jar-valid-p jar))
+        (progn
+          (clutch-jdbc--cleanup-stale-agent-jars)
+          (message "clutch-jdbc-agent already at %s" jar))
       (let ((url (format
                   "https://github.com/LuciusChen/clutch-jdbc-agent/releases/download/v%s/clutch-jdbc-agent-%s.jar"
                   clutch-jdbc-agent-version
                   clutch-jdbc-agent-version)))
         (message "Downloading clutch-jdbc-agent %s..." clutch-jdbc-agent-version)
-        (url-copy-file url jar)
+        (url-copy-file url jar t)
+        (unless (clutch-jdbc--agent-jar-valid-p jar)
+          (error "Downloaded clutch-jdbc-agent checksum mismatch: %s" jar))
+        (clutch-jdbc--cleanup-stale-agent-jars)
         (message "Downloaded to %s" jar)))))
 
 (defun clutch-jdbc-install-driver (driver)

@@ -499,6 +499,10 @@ drivers directory.
 ;; Download clutch-jdbc-agent.jar (once):
 (clutch-jdbc-ensure-agent)
 
+;; Optional: allow a locally built jar with checksum verification disabled.
+;; Keep this nil only if you intentionally manage the jar yourself.
+(setq clutch-jdbc-agent-sha256 nil)
+
 ;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift):
 (clutch-jdbc-install-driver 'oracle)      ; ojdbc11.jar from Maven Central
 (clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar from Maven Central
@@ -509,6 +513,16 @@ drivers directory.
 
 Driver jars are stored in =~/.emacs.d/clutch-jdbc/drivers/=
 (configurable via =clutch-jdbc-agent-dir=).
+
+The agent jar itself is verified against the release SHA-256 before startup.
+This catches the common case where a local =clutch-jdbc-agent-0.1.2.jar=
+exists but does not actually match the current release asset.
+Running =clutch-jdbc-ensure-agent= also removes stale versioned
+=clutch-jdbc-agent-*.jar= files from the same directory.
+
+If you intentionally use a locally built jar, set
+=clutch-jdbc-agent-sha256= to =nil= to disable verification.  That is the
+escape hatch for custom development builds.
 
 Oracle users on CJK character sets also need =orai18n.jar=:
 #+begin_src emacs-lisp
