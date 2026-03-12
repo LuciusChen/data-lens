@@ -49,7 +49,8 @@
 (require 'cl-lib)
 (require 'clutch-db)
 
-(defvar clutch-connection-alist nil)
+(defvar clutch-connection-alist nil
+  "Forward declaration; defined as `defcustom' in clutch.el.")
 
 (defvar org-babel-default-header-args:clutch '((:results . "table"))
   "Default header arguments for clutch source blocks.")
