@@ -422,6 +422,93 @@
                    "owner"))
     (should (equal (clutch-result-insert--current-field-name) "owner"))))
 
+(ert-deftest clutch-test-insert-local-validation-shows-inline-error ()
+  "Editing an invalid value should mark the current insert field inline."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("impact_score")
+                        clutch--result-column-defs '((:name "impact_score" :type-category numeric))))
+          (with-temp-buffer
+            (insert "impact_score: \n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "impact_score" :type "decimal(5,1)")))))
+              (goto-char (clutch-result-insert--current-field-value-start))
+              (insert "x")
+              (let ((field (clutch-result-insert--field-state "impact_score")))
+                (should (equal (plist-get field :error-message)
+                               "Field impact_score expects a numeric value"))
+                (should (overlayp (plist-get field :error-overlay)))
+                (should (string-match-p "numeric value"
+                                        (overlay-get (plist-get field :error-overlay)
+                                                     'after-string)))))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-local-validation-clears-inline-error ()
+  "Fixing a field should clear its inline validation message."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("impact_score")
+                        clutch--result-column-defs '((:name "impact_score" :type-category numeric))))
+          (with-temp-buffer
+            (insert "impact_score: x\n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "impact_score" :type "decimal(5,1)")))))
+              (let ((field (clutch-result-insert--field-state "impact_score")))
+                (clutch-result-insert--validate-field-live field)
+                (setq field (clutch-result-insert--field-state "impact_score"))
+                (should (plist-get field :error-message))
+                (goto-char (clutch-result-insert--current-field-value-start))
+                (delete-region (point) (line-end-position))
+                (insert "1.5")
+                (setq field (clutch-result-insert--field-state "impact_score"))
+                (should-not (plist-get field :error-message))
+                (should-not (plist-get field :error-overlay))))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-json-validation-is-scheduled-on-idle ()
+  "JSON fields should defer local validation until the user goes idle."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
+        (scheduled nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("postmortem")
+                        clutch--result-column-defs '((:name "postmortem" :type-category json))))
+          (with-temp-buffer
+            (insert "postmortem: \n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "postmortem" :type "json"))))
+                      ((symbol-function 'run-with-idle-timer)
+                       (lambda (secs _repeat fn &rest args)
+                         (setq scheduled (list secs fn args))
+                         'fake-timer)))
+              (goto-char (clutch-result-insert--current-field-value-start))
+              (insert "{")
+              (should scheduled)
+              (should (= (car scheduled) clutch-insert-validation-idle-delay))
+              (should (eq (cadr scheduled)
+                          #'clutch-result-insert--run-idle-validation)))))
+      (kill-buffer result-buf))))
+
 (ert-deftest clutch-test-pending-insert-renders-generated-and-default-placeholders ()
   "Pending insert rows should show generated/default placeholders when known."
   (with-temp-buffer

@@ -66,6 +66,20 @@
   "Face for metadata tags in the insert buffer."
   :group 'clutch)
 
+(defface clutch-insert-field-error-face
+  '((((class color) (background light))
+     :underline (:color "#b91c1c" :style wave))
+    (((class color) (background dark))
+     :underline (:color "#fca5a5" :style wave))
+    (t :inherit error))
+  "Face for invalid values in the insert buffer."
+  :group 'clutch)
+
+(defface clutch-insert-inline-error-face
+  '((t :inherit error))
+  "Face for inline insert-buffer validation messages."
+  :group 'clutch)
+
 (defface clutch-pinned-header-face
   '((t :inherit clutch-header-face))
   "Face for pinned column headers."
@@ -199,6 +213,11 @@ Password resolution order:
                                     (:query-timeout natnum)
                                     (:rpc-timeout natnum)
                                     (:tls boolean))))
+  :group 'clutch)
+
+(defcustom clutch-insert-validation-idle-delay 0.2
+  "Idle seconds before validating heavier insert fields such as JSON."
+  :type 'number
   :group 'clutch)
 
 (defcustom clutch-console-directory
@@ -4523,6 +4542,8 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 \\[clutch-result-insert-cancel]	cancel editing"
   (setq-local truncate-lines t)
   (add-hook 'post-command-hook #'clutch-result-insert--normalize-point nil t)
+  (add-hook 'after-change-functions #'clutch-result-insert--after-change nil t)
+  (add-hook 'kill-buffer-hook #'clutch-result-insert--cleanup nil t)
   (clutch-result-insert--ensure-field-state))
 
 (defun clutch-result-insert-mode (&optional _arg)
@@ -4542,6 +4563,24 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 (defvar-local clutch-result-insert--fields nil
   "Structured field state for the current insert buffer.")
+
+(defvar-local clutch-result-insert--validation-timer nil
+  "Idle validation timer for the current insert buffer.")
+
+(defun clutch-result-insert--cancel-validation-timer ()
+  "Cancel any pending insert-field validation timer."
+  (when (timerp clutch-result-insert--validation-timer)
+    (cancel-timer clutch-result-insert--validation-timer))
+  (setq-local clutch-result-insert--validation-timer nil))
+
+(defun clutch-result-insert--cleanup ()
+  "Tear down timers and overlays owned by the current insert buffer."
+  (clutch-result-insert--cancel-validation-timer)
+  (dolist (field clutch-result-insert--fields)
+    (when-let* ((ov (plist-get field :error-overlay)))
+      (delete-overlay ov)
+      (setf (plist-get field :error-overlay) nil
+            (plist-get field :error-message) nil))))
 
 (defun clutch-result-insert--annotate-field-line (field-name line-start line-end)
   "Attach FIELD-NAME metadata to the buffer text from LINE-START to LINE-END."
@@ -4585,6 +4624,20 @@ Use \\[clutch-result-commit] in the result buffer to commit."
            :key (lambda (field) (plist-get field :name))
            :test #'string=))
 
+(defun clutch-result-insert--field-cell (field-name)
+  "Return the list cell holding FIELD-NAME in `clutch-result-insert--fields'."
+  (clutch-result-insert--ensure-field-state)
+  (cl-loop for cell on clutch-result-insert--fields
+           when (string= (plist-get (car cell) :name) field-name)
+           return cell))
+
+(defun clutch-result-insert--set-field-prop (field prop value)
+  "Store VALUE for PROP on structured FIELD in canonical field state."
+  (when-let* ((name (plist-get field :name))
+              (cell (clutch-result-insert--field-cell name)))
+    (setcar cell (plist-put (car cell) prop value))
+    value))
+
 (defun clutch-result-insert--field-state-at-position (&optional pos)
   "Return structured insert field state at POS, or at point when POS is nil."
   (clutch-result-insert--ensure-field-state)
@@ -4621,6 +4674,90 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   (clutch-result-insert--ensure-field-state)
   (dolist (field clutch-result-insert--fields)
     (clutch-result-insert--sync-field-value field)))
+
+(defun clutch-result-insert--json-field-p (field)
+  "Return non-nil when structured FIELD stores JSON."
+  (let* ((name (plist-get field :name))
+         (detail (or (plist-get field :detail)
+                     (clutch-result-insert--column-detail name)))
+         (col-def (or (plist-get field :column-def)
+                      (clutch-result-insert--column-def name)))
+         (type (downcase (or (plist-get detail :type) ""))))
+    (or (eq (plist-get col-def :type-category) 'json)
+        (string= type "json"))))
+
+(defun clutch-result-insert--clear-field-error (field)
+  "Clear inline validation state for structured FIELD."
+  (when-let* ((ov (or (plist-get field :error-overlay)
+                      (when-let* ((stored (clutch-result-insert--field-state
+                                           (plist-get field :name))))
+                        (plist-get stored :error-overlay)))))
+    (delete-overlay ov))
+  (clutch-result-insert--set-field-prop field :error-overlay nil)
+  (clutch-result-insert--set-field-prop field :error-message nil))
+
+(defun clutch-result-insert--show-field-error (field message)
+  "Show inline validation MESSAGE for structured FIELD."
+  (clutch-result-insert--clear-field-error field)
+  (when-let* ((bounds (clutch-result-insert--field-value-bounds field)))
+    (let* ((beg (car bounds))
+           (end (cdr bounds))
+           (ov (make-overlay beg end nil t t))
+           (hint (propertize (format "  %s" message)
+                             'face 'clutch-insert-inline-error-face)))
+      (overlay-put ov 'face 'clutch-insert-field-error-face)
+      (overlay-put ov 'after-string hint)
+      (overlay-put ov 'help-echo message)
+      (overlay-put ov 'priority 100)
+      (overlay-put ov 'evaporate t)
+      (clutch-result-insert--set-field-prop field :error-overlay ov)
+      (clutch-result-insert--set-field-prop field :error-message message))))
+
+(defun clutch-result-insert--field-validation-message (field)
+  "Return a validation message for structured FIELD, or nil."
+  (let ((name (plist-get field :name))
+        (value (plist-get field :value)))
+    (unless (string-empty-p value)
+      (condition-case err
+          (progn
+            (clutch-result-insert--validate-field name value)
+            nil)
+        (user-error (error-message-string err))))))
+
+(defun clutch-result-insert--validate-field-live (field)
+  "Run local validation for structured FIELD and update inline UI."
+  (clutch-result-insert--sync-field-value field)
+  (if-let* ((message (clutch-result-insert--field-validation-message field)))
+      (clutch-result-insert--show-field-error field message)
+    (clutch-result-insert--clear-field-error field)))
+
+(defun clutch-result-insert--run-idle-validation (buffer field-name)
+  "Validate FIELD-NAME in BUFFER after an idle delay."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq-local clutch-result-insert--validation-timer nil)
+      (when-let* ((field (clutch-result-insert--field-state field-name)))
+        (clutch-result-insert--validate-field-live field)))))
+
+(defun clutch-result-insert--schedule-field-validation (field)
+  "Validate structured FIELD immediately or after idle delay."
+  (clutch-result-insert--cancel-validation-timer)
+  (if (clutch-result-insert--json-field-p field)
+      (setq-local clutch-result-insert--validation-timer
+                  (run-with-idle-timer
+                   clutch-insert-validation-idle-delay nil
+                   #'clutch-result-insert--run-idle-validation
+                   (current-buffer)
+                   (plist-get field :name)))
+    (clutch-result-insert--validate-field-live field)))
+
+(defun clutch-result-insert--after-change (beg end _len)
+  "Locally validate the changed insert field spanning BEG..END."
+  (when-let* ((field (or (clutch-result-insert--field-state-at-position beg)
+                         (and (> beg (point-min))
+                              (clutch-result-insert--field-state-at-position (1- beg)))
+                         (clutch-result-insert--field-state-at-position end))))
+    (clutch-result-insert--schedule-field-validation field)))
 
 (defun clutch-result-insert--field-name-at-line ()
   "Return the insert field name for the current line, or nil."
@@ -4836,7 +4973,9 @@ If nothing handles the completion, fall back to `completing-read'."
 (defun clutch-result-insert--populate-buffer (table col-names &optional fields)
   "Populate the current insert buffer for TABLE and COL-NAMES using FIELDS."
   (let ((inhibit-read-only t)
+        (inhibit-modification-hooks t)
         field-states)
+    (clutch-result-insert--cleanup)
     (erase-buffer)
     (dolist (col col-names)
       (let ((prefix-start (point)))
