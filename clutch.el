@@ -4505,15 +4505,31 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     (define-key map (kbd "C-c C-c") #'clutch-result-insert-commit)
     (define-key map (kbd "C-c C-k") #'clutch-result-insert-cancel)
     map)
-  "Keymap for the INSERT edit buffer.")
+  "Keymap for the INSERT form buffer.")
 
-(define-minor-mode clutch-result-insert-mode
-  "Minor mode for editing a new row to INSERT.
+(defvar clutch-result-insert-mode-hook nil
+  "Hook run after `clutch-result-insert-mode' is enabled.")
+
+(defvar clutch-result-insert-major-mode-map clutch-result-insert-mode-map
+  "Keymap used internally by `clutch-result-insert-major-mode'.")
+
+(defvar clutch-result-insert-major-mode-hook nil
+  "Internal hook run after `clutch-result-insert-major-mode' is enabled.")
+
+(define-derived-mode clutch-result-insert-major-mode text-mode "Clutch-Insert"
+  "Major mode for editing a new row to INSERT.
 \\<clutch-result-insert-mode-map>
-  \\[clutch-result-insert-commit]	Execute INSERT
-  \\[clutch-result-insert-cancel]	Cancel"
-  :lighter " DB-Insert"
-  :keymap clutch-result-insert-mode-map)
+\\[clutch-result-insert-commit]	stage row insertion
+\\[clutch-result-insert-cancel]	cancel editing"
+  (setq-local truncate-lines t)
+  (add-hook 'post-command-hook #'clutch-result-insert--normalize-point nil t)
+  (clutch-result-insert--ensure-field-state))
+
+(defun clutch-result-insert-mode (&optional _arg)
+  "Activate `clutch-result-insert-major-mode', ignoring optional ARG."
+  (interactive)
+  (clutch-result-insert-major-mode)
+  (run-hooks 'clutch-result-insert-mode-hook))
 
 (defvar-local clutch-result-insert--result-buffer nil
   "Reference to the parent result buffer (Insert buffer local).")
@@ -4524,40 +4540,120 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 (defvar-local clutch-result-insert--pending-index nil
   "Pending insert index being edited, or nil for a new staged insertion.")
 
+(defvar-local clutch-result-insert--fields nil
+  "Structured field state for the current insert buffer.")
+
+(defun clutch-result-insert--annotate-field-line (field-name line-start line-end)
+  "Attach FIELD-NAME metadata to the buffer text from LINE-START to LINE-END."
+  (add-text-properties line-start line-end
+                       `(clutch-insert-field-name ,field-name)))
+
+(defun clutch-result-insert--field-name-at-position (&optional pos)
+  "Return insert field name at POS, or at point when POS is nil."
+  (let ((pos (or pos (point))))
+    (or (get-text-property pos 'clutch-insert-field-name)
+        (and (> pos (point-min))
+             (get-text-property (1- pos) 'clutch-insert-field-name)))))
+
+(defun clutch-result-insert--ensure-field-state ()
+  "Populate structured field state from the current buffer when missing."
+  (unless clutch-result-insert--fields
+    (let (field-states)
+      (save-excursion
+        (goto-char (point-min))
+        (while (not (eobp))
+          (beginning-of-line)
+          (when (looking-at clutch-result-insert--field-line-re)
+            (let* ((name (string-trim-right (match-string-no-properties 1)))
+                   (value-start (match-end 0))
+                   (line-start (line-beginning-position))
+                   (line-end (min (point-max) (1+ (line-end-position))))
+                   (value (buffer-substring-no-properties value-start
+                                                          (line-end-position))))
+              (clutch-result-insert--annotate-field-line name line-start line-end)
+              (push (list :name name
+                          :value value
+                          :value-marker (copy-marker value-start))
+                    field-states)))
+          (forward-line 1)))
+      (setq-local clutch-result-insert--fields (nreverse field-states)))))
+
+(defun clutch-result-insert--field-state (field-name)
+  "Return structured insert field state for FIELD-NAME, or nil."
+  (clutch-result-insert--ensure-field-state)
+  (cl-find field-name clutch-result-insert--fields
+           :key (lambda (field) (plist-get field :name))
+           :test #'string=))
+
+(defun clutch-result-insert--field-state-at-position (&optional pos)
+  "Return structured insert field state at POS, or at point when POS is nil."
+  (clutch-result-insert--ensure-field-state)
+  (or (when-let* ((field-name (clutch-result-insert--field-name-at-position pos)))
+        (clutch-result-insert--field-state field-name))
+      (let ((pos (or pos (point))))
+        (cl-find-if
+         (lambda (field)
+           (when-let* ((marker (plist-get field :value-marker))
+                       (start (marker-position marker)))
+             (save-excursion
+               (goto-char start)
+               (and (<= (line-beginning-position) pos)
+                    (<= pos (line-end-position))))))
+         clutch-result-insert--fields))))
+
+(defun clutch-result-insert--field-value-bounds (field)
+  "Return editable value bounds for structured FIELD, or nil."
+  (when-let* ((marker (plist-get field :value-marker))
+              (beg (marker-position marker)))
+    (save-excursion
+      (goto-char beg)
+      (cons beg (line-end-position)))))
+
+(defun clutch-result-insert--sync-field-value (field)
+  "Refresh FIELD value from the current buffer and return FIELD."
+  (when-let* ((bounds (clutch-result-insert--field-value-bounds field)))
+    (setf (plist-get field :value)
+          (buffer-substring-no-properties (car bounds) (cdr bounds))))
+  field)
+
+(defun clutch-result-insert--sync-fields-from-buffer ()
+  "Refresh all structured insert field values from the current buffer."
+  (clutch-result-insert--ensure-field-state)
+  (dolist (field clutch-result-insert--fields)
+    (clutch-result-insert--sync-field-value field)))
+
 (defun clutch-result-insert--field-name-at-line ()
   "Return the insert field name for the current line, or nil."
   (save-excursion
     (beginning-of-line)
-    (when (looking-at clutch-result-insert--field-line-re)
-      (string-trim-right (match-string-no-properties 1)))))
+    (when-let* ((field (clutch-result-insert--field-state-at-position)))
+      (plist-get field :name))))
 
 (defun clutch-result-insert--current-field-value-start ()
   "Return the start position of the current insert field value, or nil."
-  (save-excursion
-    (beginning-of-line)
-    (when (looking-at clutch-result-insert--field-line-re)
-      (match-end 0))))
+  (when-let* ((field (clutch-result-insert--field-state-at-position))
+              (bounds (clutch-result-insert--field-value-bounds field)))
+    (car bounds)))
 
 (defun clutch-result-insert--current-field-value-position ()
   "Return point for the current insert field value, or nil."
-  (when-let* ((pos (clutch-result-insert--current-field-value-start)))
-    (save-excursion
-      (goto-char pos)
-      (line-end-position))))
+  (when-let* ((field (clutch-result-insert--field-state-at-position))
+              (bounds (clutch-result-insert--field-value-bounds field)))
+    (cdr bounds)))
 
 (defun clutch-result-insert--adjacent-field-value-position (&optional backward)
   "Return point for the adjacent insert field value.
 When BACKWARD is non-nil, move to the previous field; otherwise move to the
 next field. Returns nil when no matching field exists."
-  (save-excursion
-    (let ((step (if backward -1 1)))
-      (forward-line step)
-      (while (and (not (if backward (bobp) (eobp)))
-                  (not (looking-at-p clutch-result-insert--field-line-re)))
-        (forward-line step))
-      (when (looking-at clutch-result-insert--field-line-re)
-        (goto-char (match-end 0))
-        (line-end-position)))))
+  (when-let* ((current (clutch-result-insert--field-state-at-position))
+              (fields clutch-result-insert--fields)
+              (idx (cl-position current fields :test #'eq))
+              (next-idx (+ idx (if backward -1 1)))
+              ((<= 0 next-idx))
+              ((< next-idx (length fields)))
+              (field (nth next-idx fields))
+              (bounds (clutch-result-insert--field-value-bounds field)))
+    (cdr bounds)))
 
 (defun clutch-result-insert--current-field-name ()
   "Return the current insert field name, or nil."
@@ -4567,31 +4663,31 @@ next field. Returns nil when no matching field exists."
 
 (defun clutch-result-insert--current-field-value-bounds ()
   "Return value bounds of the current insert field, or nil."
-  (when-let* ((pos (clutch-result-insert--current-field-value-start)))
-    (save-excursion
-      (goto-char pos)
-      (cons pos (line-end-position)))))
+  (when-let* ((field (clutch-result-insert--field-state-at-position)))
+    (clutch-result-insert--field-value-bounds field)))
 
 (defun clutch-result-insert--column-def (field-name)
   "Return result column plist for FIELD-NAME from the parent result buffer."
-  (when-let* ((result-buf clutch-result-insert--result-buffer)
-              ((buffer-live-p result-buf)))
-    (with-current-buffer result-buf
-      (when-let* ((idx (cl-position field-name clutch--result-columns
-                                    :test #'string=)))
-        (nth idx clutch--result-column-defs)))))
+  (or (plist-get (clutch-result-insert--field-state field-name) :column-def)
+      (when-let* ((result-buf clutch-result-insert--result-buffer)
+                  ((buffer-live-p result-buf)))
+        (with-current-buffer result-buf
+          (when-let* ((idx (cl-position field-name clutch--result-columns
+                                        :test #'string=)))
+            (nth idx clutch--result-column-defs))))))
 
 (defun clutch-result-insert--column-detail (field-name)
   "Return detailed column plist for FIELD-NAME from the parent result buffer."
-  (let ((table clutch-result-insert--table))
-    (when-let* ((result-buf clutch-result-insert--result-buffer)
-              ((buffer-live-p result-buf)))
-      (with-current-buffer result-buf
-        (when-let* ((conn clutch-connection)
-                    (details (clutch--ensure-column-details conn table)))
-          (cl-find field-name details
-                   :key (lambda (d) (plist-get d :name))
-                   :test #'string=))))))
+  (or (plist-get (clutch-result-insert--field-state field-name) :detail)
+      (let ((table clutch-result-insert--table))
+        (when-let* ((result-buf clutch-result-insert--result-buffer)
+                    ((buffer-live-p result-buf)))
+          (with-current-buffer result-buf
+            (when-let* ((conn clutch-connection)
+                        (details (clutch--ensure-column-details conn table)))
+              (cl-find field-name details
+                       :key (lambda (d) (plist-get d :name))
+                       :test #'string=)))))))
 
 (defun clutch-result-insert--enum-candidates (type)
   "Return enum candidates parsed from SQL TYPE, or nil."
@@ -4671,10 +4767,7 @@ TIME defaults to `current-time'."
 
 (defun clutch-result-insert--line-prefix-end ()
   "Return the end position of the current insert field prefix."
-  (save-excursion
-    (beginning-of-line)
-    (when (looking-at clutch-result-insert--field-line-re)
-      (match-end 0))))
+  (clutch-result-insert--current-field-value-start))
 
 (defun clutch-result-insert--field-prefix-read-only-p ()
   "Return non-nil when point is inside the read-only insert field prefix."
@@ -4742,7 +4835,8 @@ If nothing handles the completion, fall back to `completing-read'."
 
 (defun clutch-result-insert--populate-buffer (table col-names &optional fields)
   "Populate the current insert buffer for TABLE and COL-NAMES using FIELDS."
-  (let ((inhibit-read-only t))
+  (let ((inhibit-read-only t)
+        field-states)
     (erase-buffer)
     (dolist (col col-names)
       (let ((prefix-start (point)))
@@ -4750,8 +4844,17 @@ If nothing handles the completion, fall back to `completing-read'."
                 ": ")
         (add-text-properties prefix-start (point)
                              '(read-only t front-sticky t rear-nonsticky t))
-        (insert (or (cdr (assoc col fields)) "")
-                "\n"))))
+        (let ((value (or (cdr (assoc col fields)) ""))
+              (value-marker (copy-marker (point))))
+          (insert value "\n")
+          (clutch-result-insert--annotate-field-line col prefix-start (point))
+          (push (list :name col
+                      :value value
+                      :detail (clutch-result-insert--column-detail col)
+                      :column-def (clutch-result-insert--column-def col)
+                      :value-marker value-marker)
+                field-states))))
+    (setq-local clutch-result-insert--fields (nreverse field-states)))
   (setq-local header-line-format
               (format " INSERT into %s  |  TAB/S-TAB: field  M-TAB: complete  C-c .: now  C-c C-c: stage  C-c C-k: cancel"
                       table))
@@ -4765,13 +4868,12 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
   (let* ((col-names (with-current-buffer result-buf clutch--result-columns))
          (buf (get-buffer-create (format "*clutch-insert: %s*" table))))
     (with-current-buffer buf
-      (clutch-result-insert-mode 1)
+      (clutch-result-insert-mode)
       (setq-local clutch-result-insert--result-buffer result-buf
                   clutch-result-insert--table table
                   clutch-result-insert--pending-index pending-index
                   completion-at-point-functions
                   '(clutch-result-insert-completion-at-point))
-      (add-hook 'post-command-hook #'clutch-result-insert--normalize-point nil t)
       (clutch-result-insert--populate-buffer table col-names fields))
     (pop-to-buffer buf)))
 
@@ -4786,17 +4888,12 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
 (defun clutch-result-insert--parse-fields ()
   "Parse the insert buffer into an alist of (COLUMN . VALUE).
 Skips columns with empty values."
-  (let (fields)
-    (save-excursion
-      (goto-char (point-min))
-      (while (not (eobp))
-        (when-let* ((col (clutch-result-insert--field-name-at-line))
-                    (value-beg (clutch-result-insert--current-field-value-start)))
-          (let ((val (buffer-substring-no-properties value-beg (line-end-position))))
-            (unless (string-empty-p val)
-              (push (cons col val) fields))))
-        (forward-line 1)))
-    (nreverse fields)))
+  (clutch-result-insert--sync-fields-from-buffer)
+  (cl-loop for field in clutch-result-insert--fields
+           for name = (plist-get field :name)
+           for value = (plist-get field :value)
+           unless (string-empty-p value)
+           collect (cons name value)))
 
 (defun clutch-result-insert--validate-json (field-name value)
   "Signal `user-error' when VALUE is not valid JSON for FIELD-NAME."

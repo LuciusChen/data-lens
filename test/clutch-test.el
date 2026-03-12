@@ -408,6 +408,20 @@
                    "name: alice"))
     (should (= (point) (line-end-position)))))
 
+(ert-deftest clutch-test-insert-mode-annotates-existing-buffer-lines ()
+  "Insert mode should annotate hand-written form text with field properties."
+  (with-temp-buffer
+    (insert "severity: high\nowner: bob\n")
+    (clutch-result-insert-mode 1)
+    (goto-char (point-min))
+    (should (equal (get-text-property (point) 'clutch-insert-field-name)
+                   "severity"))
+    (search-forward "bob")
+    (backward-char 1)
+    (should (equal (get-text-property (point) 'clutch-insert-field-name)
+                   "owner"))
+    (should (equal (clutch-result-insert--current-field-name) "owner"))))
+
 (ert-deftest clutch-test-pending-insert-renders-generated-and-default-placeholders ()
   "Pending insert rows should show generated/default placeholders when known."
   (with-temp-buffer
