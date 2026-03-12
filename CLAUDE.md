@@ -105,6 +105,20 @@ Before releasing, ensure:
 - Any change to key bindings, defaults, export behavior, or user-visible workflow must update `README.org` in the same change.
 - If code and docs diverge, treat code as source of truth and fix docs immediately.
 
+## JDBC Agent Release Discipline
+
+- `clutch-jdbc-agent-version` and `clutch-jdbc-agent-sha256` are a pair. If one changes, review whether the other must change in the same commit.
+- Do not assume a release asset is immutable just because the version string is unchanged. If the published jar bytes change, `clutch-jdbc-agent-sha256` must be updated immediately.
+- Prefer bumping the agent version for any released jar content change. Replacing a GitHub release asset in place should be treated as an exceptional repair path, not normal workflow.
+- Any release-asset change that affects JDBC startup or installation must update `README.org` and, when the tradeoff is non-obvious, add or update a postmortem.
+
+## JDBC Agent Release Discipline
+
+- `clutch-jdbc-agent-version` and `clutch-jdbc-agent-sha256` are a pair. If one changes, review whether the other must change in the same commit.
+- Do not assume a release asset is immutable just because the version string is unchanged. If the published jar bytes change, `clutch-jdbc-agent-sha256` must be updated immediately.
+- Prefer bumping the agent version for any released jar content change. Replacing a GitHub release asset in place should be treated as an exceptional repair path, not normal workflow.
+- Any release-asset change that affects JDBC startup or installation must update `README.org` and, when the tradeoff is non-obvious, add or update a postmortem.
+
 ## Postmortems
 
 The `postmortem/` directory contains design decision records and lessons learned. **Read them before making significant changes.**
