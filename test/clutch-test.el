@@ -466,6 +466,83 @@
                             :type 'user-error))))
       (kill-buffer result-buf))))
 
+(ert-deftest clutch-test-edit-pending-insert-reopens-prefilled-insert-buffer ()
+  "Editing a ghost insert row should reopen the staged insert with its values."
+  (let ((result-buf (generate-new-buffer "*clutch-result*")))
+    (unwind-protect
+        (with-current-buffer result-buf
+          (setq-local clutch--result-columns '("id" "severity" "owner")
+                      clutch--result-rows '((1 "low" "alice"))
+                      clutch--pending-inserts '((("severity" . "high")
+                                                 ("owner" . "bob"))))
+          (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+                     (lambda () (list 1 1 "high")))
+                    ((symbol-function 'clutch-result--detect-table)
+                     (lambda () "shipping_incidents"))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args) buf)))
+            (let ((buf (clutch-result-edit-cell)))
+              (with-current-buffer buf
+                (should (equal clutch-result-insert--pending-index 0))
+                (should (equal clutch-result-insert--table "shipping_incidents"))
+                (should (string-match-p "^severity: high$" (buffer-string)))
+                (should (string-match-p "^owner: bob$" (buffer-string)))))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-commit-replaces-existing-pending-insert ()
+  "Committing a re-edited insert should replace the staged entry in place."
+  (let ((result-buf (generate-new-buffer "*clutch-result*")))
+    (unwind-protect
+        (with-current-buffer result-buf
+          (setq-local clutch--pending-inserts '((("severity" . "low"))))
+          (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
+            (with-temp-buffer
+              (insert "severity: high\n")
+              (clutch-result-insert-mode 1)
+              (setq-local clutch-result-insert--result-buffer result-buf
+                          clutch-result-insert--pending-index 0)
+              (clutch-result-insert-commit))
+            (should (equal clutch--pending-inserts
+                           '((("severity" . "high")))))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-completion-at-point-uses-enum-candidates ()
+  "Insert buffer completion should return enum candidates for the current field."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("severity" "is_ship_blocked" "owner")
+                        clutch--result-column-defs '((:name "severity" :type-category text)
+                                                     (:name "is_ship_blocked" :type-category numeric)
+                                                     (:name "owner" :type-category text))))
+          (with-temp-buffer
+            (insert "severity: \nis_ship_blocked: \nowner: alice\n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "severity" :type "enum('low','medium','high','critical')")
+                               (list :name "is_ship_blocked" :type "tinyint(1)")
+                               (list :name "owner" :type "varchar(255)")))))
+              (goto-char (point-min))
+              (goto-char (clutch-result-insert--current-field-value-position))
+              (pcase-let ((`(,beg ,end ,candidates . ,_)
+                           (clutch-result-insert-completion-at-point)))
+                (should (= beg end))
+                (should (equal candidates '("low" "medium" "high" "critical"))))
+              (forward-line 1)
+              (goto-char (clutch-result-insert--current-field-value-position))
+              (pcase-let ((`(,_beg ,_end ,candidates . ,_)
+                           (clutch-result-insert-completion-at-point)))
+                (should (equal candidates '("0" "1"))))
+              (forward-line 1)
+              (goto-char (clutch-result-insert--current-field-value-position))
+              (should-not (clutch-result-insert-completion-at-point)))))
+      (kill-buffer result-buf))))
+
 (ert-deftest clutch-test-execute-select-detects-primary-key-before-first-render ()
   "Primary key cache should be ready before the first result render."
   (let ((clutch--source-window (selected-window))

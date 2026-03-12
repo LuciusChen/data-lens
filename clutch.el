@@ -4114,29 +4114,42 @@ Scans text properties across the line."
   :lighter " DB-Edit"
   :keymap clutch-result-edit-mode-map)
 
+(defun clutch-result--edit-pending-insert (ridx)
+  "Re-open staged insert at result row RIDX in the insert buffer."
+  (let* ((nrows (length clutch--result-rows))
+         (iidx (- ridx nrows)))
+    (unless (and (>= iidx 0) (< iidx (length clutch--pending-inserts)))
+      (user-error "No pending insertion at this row"))
+    (let ((table (or (clutch-result--detect-table)
+                     (user-error "Cannot detect source table")))
+          (fields (nth iidx clutch--pending-inserts)))
+      (clutch-result-insert--open-buffer table (current-buffer) fields iidx))))
+
 (defun clutch-result-edit-cell ()
   "Edit the cell at point in a dedicated buffer (like `C-c \\='` in org)."
   (interactive)
   (pcase-let* ((`(,ridx ,cidx ,val) (or (clutch-result--cell-at-point)
-                                         (user-error "No cell at point")))
-               (col-name (nth cidx clutch--result-columns))
-         (result-buf (current-buffer))
-         (edit-buf (get-buffer-create
-                    (format "*clutch-edit: [%d].%s*" ridx col-name))))
-    (with-current-buffer edit-buf
-      (erase-buffer)
-      (insert (clutch--format-value val))
-      (goto-char (point-min))
-      (clutch-result-edit-mode 1)
-      (setq-local header-line-format
-                  (format " Editing row %d, column \"%s\"  |  C-c C-c: stage  C-c C-k: cancel"
-                          ridx col-name))
-      (setq-local clutch-result--edit-callback
-                  (lambda (new-value)
-                    (with-current-buffer result-buf
-                      (clutch-result--apply-edit ridx cidx new-value))))
-      (setq-local clutch-result--edit-result-buffer result-buf))
-    (pop-to-buffer edit-buf)))
+                                        (user-error "No cell at point"))))
+    (if (>= ridx (length clutch--result-rows))
+        (clutch-result--edit-pending-insert ridx)
+      (let* ((col-name (nth cidx clutch--result-columns))
+             (result-buf (current-buffer))
+             (edit-buf (get-buffer-create
+                        (format "*clutch-edit: [%d].%s*" ridx col-name))))
+        (with-current-buffer edit-buf
+          (erase-buffer)
+          (insert (clutch--format-value val))
+          (goto-char (point-min))
+          (clutch-result-edit-mode 1)
+          (setq-local header-line-format
+                      (format " Editing row %d, column \"%s\"  |  C-c C-c: stage  C-c C-k: cancel"
+                              ridx col-name))
+          (setq-local clutch-result--edit-callback
+                      (lambda (new-value)
+                        (with-current-buffer result-buf
+                          (clutch-result--apply-edit ridx cidx new-value))))
+          (setq-local clutch-result--edit-result-buffer result-buf))
+        (pop-to-buffer edit-buf)))))
 
 (defun clutch-result-edit-finish ()
   "Stage the edit and return to the result buffer.
@@ -4477,6 +4490,8 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "TAB") #'clutch-result-insert-next-field)
     (define-key map (kbd "<backtab>") #'clutch-result-insert-prev-field)
+    (define-key map (kbd "M-TAB") #'completion-at-point)
+    (define-key map (kbd "C-M-i") #'completion-at-point)
     (define-key map (kbd "C-c .") #'clutch-result-insert-fill-current-time)
     (define-key map (kbd "C-c C-c") #'clutch-result-insert-commit)
     (define-key map (kbd "C-c C-k") #'clutch-result-insert-cancel)
@@ -4496,6 +4511,9 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 (defvar-local clutch-result-insert--table nil
   "Table name for the INSERT (Insert buffer local).")
+
+(defvar-local clutch-result-insert--pending-index nil
+  "Pending insert index being edited, or nil for a new staged insertion.")
 
 (defun clutch-result-insert--current-field-value-position ()
   "Return point for the current insert field value, or nil."
@@ -4542,6 +4560,50 @@ next field. Returns nil when no matching field exists."
                                     :test #'string=)))
         (nth idx clutch--result-column-defs)))))
 
+(defun clutch-result-insert--column-detail (field-name)
+  "Return detailed column plist for FIELD-NAME from the parent result buffer."
+  (let ((table clutch-result-insert--table))
+    (when-let* ((result-buf clutch-result-insert--result-buffer)
+              ((buffer-live-p result-buf)))
+      (with-current-buffer result-buf
+        (when-let* ((conn clutch-connection)
+                    (details (clutch--ensure-column-details conn table)))
+          (cl-find field-name details
+                   :key (lambda (d) (plist-get d :name))
+                   :test #'string=))))))
+
+(defun clutch-result-insert--enum-candidates (type)
+  "Return enum candidates parsed from SQL TYPE, or nil."
+  (when (and (stringp type)
+             (string-match-p "\\`enum(" (downcase type)))
+    (let ((start 0)
+          vals)
+      (while (string-match "'\\([^']*\\(?:''[^']*\\)*\\)'" type start)
+        (push (replace-regexp-in-string "''" "'" (match-string 1 type)) vals)
+        (setq start (match-end 0)))
+      (nreverse vals))))
+
+(defun clutch-result-insert--field-candidates (field-name)
+  "Return completion candidates for FIELD-NAME, or nil."
+  (let* ((detail (clutch-result-insert--column-detail field-name))
+         (type (downcase (or (plist-get detail :type) ""))))
+    (or (clutch-result-insert--enum-candidates type)
+        (cond
+         ((member type '("boolean" "bool"))
+          '("true" "false"))
+         ((member type '("tinyint(1)" "bit(1)"))
+          '("0" "1"))
+         (t nil)))))
+
+(defun clutch-result-insert-completion-at-point ()
+  "Return CAPF data for the current insert field, or nil."
+  (when-let* ((field-name (clutch-result-insert--current-field-name))
+              (candidates (clutch-result-insert--field-candidates field-name))
+              (bounds (clutch-result-insert--current-field-value-bounds)))
+    (let ((beg (car bounds))
+          (end (cdr bounds)))
+      (list beg end candidates :exclusive 'no))))
+
 (defun clutch-result-insert--current-time-value (type-category &optional time)
   "Return a formatted current time string for TYPE-CATEGORY.
 TIME defaults to `current-time'."
@@ -4583,29 +4645,43 @@ TIME defaults to `current-time'."
       (goto-char beg)
       (insert value))))
 
+(defun clutch-result-insert--populate-buffer (table col-names &optional fields)
+  "Populate the current insert buffer for TABLE and COL-NAMES using FIELDS."
+  (erase-buffer)
+  (dolist (col col-names)
+    (insert (propertize col 'face 'clutch-header-face)
+            ": "
+            (or (cdr (assoc col fields)) "")
+            "\n"))
+  (setq-local header-line-format
+              (format " INSERT into %s  |  TAB/S-TAB: field  M-TAB: complete  C-c .: now  C-c C-c: stage  C-c C-k: cancel"
+                      table))
+  (goto-char (point-min))
+  (goto-char (or (clutch-result-insert--current-field-value-position)
+                 (point-min))))
+
+(defun clutch-result-insert--open-buffer (table result-buf &optional fields pending-index)
+  "Open an insert buffer for TABLE backed by RESULT-BUF.
+FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
+  (let* ((col-names (with-current-buffer result-buf clutch--result-columns))
+         (buf (get-buffer-create (format "*clutch-insert: %s*" table))))
+    (with-current-buffer buf
+      (clutch-result-insert-mode 1)
+      (setq-local clutch-result-insert--result-buffer result-buf
+                  clutch-result-insert--table table
+                  clutch-result-insert--pending-index pending-index
+                  completion-at-point-functions
+                  '(clutch-result-insert-completion-at-point))
+      (clutch-result-insert--populate-buffer table col-names fields))
+    (pop-to-buffer buf)))
+
 (defun clutch-result-insert-row ()
   "Open an edit buffer to INSERT a new row into the current table."
   (interactive)
   (let* ((table (or (clutch-result--detect-table)
                     (user-error "Cannot detect source table")))
-         (col-names clutch--result-columns)
-         (result-buf (current-buffer))
-         (buf (get-buffer-create (format "*clutch-insert: %s*" table))))
-    (with-current-buffer buf
-      (erase-buffer)
-      (clutch-result-insert-mode 1)
-      (setq-local clutch-result-insert--result-buffer result-buf
-                  clutch-result-insert--table table
-                  header-line-format
-                  (format " INSERT into %s  |  C-c C-c: stage  C-c C-k: cancel"
-                          table))
-      (dolist (col col-names)
-        (insert (propertize col 'face 'clutch-header-face)
-                ": \n"))
-      (goto-char (point-min))
-      (goto-char (or (clutch-result-insert--current-field-value-position)
-                     (point-min))))
-    (pop-to-buffer buf)))
+         (result-buf (current-buffer)))
+    (clutch-result-insert--open-buffer table result-buf)))
 
 (defun clutch-result-insert--parse-fields ()
   "Parse the insert buffer into an alist of (COLUMN . VALUE).
@@ -4642,18 +4718,25 @@ FIELDS is an alist of (column-name . value-string)."
 Use \\[clutch-result-commit] in the result buffer to commit."
   (interactive)
   (let* ((fields (clutch-result-insert--parse-fields))
-         (result-buf clutch-result-insert--result-buffer))
+         (result-buf clutch-result-insert--result-buffer)
+         (pending-index clutch-result-insert--pending-index))
     (unless fields (user-error "No values entered"))
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
     (quit-window 'kill)
     (with-current-buffer result-buf
-      (setq clutch--pending-inserts
-            (append clutch--pending-inserts (list fields)))
+      (if pending-index
+          (if-let* ((cell (nthcdr pending-index clutch--pending-inserts)))
+              (setcar cell fields)
+            (user-error "Pending insertion no longer exists"))
+        (setq clutch--pending-inserts
+              (append clutch--pending-inserts (list fields))))
       (clutch--refresh-display)
-      (message "%d insertion%s staged — C-c C-c to commit"
-               (length clutch--pending-inserts)
-               (if (= (length clutch--pending-inserts) 1) "" "s")))))
+      (if pending-index
+          (message "Pending insertion updated — C-c C-c to commit")
+        (message "%d insertion%s staged — C-c C-c to commit"
+                 (length clutch--pending-inserts)
+                 (if (= (length clutch--pending-inserts) 1) "" "s"))))))
 
 (defun clutch-result-insert-cancel ()
   "Cancel the INSERT and close the edit buffer."
