@@ -72,8 +72,17 @@ Examples:
   :type 'natnum
   :group 'clutch-jdbc)
 
+(defvar clutch-connect-timeout-seconds 10
+  "Declared in clutch.el.")
+
+(defvar clutch-read-idle-timeout-seconds 30
+  "Declared in clutch.el.")
+
+(defvar clutch-query-timeout-seconds 30
+  "Declared in clutch.el.")
+
 (defvar clutch-jdbc-rpc-timeout-seconds 30
-  "Seconds to wait for a response from the agent before giving up.")
+  "Declared in clutch.el.")
 
 ;;;; Driver sources (for automatic installation from Maven Central)
 
@@ -274,15 +283,32 @@ DRIVER is a symbol (e.g. \\='oracle, \\='sqlserver) captured by the
 registration closure — users do not pass it directly.
 Returns a `clutch-jdbc-conn'."
   (clutch-jdbc--ensure-agent)
-  (let* ((url      (clutch-jdbc--build-url driver params))
-         (user     (plist-get params :user))
-         (password (plist-get params :password))
-         (props    (plist-get params :props))
-         (rpc-timeout (or (plist-get params :rpc-timeout)
-                          clutch-jdbc-rpc-timeout-seconds))
-         (connect-timeout (or (plist-get params :connect-timeout)
-                              rpc-timeout))
-         (read-idle-timeout (plist-get params :read-idle-timeout))
+  (let* ((normalized-params
+          (let ((normalized (copy-sequence params)))
+            (setq normalized
+                  (plist-put normalized :connect-timeout
+                             (or (plist-get normalized :connect-timeout)
+                                 clutch-connect-timeout-seconds)))
+            (setq normalized
+                  (plist-put normalized :read-idle-timeout
+                             (or (plist-get normalized :read-idle-timeout)
+                                 clutch-read-idle-timeout-seconds)))
+            (setq normalized
+                  (plist-put normalized :query-timeout
+                             (or (plist-get normalized :query-timeout)
+                                 clutch-query-timeout-seconds)))
+            (setq normalized
+                  (plist-put normalized :rpc-timeout
+                             (or (plist-get normalized :rpc-timeout)
+                                 clutch-jdbc-rpc-timeout-seconds)))
+            normalized))
+         (url      (clutch-jdbc--build-url driver normalized-params))
+         (user     (plist-get normalized-params :user))
+         (password (plist-get normalized-params :password))
+         (props    (plist-get normalized-params :props))
+         (rpc-timeout (plist-get normalized-params :rpc-timeout))
+         (connect-timeout (plist-get normalized-params :connect-timeout))
+         (read-idle-timeout (plist-get normalized-params :read-idle-timeout))
          (result   (clutch-jdbc--rpc
                     "connect"
                     `((url      . ,url)
@@ -296,7 +322,7 @@ Returns a `clutch-jdbc-conn'."
     (make-clutch-jdbc-conn
      :process  clutch-jdbc--agent-process
      :conn-id  (plist-get result :conn-id)
-     :params   (plist-put (copy-sequence params) :driver driver)
+     :params   (plist-put normalized-params :driver driver)
      :busy     nil)))
 
 ;;;; Register backend

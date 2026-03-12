@@ -964,6 +964,10 @@
                          :user "u" :read-timeout 5))
    :type 'user-error))
 
+(ert-deftest clutch-test-default-connect-timeout-is-10-seconds ()
+  "Project default connect timeout should stay at 10 seconds."
+  (should (= clutch-connect-timeout-seconds 10)))
+
 (ert-deftest clutch-test-tables-in-buffer-caches-until-buffer-changes ()
   "Table lookup in the buffer should reuse cached results until text changes."
   (with-temp-buffer

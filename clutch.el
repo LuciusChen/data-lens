@@ -151,6 +151,7 @@ Underlined to indicate clickable (RET to follow)."
 Each entry has the form:
   (NAME . (:host H :port P :user U [:password P] :database D
            [:backend SYM] [:sql-product SYM] [:pass-entry STR]
+           [:url STR] [:props ALIST]
            [:connect-timeout N] [:read-idle-timeout N]
            [:query-timeout N] [:rpc-timeout N]))
 NAME is a string used for `completing-read'.
@@ -175,6 +176,8 @@ Password resolution order:
                                     (:backend symbol)
                                     (:sql-product symbol)
                                     (:pass-entry string)
+                                    (:url string)
+                                    (:props (alist :key-type string :value-type string))
                                     (:connect-timeout natnum)
                                     (:read-idle-timeout natnum)
                                     (:query-timeout natnum)
@@ -224,7 +227,7 @@ Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
                  (symbol :tag "Other"))
   :group 'clutch)
 
-(defcustom clutch-connect-timeout-seconds 30
+(defcustom clutch-connect-timeout-seconds 10
   "Timeout in seconds for establishing a database connection.
 Applies to networked backends.  SQLite ignores this setting."
   :type 'natnum

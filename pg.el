@@ -620,7 +620,6 @@ Returns (PROCESS . BUFFER)."
                                       :host host
                                       :service port
                                       :nowait t
-                                      :type 'plain
                                       :coding 'binary)))
       (set-process-coding-system proc 'binary 'binary)
       (set-process-filter proc
@@ -643,7 +642,7 @@ Returns (PROCESS . BUFFER)."
 
 (cl-defun pg-connect (&key (host "127.0.0.1") (port 5432) user password
                              database tls (read-idle-timeout 30)
-                             (connect-timeout 30))
+                             (connect-timeout 10))
   "Connect to a PostgreSQL server and authenticate.
 Returns a `pg-conn' struct on success.
 

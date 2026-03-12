@@ -112,6 +112,31 @@
         (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 13))
         (should (= (clutch-jdbc-conn-conn-id conn) 7))))))
 
+(ert-deftest clutch-db-test-jdbc-connect-defaults-connect-timeout-separately-from-rpc ()
+  "Direct JDBC connect should not inherit connect timeout from rpc timeout."
+  (let ((clutch-connect-timeout-seconds 10)
+        (clutch-read-idle-timeout-seconds 30)
+        (clutch-query-timeout-seconds 20)
+        (clutch-jdbc-rpc-timeout-seconds 30)
+        captured-timeout captured-params conn)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op params &optional timeout-seconds)
+                 (setq captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:conn-id 7))))
+      (setq conn
+            (clutch-db-jdbc-connect
+             'oracle
+             '(:host "db" :port 1521 :database "svc" :user "scott" :password "tiger")))
+      (should (= captured-timeout 10))
+      (should (= (alist-get 'connect-timeout-seconds captured-params) 10))
+      (should (= (alist-get 'network-timeout-seconds captured-params) 30))
+      (should (= (plist-get (clutch-jdbc-conn-params conn) :connect-timeout) 10))
+      (should (= (plist-get (clutch-jdbc-conn-params conn) :read-idle-timeout) 30))
+      (should (= (plist-get (clutch-jdbc-conn-params conn) :query-timeout) 20))
+      (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 30)))))
+
 (ert-deftest clutch-db-test-jdbc-query-maps-query-and-rpc-timeouts ()
   "JDBC query should send query timeout separately from RPC timeout."
   (let ((conn (make-clutch-jdbc-conn :conn-id 4

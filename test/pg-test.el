@@ -368,6 +368,23 @@
     (should (null (pg-result-rows result)))
     (should (null (pg-result-affected-rows result)))))
 
+(ert-deftest pg-test-open-connection-does-not-force-plain-type ()
+  "Opening a PostgreSQL socket should not force an unsupported process type."
+  (let (captured-args)
+    (cl-letf (((symbol-function 'make-network-process)
+               (lambda (&rest args)
+                 (setq captured-args args)
+                 'fake-proc))
+              ((symbol-function 'set-process-coding-system) #'ignore)
+              ((symbol-function 'set-process-filter) #'ignore)
+              ((symbol-function 'pg--wait-for-connect) #'ignore))
+      (pcase-let ((`(,proc . ,buf) (pg--open-connection "127.0.0.1" 5432 10)))
+        (unwind-protect
+            (progn
+              (should (eq proc 'fake-proc))
+              (should-not (plist-member captured-args :type)))
+          (kill-buffer buf))))))
+
 ;;;; Unit tests — SCRAM authentication helpers
 
 (ert-deftest pg-test-scram-client-first ()

@@ -753,7 +753,6 @@ Returns (PROCESS . BUFFER)."
                                       :host host
                                       :service port
                                       :nowait t
-                                      :type 'plain
                                       :coding 'binary)))
       (set-process-coding-system proc 'binary 'binary)
       (set-process-filter proc
@@ -766,7 +765,7 @@ Returns (PROCESS . BUFFER)."
 
 (cl-defun mysql-connect (&key (host "127.0.0.1") (port 3306) user password
                                 database tls (read-idle-timeout 30)
-                                (connect-timeout 30))
+                                (connect-timeout 10))
   "Connect to a MySQL server and authenticate.
 Returns a `mysql-conn' struct on success.
 

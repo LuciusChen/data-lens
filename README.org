@@ -689,12 +689,12 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
 
 ** Query Timeout and Interrupt
 
-- =clutch-connect-timeout-seconds= controls connect timeout (default: 30s).
+- =clutch-connect-timeout-seconds= controls connect timeout (default: 10s).
 - =clutch-read-idle-timeout-seconds= controls query I/O idle timeout (default: 30s).
 - =clutch-query-timeout-seconds= controls database-side statement timeout for JDBC queries (default: 30s).
 - =clutch-jdbc-rpc-timeout-seconds= controls Emacs <-> JDBC agent RPC timeout (default: 30s).
 - MySQL/PostgreSQL connections can override via =:connect-timeout= and =:read-idle-timeout=.
-- JDBC connections can also override via =:query-timeout= and =:rpc-timeout=.
+- JDBC connections can override via =:connect-timeout=, =:read-idle-timeout=, =:query-timeout=, and =:rpc-timeout=.
 - During long-running queries, press =C-g= to interrupt.
   - clutch will drop the current connection to avoid protocol desync.
   - the next command auto-reconnects when saved connection params are available.
