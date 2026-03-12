@@ -422,6 +422,131 @@
                    "owner"))
     (should (equal (clutch-result-insert--current-field-name) "owner"))))
 
+(ert-deftest clutch-test-insert-return-key-navigates-like-tab ()
+  "RET should advance to the next insert field without replacing TAB."
+  (with-temp-buffer
+    (insert "id: \nname: alice\ncreated_at: \n")
+    (clutch-result-insert-mode 1)
+    (goto-char (point-min))
+    (goto-char (clutch-result-insert--current-field-value-start))
+    (call-interactively (key-binding (kbd "RET")))
+    (should (equal (clutch-result-insert--current-field-name) "name"))
+    (call-interactively (key-binding (kbd "TAB")))
+    (should (equal (clutch-result-insert--current-field-name) "created_at"))))
+
+(ert-deftest clutch-test-insert-buffer-aligns-value-columns-and-highlights-current-line ()
+  "Insert buffer should align value starts and highlight the active field line."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("id" "severity" "is_ship_blocked")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "severity" :type-category text)
+                                                     (:name "is_ship_blocked" :type-category numeric))))
+          (with-temp-buffer
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "id" :type "int" :generated t :nullable nil)
+                               (list :name "severity" :type "enum('low','medium')" :nullable nil)
+                               (list :name "is_ship_blocked" :type "tinyint(1)" :default "0" :nullable nil)))))
+              (clutch-result-insert--populate-buffer
+               "shipping_incidents" '("id" "severity" "is_ship_blocked"))
+              (let (columns)
+                (goto-char (point-min))
+                (while (not (eobp))
+                  (goto-char (clutch-result-insert--current-field-value-start))
+                  (push (current-column) columns)
+                  (forward-line 1))
+                (setq columns (delq nil (nreverse columns)))
+                (should (= 1 (length (delete-dups (copy-sequence columns))))))
+              (goto-char (point-min))
+              (clutch-result-insert-next-field)
+              (let ((ov clutch-result-insert--active-field-overlay))
+                (should (overlayp ov))
+                (should (eq (overlay-get ov 'face) 'clutch-insert-active-field-face))
+                (should (string-match-p "^severity" (buffer-substring-no-properties
+                                                     (overlay-start ov)
+                                                     (overlay-end ov))))))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-json-editor-save-roundtrip ()
+  "Saving a JSON child editor should write compact JSON back to the insert field."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
+        (editor-buf nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("postmortem")
+                        clutch--result-column-defs '((:name "postmortem" :type-category json))))
+          (with-temp-buffer
+            (insert "postmortem: \n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "postmortem" :type "json"))))
+                      ((symbol-function 'pop-to-buffer)
+                       (lambda (buf &rest _args)
+                         (setq editor-buf buf)
+                         buf)))
+              (clutch-result-insert-edit-json-field))
+            (with-current-buffer editor-buf
+              (erase-buffer)
+              (insert "{\n  \"severity\": \"high\",\n  \"ship_blocked\": true\n}")
+              (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                         (lambda (_conn _table)
+                           (list (list :name "postmortem" :type "json"))))
+                        ((symbol-function 'quit-window) (lambda (&rest _args) nil))
+                        ((symbol-function 'pop-to-buffer) (lambda (buf &rest _args) buf)))
+                (clutch-result-insert-json-finish)))
+            (should (equal (buffer-string)
+                           "postmortem: {\"severity\":\"high\",\"ship_blocked\":true}\n"))))
+      (kill-buffer result-buf)
+      (when (buffer-live-p editor-buf)
+        (kill-buffer editor-buf)))))
+
+(ert-deftest clutch-test-insert-json-editor-cancel-keeps-parent-value ()
+  "Cancelling the JSON child editor should leave the parent field unchanged."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
+        (editor-buf nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("postmortem")
+                        clutch--result-column-defs '((:name "postmortem" :type-category json))))
+          (with-temp-buffer
+            (insert "postmortem: {\"ok\":true}\n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "postmortem" :type "json"))))
+                      ((symbol-function 'pop-to-buffer)
+                       (lambda (buf &rest _args)
+                         (setq editor-buf buf)
+                         buf)))
+              (clutch-result-insert-edit-json-field))
+            (with-current-buffer editor-buf
+              (erase-buffer)
+              (insert "{\"ok\":false}")
+              (cl-letf (((symbol-function 'quit-window) (lambda (&rest _args) nil))
+                        ((symbol-function 'pop-to-buffer) (lambda (buf &rest _args) buf)))
+                (clutch-result-insert-json-cancel)))
+            (should (equal (buffer-string)
+                           "postmortem: {\"ok\":true}\n"))))
+      (kill-buffer result-buf)
+      (when (buffer-live-p editor-buf)
+        (kill-buffer editor-buf)))))
+
 (ert-deftest clutch-test-insert-local-validation-shows-inline-error ()
   "Editing an invalid value should mark the current insert field inline."
   (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
@@ -586,8 +711,8 @@
               (with-current-buffer buf
                 (should (equal clutch-result-insert--pending-index 0))
                 (should (equal clutch-result-insert--table "shipping_incidents"))
-                (should (string-match-p "^severity: high$" (buffer-string)))
-                (should (string-match-p "^owner: bob$" (buffer-string)))))))
+                (should (string-match-p "^severity[ ]*: high$" (buffer-string)))
+                (should (string-match-p "^owner[ ]*: bob$" (buffer-string)))))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-insert-commit-replaces-existing-pending-insert ()
@@ -671,11 +796,11 @@
               (clutch-result-insert--populate-buffer "shipping_incidents"
                                                     '("id" "severity" "postmortem" "is_ship_blocked" "opened_at"))
               (let ((rendered (buffer-string)))
-                (should (string-match-p "^id \\[generated\\]: $" rendered))
-                (should (string-match-p "^severity \\[enum required\\]: $" rendered))
-                (should (string-match-p "^postmortem \\[json\\]: $" rendered))
+                (should (string-match-p "^id \\[generated\\][ ]*: $" rendered))
+                (should (string-match-p "^severity \\[enum required\\][ ]*: $" rendered))
+                (should (string-match-p "^postmortem \\[json\\][ ]*: $" rendered))
                 (should (string-match-p "^is_ship_blocked \\[default=0 bool\\]: $" rendered))
-                (should (string-match-p "^opened_at \\[required\\]: $" rendered)))
+                (should (string-match-p "^opened_at \\[required\\][ ]*: $" rendered)))
               (goto-char (point-min))
               (should (get-text-property (point) 'read-only))
               (should (eq (get-text-property (point) 'face) 'clutch-header-face))

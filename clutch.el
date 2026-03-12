@@ -80,6 +80,11 @@
   "Face for inline insert-buffer validation messages."
   :group 'clutch)
 
+(defface clutch-insert-active-field-face
+  '((t :inherit hl-line))
+  "Face for the active line in the insert buffer."
+  :group 'clutch)
+
 (defface clutch-pinned-header-face
   '((t :inherit clutch-header-face))
   "Face for pinned column headers."
@@ -4516,6 +4521,9 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 (defvar clutch-result-insert-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c '") #'clutch-result-insert-edit-json-field)
+    (define-key map (kbd "RET") #'clutch-result-insert-submit-field)
+    (define-key map (kbd "<return>") #'clutch-result-insert-submit-field)
     (define-key map (kbd "TAB") #'clutch-result-insert-next-field)
     (define-key map (kbd "<backtab>") #'clutch-result-insert-prev-field)
     (define-key map (kbd "M-TAB") #'clutch-result-insert-complete-field)
@@ -4534,6 +4542,18 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 (defvar clutch-result-insert-major-mode-hook nil
   "Internal hook run after `clutch-result-insert-major-mode' is enabled.")
+
+(defvar clutch-result-insert-json-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'clutch-result-insert-json-finish)
+    (define-key map (kbd "C-c C-k") #'clutch-result-insert-json-cancel)
+    map)
+  "Keymap for the insert-buffer JSON editor.")
+
+(define-minor-mode clutch-result-insert-json-mode
+  "Minor mode for editing JSON values from the insert buffer."
+  :lighter " DB-Insert-JSON"
+  :keymap clutch-result-insert-json-mode-map)
 
 (define-derived-mode clutch-result-insert-major-mode text-mode "Clutch-Insert"
   "Major mode for editing a new row to INSERT.
@@ -4567,6 +4587,18 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 (defvar-local clutch-result-insert--validation-timer nil
   "Idle validation timer for the current insert buffer.")
 
+(defvar-local clutch-result-insert--active-field-overlay nil
+  "Overlay highlighting the active insert field line.")
+
+(defvar-local clutch-result-insert--label-width 0
+  "Display width reserved for insert field labels.")
+
+(defvar-local clutch-result-insert-json--parent-buffer nil
+  "Insert buffer that opened the current JSON editor.")
+
+(defvar-local clutch-result-insert-json--field-name nil
+  "Insert-field name edited by the current JSON editor.")
+
 (defun clutch-result-insert--cancel-validation-timer ()
   "Cancel any pending insert-field validation timer."
   (when (timerp clutch-result-insert--validation-timer)
@@ -4576,6 +4608,9 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 (defun clutch-result-insert--cleanup ()
   "Tear down timers and overlays owned by the current insert buffer."
   (clutch-result-insert--cancel-validation-timer)
+  (when (overlayp clutch-result-insert--active-field-overlay)
+    (delete-overlay clutch-result-insert--active-field-overlay))
+  (setq-local clutch-result-insert--active-field-overlay nil)
   (dolist (field clutch-result-insert--fields)
     (when-let* ((ov (plist-get field :error-overlay)))
       (delete-overlay ov)
@@ -4766,6 +4801,41 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     (when-let* ((field (clutch-result-insert--field-state-at-position)))
       (plist-get field :name))))
 
+(defun clutch-result-insert--field-label-width (col-names)
+  "Return the display width needed for labeled insert fields in COL-NAMES."
+  (cl-loop for col in col-names
+           maximize (string-width (clutch-result-insert--field-label col))))
+
+(defun clutch-result-insert--field-label-padded (col-name)
+  "Return padded insert label text for COL-NAME."
+  (clutch--string-pad (clutch-result-insert--field-label col-name)
+                      clutch-result-insert--label-width))
+
+(defun clutch-result-insert--json-normalize-string (value)
+  "Return VALUE normalized as compact JSON."
+  (if (string-empty-p value)
+      ""
+    (condition-case nil
+        (if (fboundp 'json-serialize)
+            (json-serialize (json-parse-string value))
+          value)
+      (error (user-error "Field %s expects valid JSON"
+                         (or clutch-result-insert-json--field-name
+                             (clutch-result-insert--current-field-name)
+                             "JSON"))))))
+
+(defun clutch-result-insert--json-editor-mode ()
+  "Select the best available major mode for JSON field editing."
+  (cond
+   ((fboundp 'json-ts-mode) (json-ts-mode))
+   ((fboundp 'js-mode) (js-mode))
+   (t (text-mode))))
+
+(defun clutch-result-insert--current-field-or-error ()
+  "Return the structured field at point or signal a user error."
+  (or (clutch-result-insert--field-state-at-position)
+      (user-error "Point is not on an insert field")))
+
 (defun clutch-result-insert--current-field-value-start ()
   "Return the start position of the current insert field value, or nil."
   (when-let* ((field (clutch-result-insert--field-state-at-position))
@@ -4915,21 +4985,46 @@ TIME defaults to `current-time'."
   "Keep point out of the read-only insert field prefix."
   (when (clutch-result-insert--field-prefix-read-only-p)
     (goto-char (or (clutch-result-insert--current-field-value-start)
-                   (point)))))
+                   (point))))
+  (when-let* ((field (clutch-result-insert--field-state-at-position))
+              (bounds (clutch-result-insert--field-value-bounds field)))
+    (let ((line-start (save-excursion
+                        (goto-char (car bounds))
+                        (line-beginning-position)))
+          (line-end (save-excursion
+                      (goto-char (cdr bounds))
+                      (line-end-position))))
+      (unless (overlayp clutch-result-insert--active-field-overlay)
+        (setq-local clutch-result-insert--active-field-overlay
+                    (make-overlay line-start line-end nil t t))
+        (overlay-put clutch-result-insert--active-field-overlay
+                     'face 'clutch-insert-active-field-face)
+        (overlay-put clutch-result-insert--active-field-overlay 'priority -1)
+        (overlay-put clutch-result-insert--active-field-overlay 'evaporate t))
+      (move-overlay clutch-result-insert--active-field-overlay line-start line-end))))
 
 (defun clutch-result-insert-next-field ()
   "Move point to the next insert field value."
   (interactive)
   (if-let* ((pos (clutch-result-insert--adjacent-field-value-position)))
-      (goto-char pos)
+      (progn
+        (goto-char pos)
+        (clutch-result-insert--normalize-point))
     (user-error "No next insert field")))
 
 (defun clutch-result-insert-prev-field ()
   "Move point to the previous insert field value."
   (interactive)
   (if-let* ((pos (clutch-result-insert--adjacent-field-value-position 'backward)))
-      (goto-char pos)
+      (progn
+        (goto-char pos)
+        (clutch-result-insert--normalize-point))
     (user-error "No previous insert field")))
+
+(defun clutch-result-insert-submit-field ()
+  "Accept the current field value and move to the next field."
+  (interactive)
+  (clutch-result-insert-next-field))
 
 (defun clutch-result-insert-complete-field ()
   "Complete the current insert field.
@@ -4970,16 +5065,80 @@ If nothing handles the completion, fall back to `completing-read'."
       (goto-char beg)
       (insert value))))
 
+(defun clutch-result-insert-edit-json-field ()
+  "Open a dedicated editor for the JSON field at point."
+  (interactive)
+  (let* ((field (clutch-result-insert--current-field-or-error))
+         (field-name (plist-get field :name))
+         (value (progn
+                  (clutch-result-insert--sync-field-value field)
+                  (plist-get field :value)))
+         (parent-buf (current-buffer)))
+    (unless (clutch-result-insert--json-field-p field)
+      (user-error "Field %s is not a JSON column" field-name))
+    (let ((buf (get-buffer-create
+                (format "*clutch-insert-json: %s.%s*"
+                        clutch-result-insert--table field-name))))
+      (with-current-buffer buf
+        (erase-buffer)
+        (insert value)
+        (goto-char (point-min))
+        (condition-case nil
+            (unless (string-empty-p value)
+              (json-pretty-print-buffer))
+          (error nil))
+        (clutch-result-insert--json-editor-mode)
+        (clutch-result-insert-json-mode 1)
+        (setq-local clutch-result-insert-json--parent-buffer parent-buf)
+        (setq-local clutch-result-insert-json--field-name field-name
+                    header-line-format
+                    (format " JSON field %s  |  C-c C-c: save  C-c C-k: cancel"
+                            field-name)))
+      (pop-to-buffer buf))))
+
+(defun clutch-result-insert-json-finish ()
+  "Save the JSON editor contents back to the parent insert buffer."
+  (interactive)
+  (let* ((parent clutch-result-insert-json--parent-buffer)
+         (field-name clutch-result-insert-json--field-name)
+         (raw (string-trim (buffer-substring-no-properties (point-min) (point-max))))
+         (value (clutch-result-insert--json-normalize-string raw)))
+    (unless (buffer-live-p parent)
+      (user-error "Insert buffer no longer exists"))
+    (quit-window 'kill)
+    (with-current-buffer parent
+      (when-let* ((field (clutch-result-insert--field-state field-name))
+                  (bounds (clutch-result-insert--field-value-bounds field)))
+        (let ((inhibit-modification-hooks nil))
+          (delete-region (car bounds) (cdr bounds))
+          (goto-char (car bounds))
+          (insert value)
+          (clutch-result-insert--validate-field-live field)
+          (clutch-result-insert--normalize-point)))
+      (pop-to-buffer parent))))
+
+(defun clutch-result-insert-json-cancel ()
+  "Cancel JSON field editing and return to the insert buffer."
+  (interactive)
+  (let ((parent clutch-result-insert-json--parent-buffer))
+    (quit-window 'kill)
+    (when (buffer-live-p parent)
+      (with-current-buffer parent
+        (clutch-result-insert--normalize-point))
+      (pop-to-buffer parent))))
+
 (defun clutch-result-insert--populate-buffer (table col-names &optional fields)
   "Populate the current insert buffer for TABLE and COL-NAMES using FIELDS."
   (let ((inhibit-read-only t)
         (inhibit-modification-hooks t)
         field-states)
     (clutch-result-insert--cleanup)
+    (setq-local clutch-result-insert--label-width
+                (clutch-result-insert--field-label-width col-names))
     (erase-buffer)
     (dolist (col col-names)
       (let ((prefix-start (point)))
-        (insert (clutch-result-insert--field-label col)
+        (insert (clutch-result-insert--field-label-padded col)
                 ": ")
         (add-text-properties prefix-start (point)
                              '(read-only t front-sticky t rear-nonsticky t))
@@ -4999,7 +5158,8 @@ If nothing handles the completion, fall back to `completing-read'."
                       table))
   (goto-char (point-min))
   (goto-char (or (clutch-result-insert--current-field-value-position)
-                 (point-min))))
+                 (point-min)))
+  (clutch-result-insert--normalize-point))
 
 (defun clutch-result-insert--open-buffer (table result-buf &optional fields pending-index)
   "Open an insert buffer for TABLE backed by RESULT-BUF.
