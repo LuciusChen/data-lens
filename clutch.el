@@ -1239,9 +1239,8 @@ Returns a list of propertized strings (may be empty)."
             (hi 'font-lock-keyword-face))
         (concat (propertize (concat (clutch--icon icon "↕") " ")
                             'face dim)
-                (propertize column 'face hi)
-                (propertize " " 'face dim)
-                (propertize (upcase direction) 'face hi))))))
+                (propertize (format "%s[%s]" (upcase direction) column)
+                            'face hi))))))
 
 (defun clutch--footer-pending-part ()
   "Build footer part for staged edits, deletions, or insertions."

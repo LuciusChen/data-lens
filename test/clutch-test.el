@@ -369,7 +369,7 @@
                 clutch--pending-inserts '(c))
     (let ((footer (substring-no-properties
                    (clutch--render-footer 10 0 500 100 1 1))))
-      (should (string-match-p "created_at DESC" footer))
+      (should (string-match-p "DESC\\[created_at\\]" footer))
       (should (string-match-p "1 edit, 1 deletion, 1 insertion" footer))
       (should (string-match-p "C-c C-c" footer)))))
 
