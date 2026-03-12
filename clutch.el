@@ -43,6 +43,7 @@
 
 (declare-function nerd-icons-mdicon "nerd-icons")
 (declare-function nerd-icons-codicon "nerd-icons")
+(declare-function nerd-icons-octicon "nerd-icons")
 
 ;;;; Customization
 
@@ -1022,7 +1023,8 @@ nerd-icons is not installed."
     (or (and (require 'nerd-icons nil t)
              (pcase family
                ('mdicon (nerd-icons-mdicon icon-name))
-               ('codicon (nerd-icons-codicon icon-name))))
+               ('codicon (nerd-icons-codicon icon-name))
+               ('octicon (nerd-icons-octicon icon-name))))
         (car fallback)
         "")))
 
@@ -1231,8 +1233,11 @@ Returns a list of propertized strings (may be empty)."
   (when-let* ((order clutch--order-by))
     (pcase-let ((`(,column . ,direction) order))
       (let ((dim 'font-lock-comment-face)
+            (icon (if (string-match-p "\\`desc\\'" direction)
+                      '(octicon . "nf-oct-sort_desc")
+                    '(octicon . "nf-oct-sort_asc")))
             (hi 'font-lock-keyword-face))
-        (concat (propertize (concat (clutch--icon '(codicon . "nf-cod-sort_desc") "↕") " ")
+        (concat (propertize (concat (clutch--icon icon "↕") " ")
                             'face dim)
                 (propertize column 'face hi)
                 (propertize " " 'face dim)

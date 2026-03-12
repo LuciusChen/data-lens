@@ -373,6 +373,14 @@
       (should (string-match-p "1 edit, 1 deletion, 1 insertion" footer))
       (should (string-match-p "C-c C-c" footer)))))
 
+(ert-deftest clutch-test-icon-supports-octicon-family ()
+  "Icon helper should dispatch octicon names when nerd-icons is available."
+  (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
+            ((symbol-function 'nerd-icons-octicon)
+             (lambda (name) (concat "oct:" name))))
+    (should (equal (clutch--icon '(octicon . "nf-oct-sort_desc") "fallback")
+                   "oct:nf-oct-sort_desc"))))
+
 (ert-deftest clutch-test-export-command-dispatches-copy ()
   "Export command should dispatch to all-rows clipboard export."
   (with-temp-buffer

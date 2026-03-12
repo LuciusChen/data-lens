@@ -22,7 +22,10 @@ sidecar (=clutch-jdbc-agent=, Java 11+).
 [[file:assets/clutch-overview.png]]
 
 *Note:* MySQL is the primary backend — thoroughly tested and used daily.
-PostgreSQL support is functional and compatible, but has not been tested as extensively in daily use.
+Native MySQL support has been live-validated against MySQL 5.6, 8.0, and
+MariaDB 10.11 through the same =mysql= backend.  PostgreSQL support is
+functional and compatible, but has not been tested as extensively in daily
+use.
 SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external dependencies.
 The JDBC backend requires Java 11+ and =clutch-jdbc-agent.jar= (auto-downloaded on first use).
 
@@ -83,8 +86,20 @@ The JDBC backend requires Java 11+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 
 - Emacs 28.1+ for MySQL and PostgreSQL backends
 - Emacs 29.1+ for the SQLite backend (built-in =sqlite-*= functions)
-- MySQL 5.7+ / 8.x, PostgreSQL 12+, or SQLite 3 (via Emacs built-in)
+- MySQL 5.6+ / 8.x, PostgreSQL 12+, or SQLite 3 (via Emacs built-in)
+- MariaDB 10.11 has been live-validated through the native =mysql= backend;
+  other MariaDB versions are expected to be broadly compatible but are not yet
+  part of the regular test matrix
 - Java 11+ for the JDBC backend (Oracle, SQL Server, DB2, Snowflake, Redshift)
+
+For MySQL-family servers, core functionality (connect/query/schema browsing,
+editing, prepared statements, and clutch UI workflows) is expected to work on
+MySQL 5.6+ and on compatible MariaDB releases.  Some newer server-side
+features remain version-specific:
+
+- MySQL 5.6 does not provide a native JSON column type
+- MariaDB exposes =JSON= as an alias over text with =json_valid(...)= checks
+- newer auth plugins and TLS combinations vary by server family/version
 
 * Installation
 
