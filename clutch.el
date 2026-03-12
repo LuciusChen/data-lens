@@ -1356,6 +1356,17 @@ Returns a list of propertized strings (may be empty)."
                    'face 'clutch-modified-face)
        (propertize "  C-c C-c" 'face 'font-lock-comment-face)))))
 
+(defun clutch--footer-mutation-capability-part ()
+  "Build footer part describing update/delete capability for the result."
+  (when-let* ((table (and clutch--result-columns
+                          (clutch-result--detect-table))))
+    (unless clutch--cached-pk-indices
+      (let ((dim 'font-lock-comment-face)
+            (warn 'font-lock-warning-face))
+        (concat (propertize "PK " 'face dim)
+                (propertize "missing" 'face warn)
+                (propertize (format "  %s: edit/delete off" table) 'face dim))))))
+
 (defun clutch--footer-main-parts (row-count page-num page-size
                                              total-rows col-num-pages col-cur-page)
   "Return list of main footer part strings for pagination state."
@@ -1378,6 +1389,7 @@ Returns a list of propertized strings (may be empty)."
                                  'face dim)
                      (propertize (format "%d/%d" col-cur-page col-num-pages) 'face hi)))
            (clutch--footer-sort-part)
+           (clutch--footer-mutation-capability-part)
            (clutch--footer-pending-part)
            (when clutch--query-elapsed
              (concat (propertize (concat (clutch--icon '(mdicon . "nf-md-timer_outline") "⏱") " ")
@@ -4114,9 +4126,8 @@ Use C-c C-c in the result buffer to commit all staged edits."
 
 (defun clutch-result--apply-edit (ridx cidx new-value)
   "Record edit for row RIDX, column CIDX with NEW-VALUE and refresh display."
-  (let* ((pk-indices (or clutch--cached-pk-indices
-                         (clutch-result--detect-primary-key)
-                         (user-error "Cannot detect primary key")))
+  (let* ((table (clutch--result-source-table-or-user-error "stage UPDATE"))
+         (pk-indices (clutch--result-pk-indices-or-user-error table "stage UPDATE"))
          (display-rows (or clutch--filtered-rows clutch--result-rows))
          (row (nth ridx display-rows))
          (pk-vec (clutch-result--extract-pk-vec row pk-indices))
@@ -4159,6 +4170,19 @@ optional schema prefix (schema.table).  Returns a string or nil."
 Returns table name string or nil."
   (when clutch--last-query
     (clutch-result--table-from-sql clutch--last-query)))
+
+(defun clutch--result-source-table-or-user-error (op)
+  "Return source table for current result, or signal user-error for OP."
+  (or (clutch-result--detect-table)
+      (user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
+                  op)))
+
+(defun clutch--result-pk-indices-or-user-error (table op)
+  "Return primary key indices for TABLE, or signal user-error for OP."
+  (or clutch--cached-pk-indices
+      (clutch-result--detect-primary-key)
+      (user-error "Cannot %s: no primary key detected for table %s"
+                  op table)))
 
 (defun clutch-result--detect-primary-key ()
   "Return a list of column indices that form the primary key, or nil."
@@ -4271,11 +4295,8 @@ Clear pending edits and re-run the last query if confirmed."
   "Build UPDATE statements from `clutch--pending-edits'."
   (unless clutch--pending-edits
     (user-error "No pending edits"))
-  (let* ((table (or (clutch-result--detect-table)
-                    (user-error "Cannot detect source table (multi-table query?)")))
-         (pk-indices (or clutch--cached-pk-indices
-                         (clutch-result--detect-primary-key)
-                         (user-error "Cannot detect primary key for table %s" table)))
+  (let* ((table (clutch--result-source-table-or-user-error "build UPDATE"))
+         (pk-indices (clutch--result-pk-indices-or-user-error table "build UPDATE"))
          (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
          (col-names clutch--result-columns)
          (by-pk (clutch-result--group-edits-by-pk clutch--pending-edits))
@@ -4298,11 +4319,8 @@ Clear pending edits and re-run the last query if confirmed."
 
 (defun clutch-result--build-pending-delete-statements ()
   "Build DELETE statements from `clutch--pending-deletes'."
-  (let* ((table (or (clutch-result--detect-table)
-                    (user-error "Cannot detect source table")))
-         (pk-indices (or clutch--cached-pk-indices
-                         (clutch-result--detect-primary-key)
-                         (user-error "Cannot detect primary key for %s" table)))
+  (let* ((table (clutch--result-source-table-or-user-error "build DELETE"))
+         (pk-indices (clutch--result-pk-indices-or-user-error table "build DELETE"))
          (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
          (conn clutch-connection))
     (mapcar (lambda (pk-vec)
@@ -4398,10 +4416,8 @@ PK-INDICES are primary key column indices."
   "Build DELETE statements from selected rows."
   (let* ((indices (or (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
-         (table (or (clutch-result--detect-table)
-                    (user-error "Cannot detect source table")))
-         (pk-indices (or (clutch-result--detect-primary-key)
-                         (user-error "Cannot detect primary key for %s" table)))
+         (table (clutch--result-source-table-or-user-error "build DELETE"))
+         (pk-indices (clutch--result-pk-indices-or-user-error table "build DELETE"))
          (col-names clutch--result-columns)
          (rows clutch--result-rows))
     (mapcar (lambda (ridx)
@@ -4415,12 +4431,9 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   (interactive)
   (let* ((indices (or (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
-         (pk-indices (or clutch--cached-pk-indices
-                         (clutch-result--detect-primary-key)
-                         (user-error "Cannot detect primary key")))
+         (table (clutch--result-source-table-or-user-error "stage DELETE"))
+         (pk-indices (clutch--result-pk-indices-or-user-error table "stage DELETE"))
          (display-rows (or clutch--filtered-rows clutch--result-rows)))
-    (unless (clutch-result--detect-table)
-      (user-error "Cannot detect source table"))
     (dolist (ridx indices)
       (let ((pv (clutch-result--extract-pk-vec (nth ridx display-rows) pk-indices)))
         (cl-pushnew pv clutch--pending-deletes :test #'equal)))

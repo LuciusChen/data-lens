@@ -373,6 +373,17 @@
       (should (string-match-p "1 edit, 1 deletion, 1 insertion" footer))
       (should (string-match-p "C-c C-c" footer)))))
 
+(ert-deftest clutch-test-render-footer-warns-when-primary-key-missing ()
+  "Footer should explain when edit/delete are disabled due to missing PK."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name")
+                clutch--last-query "SELECT * FROM users"
+                clutch--cached-pk-indices nil)
+    (let ((footer (substring-no-properties
+                   (clutch--render-footer 10 0 500 100 1 1))))
+      (should (string-match-p "PK missing" footer))
+      (should (string-match-p "users: edit/delete off" footer)))))
+
 (ert-deftest clutch-test-refresh-schema-cache-records-ready-status ()
   "Schema refresh should record ready state and table count."
   (let ((clutch--schema-cache (make-hash-table :test 'equal))
@@ -1095,6 +1106,41 @@
       (should (gethash 0 marked))
       (should (gethash 2 marked))
       (should (gethash [1] deletes)))))
+
+(ert-deftest clutch-test-apply-edit-errors-clearly-without-primary-key ()
+  "Edit staging should explain why update/delete are disabled."
+  (with-temp-buffer
+    (setq-local clutch--last-query "SELECT * FROM users"
+                clutch--result-rows '((1 "before"))
+                clutch--filtered-rows nil
+                clutch--cached-pk-indices nil)
+    (cl-letf (((symbol-function 'clutch-result--detect-primary-key) (lambda () nil)))
+      (condition-case err
+          (progn
+            (clutch-result--apply-edit 0 1 "after")
+            (should nil))
+        (user-error
+         (should (string-match-p
+                  "no primary key detected for table users"
+                  (error-message-string err))))))))
+
+(ert-deftest clutch-test-delete-rows-errors-clearly-without-primary-key ()
+  "Delete staging should explain why update/delete are disabled."
+  (with-temp-buffer
+    (setq-local clutch--last-query "SELECT * FROM users"
+                clutch--result-rows '((1 "before"))
+                clutch--filtered-rows nil
+                clutch--cached-pk-indices nil)
+    (cl-letf (((symbol-function 'clutch-result--selected-row-indices) (lambda () '(0)))
+              ((symbol-function 'clutch-result--detect-primary-key) (lambda () nil)))
+      (condition-case err
+          (progn
+            (clutch-result-delete-rows)
+            (should nil))
+        (user-error
+         (should (string-match-p
+                  "no primary key detected for table users"
+                  (error-message-string err))))))))
 
 (ert-deftest clutch-test-render-cell-uses-render-state-edits ()
   "Cell rendering should use render-state lookups instead of alist scans."
