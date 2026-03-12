@@ -384,6 +384,88 @@
       (should (string-match-p "PK missing" footer))
       (should (string-match-p "users: edit/delete off" footer)))))
 
+(ert-deftest clutch-test-insert-buffer-tab-navigation ()
+  "Insert buffer TAB navigation should jump between field value positions."
+  (with-temp-buffer
+    (insert "id: \nname: alice\ncreated_at: \n")
+    (clutch-result-insert-mode 1)
+    (goto-char (point-min))
+    (goto-char (clutch-result-insert--current-field-value-position))
+    (should (= (current-column) (length "id: ")))
+    (clutch-result-insert-next-field)
+    (should (equal (buffer-substring-no-properties
+                    (line-beginning-position) (line-end-position))
+                   "name: alice"))
+    (should (= (point) (line-end-position)))
+    (clutch-result-insert-next-field)
+    (should (equal (buffer-substring-no-properties
+                    (line-beginning-position) (line-end-position))
+                   "created_at: "))
+    (should (= (current-column) (length "created_at: ")))
+    (clutch-result-insert-prev-field)
+    (should (equal (buffer-substring-no-properties
+                    (line-beginning-position) (line-end-position))
+                   "name: alice"))
+    (should (= (point) (line-end-position)))))
+
+(ert-deftest clutch-test-pending-insert-renders-generated-and-default-placeholders ()
+  "Pending insert rows should show generated/default placeholders when known."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-columns '("id" "name" "created_at" "notes")
+                clutch--result-column-defs '((:name "id" :type-category numeric)
+                                             (:name "name" :type-category text)
+                                             (:name "created_at" :type-category datetime)
+                                             (:name "notes" :type-category text))
+                clutch--pending-inserts '((("name" . "alice"))))
+    (let ((row-positions (make-vector 1 nil))
+          render-state)
+      (cl-letf (((symbol-function 'clutch-result--detect-table) (lambda () "users"))
+                ((symbol-function 'clutch--ensure-column-details)
+                 (lambda (_conn _table)
+                   (list (list :name "id" :generated t)
+                         (list :name "name")
+                         (list :name "created_at" :default "CURRENT_TIMESTAMP")
+                         (list :name "notes")))))
+        (setq render-state (clutch--build-render-state))
+        (clutch--insert-pending-insert-rows '(0 1 2 3) [12 12 12 12] 3 0 row-positions
+                                            render-state)
+        (let ((rendered (buffer-string)))
+          (should (string-match-p "<generated>" rendered))
+          (should (string-match-p "<default>" rendered))
+          (should (string-match-p "alice" rendered)))))))
+
+(ert-deftest clutch-test-insert-fill-current-time-respects-column-type ()
+  "C-c . should fill date and datetime fields using result column metadata."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch--result-columns '("due_on" "created_at" "name")
+                        clutch--result-column-defs '((:name "due_on" :type-category date)
+                                                     (:name "created_at" :type-category datetime)
+                                                     (:name "name" :type-category text))))
+          (with-temp-buffer
+            (insert "due_on: \ncreated_at: \nname: alice\n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf)
+            (cl-letf (((symbol-function 'current-time)
+                       (lambda () (encode-time 30 45 13 12 3 2026))))
+              (goto-char (point-min))
+              (clutch-result-insert-fill-current-time)
+              (should (equal (buffer-substring-no-properties
+                              (line-beginning-position) (line-end-position))
+                             "due_on: 2026-03-12"))
+              (forward-line 1)
+              (clutch-result-insert-fill-current-time)
+              (should (equal (buffer-substring-no-properties
+                              (line-beginning-position) (line-end-position))
+                             "created_at: 2026-03-12 13:45:30"))
+              (forward-line 1)
+              (should-error (clutch-result-insert-fill-current-time)
+                            :type 'user-error))))
+      (kill-buffer result-buf))))
+
 (ert-deftest clutch-test-execute-select-detects-primary-key-before-first-render ()
   "Primary key cache should be ready before the first result render."
   (let ((clutch--source-window (selected-window))
@@ -1878,7 +1960,8 @@ Skips if `clutch-test-password' is nil."
     (setq-local clutch--cached-pk-indices '(0))
     (setq-local clutch--filtered-rows nil)
     (setq-local clutch--pending-edits nil)
-    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
+    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore)
+              ((symbol-function 'clutch-result--detect-table) (lambda () "users")))
       (clutch-result--apply-edit 0 1 "carol")
       (should (= (length clutch--pending-edits) 1))
       (let ((key (caar clutch--pending-edits)))

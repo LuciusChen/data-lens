@@ -281,14 +281,20 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
   "Convert a column-details ROW to a clutch-db column plist.
 PK-COLS is a list of primary key column names.
 FKS is an alist of (column-name . fk-plist)."
-  (pcase-let ((`(,name ,dtype ,nullable-str ,max-len ,num-prec ,num-scale ,comment) row))
+  (pcase-let ((`(,name ,dtype ,nullable-str ,max-len ,num-prec ,num-scale
+                 ,default-val ,identity-str ,comment) row))
     (let* ((type     (clutch-db-pg--format-type dtype max-len num-prec num-scale))
            (nullable (string= nullable-str "YES"))
            (pk-p     (member name pk-cols))
-           (fk       (cdr (assoc name fks))))
+           (fk       (cdr (assoc name fks)))
+           (generated (or (string= identity-str "YES")
+                          (and default-val
+                               (string-match-p "\\`nextval(" default-val)))))
       (list :name name :type type :nullable nullable
             :primary-key (and pk-p t)
             :foreign-key fk
+            :default (and default-val (not generated) default-val)
+            :generated (and generated t)
             :comment (and comment (not (string-empty-p comment)) comment)))))
 
 (cl-defmethod clutch-db-column-details ((conn pg-conn) table)
@@ -299,7 +305,7 @@ FKS is an alist of (column-name . fk-plist)."
                conn
                (format "SELECT c.column_name, c.data_type, c.is_nullable, \
 c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
-col_description(pc.oid, a.attnum) \
+c.column_default, c.is_identity, col_description(pc.oid, a.attnum) \
 FROM information_schema.columns c \
 JOIN pg_class pc ON pc.relname = c.table_name \
 JOIN pg_namespace pn ON pn.oid = pc.relnamespace \

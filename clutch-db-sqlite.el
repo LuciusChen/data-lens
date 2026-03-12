@@ -268,13 +268,18 @@ Result: ((from-col :ref-table T :ref-column C) ...)"
   "Convert a table_info ROW to a clutch-db column plist.
 PK-COLS is a list of pk column names.  FKS is an FK alist."
   ;; Row: (cid name type notnull dflt_value pk)
-  (pcase-let ((`(,_cid ,name ,type ,notnull ,_dflt ,_pk) row))
-    (list :name        name
-          :type        (downcase (or type "text"))
-          :nullable    (= notnull 0)
-          :primary-key (and (member name pk-cols) t)
-          :foreign-key (cdr (assoc name fks))
-          :comment     nil)))
+  (pcase-let ((`(,_cid ,name ,type ,notnull ,dflt-val ,pk) row))
+    (let* ((type-name (downcase (or type "text")))
+           (generated (and (> pk 0)
+                           (string= type-name "integer"))))
+      (list :name        name
+            :type        type-name
+            :nullable    (= notnull 0)
+            :primary-key (and (member name pk-cols) t)
+            :foreign-key (cdr (assoc name fks))
+            :default     (and dflt-val (not generated) dflt-val)
+            :generated   (and generated t)
+            :comment     nil))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-db-sqlite-conn) table)
   "Return detailed column info for TABLE on SQLite CONN."

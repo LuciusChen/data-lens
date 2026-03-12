@@ -263,7 +263,7 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
       (let* ((col-result (mysql-query
                           conn
                           (format "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
-COLUMN_COMMENT \
+COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT \
 FROM INFORMATION_SCHEMA.COLUMNS \
 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s \
 ORDER BY ORDINAL_POSITION"
@@ -273,13 +273,19 @@ ORDER BY ORDINAL_POSITION"
              (fks (clutch-db-foreign-keys conn table)))
         (mapcar
          (lambda (row)
-           (pcase-let ((`(,name ,type ,nullable-str ,comment) row))
+           (pcase-let ((`(,name ,type ,nullable-str ,default-val ,extra ,comment) row))
              (let* ((nullable (string= nullable-str "YES"))
                     (pk-p (member name pk-cols))
-                    (fk (cdr (assoc name fks))))
+                    (fk (cdr (assoc name fks)))
+                    (generated (and extra
+                                    (string-match-p
+                                     "\\_<\\(auto_increment\\|VIRTUAL GENERATED\\|STORED GENERATED\\)\\_>"
+                                     extra))))
                (list :name name :type type :nullable nullable
                      :primary-key (and pk-p t)
                      :foreign-key fk
+                     :default (and default-val (not generated) default-val)
+                     :generated (and generated t)
                      :comment (and comment (not (string-empty-p comment)) comment)))))
          col-rows))
     (mysql-error nil)))
