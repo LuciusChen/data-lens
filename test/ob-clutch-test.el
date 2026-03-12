@@ -47,6 +47,23 @@
     (should (eq backend 'mysql))
     (should (= (plist-get conn-params :port) 3306))))
 
+(ert-deftest ob-clutch-test-resolve-connection-inline-pass-entry ()
+  "Test inline params preserve :pass-entry for password resolution."
+  (let (resolved)
+    (cl-letf (((symbol-function 'ob-clutch--resolve-password)
+               (lambda (params)
+                 (setq resolved params)
+                 "secret")))
+      (pcase-let ((`(,backend . ,conn-params)
+                   (ob-clutch--resolve-connection
+                    '((:host . "127.0.0.1")
+                      (:user . "u")
+                      (:pass-entry . "db/dev"))
+                    'mysql)))
+        (should (eq backend 'mysql))
+        (should (equal (plist-get conn-params :password) "secret"))
+        (should (equal (plist-get resolved :pass-entry) "db/dev"))))))
+
 (ert-deftest ob-clutch-test-resolve-connection-inline-sqlite-requires-database ()
   "Test sqlite inline params require :database."
   (should-error

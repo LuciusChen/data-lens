@@ -142,6 +142,15 @@ ob-clutch needing to know about clutch-db-jdbc."
                  (when password (list :password password))
                  (when database (list :database database))))))))
 
+(defun ob-clutch--maybe-inject-password (backend conn-params source-params)
+  "Return CONN-PARAMS with password injected unless BACKEND is sqlite.
+SOURCE-PARAMS is the plist used for password resolution."
+  (if (eq backend 'sqlite)
+      conn-params
+    (if-let* ((pw (ob-clutch--resolve-password source-params)))
+        (plist-put conn-params :password pw)
+      conn-params)))
+
 (defun ob-clutch--resolve-connection (params default-backend)
   "Return (BACKEND . CONN-PARAMS) from Babel PARAMS.
 DEFAULT-BACKEND is used by language-specific executors."
@@ -152,17 +161,17 @@ DEFAULT-BACKEND is used by language-specific executors."
              (plist (ob-clutch--inject-entry-name plist conn-name))
              (backend (ob-clutch--normalize-backend
                        (or (plist-get plist :backend) default-backend)))
-             (conn-params (ob-clutch--plist-without-meta plist))
-             (pw (and (not (eq backend 'sqlite))
-                      (ob-clutch--resolve-password plist))))
-        (cons backend (if pw (plist-put conn-params :password pw) conn-params)))
+             (conn-params (ob-clutch--plist-without-meta plist)))
+        (cons backend
+              (ob-clutch--maybe-inject-password backend conn-params plist)))
     (let* ((backend (ob-clutch--normalize-backend
                      (or (cdr (assq :backend params)) default-backend)))
-           (conn-params (ob-clutch--inline-params params backend)))
-      (if (eq backend 'sqlite)
-          (cons backend conn-params)
-        (let ((pw (ob-clutch--resolve-password conn-params)))
-          (cons backend (if pw (plist-put conn-params :password pw) conn-params)))))))
+           (conn-params (ob-clutch--inline-params params backend))
+           (source-params (append (ob-clutch--plist-without-meta params)
+                                  (when-let* ((entry (cdr (assq :pass-entry params))))
+                                    (list :pass-entry entry)))))
+      (cons backend
+            (ob-clutch--maybe-inject-password backend conn-params source-params)))))
 
 (defun ob-clutch--connect (params default-backend)
   "Get or create a cached clutch-db connection for PARAMS."
