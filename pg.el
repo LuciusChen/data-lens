@@ -604,8 +604,12 @@ Returns the server's response character (?S or ?N)."
           (delete-process proc)
           (signal 'pg-connection-error
                   (list (format "Timed out connecting to %s:%s" host port))))
+        ;; Poll in short slices.  Some Emacs/network stacks do not wake
+        ;; `accept-process-output' promptly on connect state transitions,
+        ;; which otherwise stretches a fast localhost connect to the full
+        ;; timeout window.
         (accept-process-output proc (if deadline
-                                        (max 0.05 remaining)
+                                        (min 0.05 (max 0.0 remaining))
                                       0.05))))
     (unless (memq (process-status proc) '(open run))
       (signal 'pg-connection-error
