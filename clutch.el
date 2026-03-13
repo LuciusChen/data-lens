@@ -57,8 +57,13 @@
   :prefix "clutch-")
 
 (defface clutch-header-face
-  '((t :inherit font-lock-keyword-face :weight bold))
+  '((t :inherit bold))
   "Face for column headers in result tables."
+  :group 'clutch)
+
+(defface clutch-insert-field-name-face
+  '((t :inherit clutch-header-face))
+  "Face for insert-buffer field names."
   :group 'clutch)
 
 (defface clutch-insert-field-tag-face
@@ -83,6 +88,11 @@
 (defface clutch-insert-active-field-face
   '((t :inherit hl-line))
   "Face for the active line in the insert buffer."
+  :group 'clutch)
+
+(defface clutch-insert-active-field-name-face
+  '((t :inherit (clutch-header-active-face clutch-insert-field-name-face)))
+  "Face for the active insert-buffer field prefix."
   :group 'clutch)
 
 (defface clutch-pinned-header-face
@@ -4377,9 +4387,9 @@ Scans text properties across the line."
                     (equal (plist-get detail :name) col-name))
                   details))))
 
-(defun clutch-result-edit--field-candidates ()
-  "Return completion candidates for the current edit buffer, or nil."
-  (let ((type (downcase (or (plist-get clutch-result-edit--column-detail :type) ""))))
+(defun clutch-result--field-candidates-from-detail (detail)
+  "Return completion candidates derived from column DETAIL, or nil."
+  (let ((type (downcase (or (plist-get detail :type) ""))))
     (or (clutch-result-insert--enum-candidates type)
         (cond
          ((member type '("boolean" "bool"))
@@ -4388,33 +4398,28 @@ Scans text properties across the line."
           '("0" "1"))
          (t nil)))))
 
-(defun clutch-result-edit-completion-at-point ()
-  "Return CAPF data for the current edit buffer, or nil."
-  (when-let* ((candidates (clutch-result-edit--field-candidates)))
-    (list (point-min) (point-max) candidates :exclusive 'no)))
-
-(defun clutch-result-edit--temporal-p ()
-  "Return non-nil when the current edit buffer is for a temporal column."
-  (memq (plist-get clutch-result-edit--column-def :type-category)
-        '(date time datetime)))
-
-(defun clutch-result-edit--json-p ()
-  "Return non-nil when the current edit buffer is for a JSON column."
-  (let ((type (downcase (or (plist-get clutch-result-edit--column-detail :type) ""))))
-    (or (eq (plist-get clutch-result-edit--column-def :type-category) 'json)
+(defun clutch-result--field-json-p (col-def detail)
+  "Return non-nil when COL-DEF/DETAIL describe a JSON field."
+  (let ((type (downcase (or (plist-get detail :type) ""))))
+    (or (eq (plist-get col-def :type-category) 'json)
         (string= type "json"))))
 
-(defun clutch-result-edit--metadata-tags ()
-  "Return short metadata tags for the current edit buffer."
-  (let* ((type-category (plist-get clutch-result-edit--column-def :type-category))
-         (type (downcase (or (plist-get clutch-result-edit--column-detail :type) "")))
+(defun clutch-result--field-temporal-p (col-def)
+  "Return non-nil when COL-DEF describes a temporal field."
+  (memq (plist-get col-def :type-category)
+        '(date time datetime)))
+
+(defun clutch-result--field-metadata-tags (col-def detail)
+  "Return short metadata tags for COL-DEF and DETAIL."
+  (let* ((type-category (plist-get col-def :type-category))
+         (type (downcase (or (plist-get detail :type) "")))
          tags)
     (when (clutch-result-insert--enum-candidates type)
       (push "enum" tags))
     (when (or (member type '("boolean" "bool"))
               (member type '("tinyint(1)" "bit(1)")))
       (push "bool" tags))
-    (when (clutch-result-edit--json-p)
+    (when (clutch-result--field-json-p col-def detail)
       (push "json" tags))
     (when (eq type-category 'date)
       (push "date" tags))
@@ -4423,6 +4428,37 @@ Scans text properties across the line."
     (when (eq type-category 'datetime)
       (push "datetime" tags))
     (nreverse tags)))
+
+(defun clutch-result--field-validation-message (field-name value col-def detail)
+  "Return a validation message for FIELD-NAME/VALUE, or nil."
+  (condition-case err
+      (progn
+        (clutch-result--validate-field-value field-name value col-def detail)
+        nil)
+    (user-error (error-message-string err))))
+
+(defun clutch-result-edit--field-candidates ()
+  "Return completion candidates for the current edit buffer, or nil."
+  (clutch-result--field-candidates-from-detail clutch-result-edit--column-detail))
+
+(defun clutch-result-edit-completion-at-point ()
+  "Return CAPF data for the current edit buffer, or nil."
+  (when-let* ((candidates (clutch-result-edit--field-candidates)))
+    (list (point-min) (point-max) candidates :exclusive 'no)))
+
+(defun clutch-result-edit--temporal-p ()
+  "Return non-nil when the current edit buffer is for a temporal column."
+  (clutch-result--field-temporal-p clutch-result-edit--column-def))
+
+(defun clutch-result-edit--json-p ()
+  "Return non-nil when the current edit buffer is for a JSON column."
+  (clutch-result--field-json-p clutch-result-edit--column-def
+                               clutch-result-edit--column-detail))
+
+(defun clutch-result-edit--metadata-tags ()
+  "Return short metadata tags for the current edit buffer."
+  (clutch-result--field-metadata-tags clutch-result-edit--column-def
+                                      clutch-result-edit--column-detail))
 
 (defun clutch-result-edit--header-line (ridx col-name)
   "Build the edit-buffer header line for ROW RIDX and COL-NAME."
@@ -4469,15 +4505,11 @@ Scans text properties across the line."
   "Return a validation message for the current edit buffer, or nil."
   (let* ((raw-value (string-trim-right (buffer-string)))
          (value (if (string= raw-value "NULL") nil raw-value)))
-    (condition-case err
-        (progn
-          (clutch-result--validate-field-value
-           clutch-result-edit--column-name
-           value
-           clutch-result-edit--column-def
-           clutch-result-edit--column-detail)
-          nil)
-      (user-error (error-message-string err)))))
+    (clutch-result--field-validation-message
+     clutch-result-edit--column-name
+     value
+     clutch-result-edit--column-def
+     clutch-result-edit--column-detail)))
 
 (defun clutch-result-edit--validate-live ()
   "Run local validation for the current edit buffer and refresh UI."
@@ -5043,6 +5075,9 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 (defvar-local clutch-result-insert--active-field-overlay nil
   "Overlay highlighting the active insert field line.")
 
+(defvar-local clutch-result-insert--active-prefix-overlay nil
+  "Overlay highlighting the active insert field prefix.")
+
 (defvar-local clutch-result-insert--label-width 0
   "Display width reserved for insert field labels.")
 
@@ -5063,7 +5098,10 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   (clutch-result-insert--cancel-validation-timer)
   (when (overlayp clutch-result-insert--active-field-overlay)
     (delete-overlay clutch-result-insert--active-field-overlay))
-  (setq-local clutch-result-insert--active-field-overlay nil)
+  (when (overlayp clutch-result-insert--active-prefix-overlay)
+    (delete-overlay clutch-result-insert--active-prefix-overlay))
+  (setq-local clutch-result-insert--active-field-overlay nil
+              clutch-result-insert--active-prefix-overlay nil)
   (dolist (field clutch-result-insert--fields)
     (when-let* ((ov (plist-get field :error-overlay)))
       (delete-overlay ov)
@@ -5169,10 +5207,8 @@ Use \\[clutch-result-commit] in the result buffer to commit."
          (detail (or (plist-get field :detail)
                      (clutch-result-insert--column-detail name)))
          (col-def (or (plist-get field :column-def)
-                      (clutch-result-insert--column-def name)))
-         (type (downcase (or (plist-get detail :type) ""))))
-    (or (eq (plist-get col-def :type-category) 'json)
-        (string= type "json"))))
+                      (clutch-result-insert--column-def name))))
+    (clutch-result--field-json-p col-def detail)))
 
 (defun clutch-result-insert--clear-field-error (field)
   "Clear inline validation state for structured FIELD."
@@ -5218,14 +5254,14 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 (defun clutch-result-insert--field-validation-message (field)
   "Return a validation message for structured FIELD, or nil."
-  (let ((name (plist-get field :name))
-        (value (plist-get field :value)))
+  (let* ((name (plist-get field :name))
+         (value (plist-get field :value))
+         (detail (or (plist-get field :detail)
+                     (clutch-result-insert--column-detail name)))
+         (col-def (or (plist-get field :column-def)
+                      (clutch-result-insert--column-def name))))
     (unless (string-empty-p value)
-      (condition-case err
-          (progn
-            (clutch-result-insert--validate-field name value)
-            nil)
-        (user-error (error-message-string err))))))
+      (clutch-result--field-validation-message name value col-def detail))))
 
 (defun clutch-result-insert--validate-field-live (field)
   "Run local validation for structured FIELD and update inline UI."
@@ -5272,12 +5308,27 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 (defun clutch-result-insert--field-label-width (col-names)
   "Return the display width needed for labeled insert fields in COL-NAMES."
   (cl-loop for col in col-names
-           maximize (string-width (clutch-result-insert--field-label col))))
+           maximize (let* ((tags (clutch-result-insert--field-tag-list col))
+                           (tag-text (if tags
+                                         (format " [%s]" (string-join tags " "))
+                                       "")))
+                      (string-width (concat col tag-text)))))
 
 (defun clutch-result-insert--field-label-padded (col-name)
   "Return padded insert label text for COL-NAME."
-  (clutch--string-pad (clutch-result-insert--field-label col-name)
-                      clutch-result-insert--label-width))
+  (let* ((tags (clutch-result-insert--field-tag-list col-name))
+         (tag-text (if tags
+                       (format " [%s]" (string-join tags " "))
+                     ""))
+         (plain-width (string-width (concat col-name tag-text)))
+         (gap-width (max 0 (- clutch-result-insert--label-width plain-width)))
+         (name-part (clutch--string-pad
+                     (propertize col-name 'face 'clutch-insert-field-name-face)
+                     (+ (string-width col-name) gap-width)))
+         (tag-part (when tags
+                     (propertize tag-text
+                                 'face 'clutch-insert-field-tag-face))))
+    (concat name-part tag-part)))
 
 (defun clutch-result-insert--json-normalize-string (value)
   "Return VALUE normalized as compact JSON."
@@ -5402,15 +5453,8 @@ next field. Returns nil when no matching field exists."
 
 (defun clutch-result-insert--field-candidates (field-name)
   "Return completion candidates for FIELD-NAME, or nil."
-  (let* ((detail (clutch-result-insert--column-detail field-name))
-         (type (downcase (or (plist-get detail :type) ""))))
-    (or (clutch-result-insert--enum-candidates type)
-        (cond
-         ((member type '("boolean" "bool"))
-          '("true" "false"))
-         ((member type '("tinyint(1)" "bit(1)"))
-          '("0" "1"))
-         (t nil)))))
+  (clutch-result--field-candidates-from-detail
+   (clutch-result-insert--column-detail field-name)))
 
 (defun clutch-result-insert-completion-at-point ()
   "Return CAPF data for the current insert field, or nil."
@@ -5435,35 +5479,19 @@ TIME defaults to `current-time'."
   "Return display tags for insert field COL-NAME."
   (let* ((detail (clutch-result-insert--column-detail col-name))
          (col-def (clutch-result-insert--column-def col-name))
-         (type (downcase (or (plist-get detail :type) "")))
          tags)
     (when (plist-get detail :generated)
       (push "generated" tags))
     (when-let* ((default (plist-get detail :default)))
       (push (format "default=%s" default) tags))
-    (when (clutch-result-insert--enum-candidates type)
-      (push "enum" tags))
-    (when (or (member type '("boolean" "bool"))
-              (member type '("tinyint(1)" "bit(1)")))
-      (push "bool" tags))
-    (when (or (eq (plist-get col-def :type-category) 'json)
-              (string= type "json"))
-      (push "json" tags))
+    (setq tags (append (nreverse (clutch-result--field-metadata-tags col-def detail))
+                       tags))
     (when (and detail
                (not (plist-get detail :nullable))
                (not (plist-get detail :generated))
                (not (plist-get detail :default)))
       (push "required" tags))
     (nreverse tags)))
-
-(defun clutch-result-insert--field-label (col-name)
-  "Return a propertized insert label for COL-NAME with metadata tags."
-  (let* ((tags (clutch-result-insert--field-tag-list col-name))
-         (name-part (propertize col-name 'face 'clutch-header-face))
-         (tag-part (when tags
-                     (propertize (format " [%s]" (string-join tags " "))
-                                 'face 'clutch-insert-field-tag-face))))
-    (concat name-part tag-part)))
 
 (defun clutch-result-insert--line-prefix-end ()
   "Return the end position of the current insert field prefix."
@@ -5484,6 +5512,9 @@ TIME defaults to `current-time'."
     (let ((line-start (save-excursion
                         (goto-char (car bounds))
                         (line-beginning-position)))
+          (prefix-end (save-excursion
+                        (goto-char (car bounds))
+                        (- (point) 2)))
           (line-end (save-excursion
                       (goto-char (cdr bounds))
                       (line-end-position))))
@@ -5494,7 +5525,15 @@ TIME defaults to `current-time'."
                      'face 'clutch-insert-active-field-face)
         (overlay-put clutch-result-insert--active-field-overlay 'priority -1)
         (overlay-put clutch-result-insert--active-field-overlay 'evaporate t))
-      (move-overlay clutch-result-insert--active-field-overlay line-start line-end))))
+      (move-overlay clutch-result-insert--active-field-overlay line-start line-end)
+      (unless (overlayp clutch-result-insert--active-prefix-overlay)
+        (setq-local clutch-result-insert--active-prefix-overlay
+                    (make-overlay line-start prefix-end nil t t))
+        (overlay-put clutch-result-insert--active-prefix-overlay
+                     'face 'clutch-insert-active-field-name-face)
+        (overlay-put clutch-result-insert--active-prefix-overlay 'priority 101)
+        (overlay-put clutch-result-insert--active-prefix-overlay 'evaporate t))
+      (move-overlay clutch-result-insert--active-prefix-overlay line-start prefix-end))))
 
 (defun clutch-result-insert-next-field ()
   "Move point to the next insert field value."

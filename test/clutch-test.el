@@ -436,8 +436,8 @@
     (call-interactively (key-binding (kbd "TAB")))
     (should (equal (clutch-result-insert--current-field-name) "created_at"))))
 
-(ert-deftest clutch-test-insert-buffer-aligns-value-columns-and-highlights-current-line ()
-  "Insert buffer should align value starts and highlight the active field line."
+(ert-deftest clutch-test-insert-buffer-renders-tight-tags-and-highlights-current-line ()
+  "Insert buffer should keep tags tight to the colon and highlight the active field line."
   (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
     (unwind-protect
         (progn
@@ -458,14 +458,22 @@
                                (list :name "is_ship_blocked" :type "tinyint(1)" :default "0" :nullable nil)))))
               (clutch-result-insert--populate-buffer
                "shipping_incidents" '("id" "severity" "is_ship_blocked"))
-              (let (columns)
+              (let (prefixes)
                 (goto-char (point-min))
                 (while (not (eobp))
-                  (goto-char (clutch-result-insert--current-field-value-start))
-                  (push (current-column) columns)
+                  (let* ((field (clutch-result-insert--current-field-or-error))
+                         (bounds (clutch-result-insert--field-value-bounds field)))
+                    (push (buffer-substring-no-properties (line-beginning-position)
+                                                          (car bounds))
+                          prefixes))
                   (forward-line 1))
-                (setq columns (delq nil (nreverse columns)))
-                (should (= 1 (length (delete-dups (copy-sequence columns))))))
+                (setq prefixes (nreverse prefixes))
+                (should (string-match-p "^id[ ]+\\[generated\\]: $"
+                                        (nth 0 prefixes)))
+                (should (string-match-p "^severity[ ]+\\[enum required\\]: $"
+                                        (nth 1 prefixes)))
+                (should (string-match-p "^is_ship_blocked \\[default=0 bool\\]: $"
+                                        (nth 2 prefixes)))))
               (goto-char (point-min))
               (clutch-result-insert-next-field)
               (let ((ov clutch-result-insert--active-field-overlay))
@@ -473,7 +481,15 @@
                 (should (eq (overlay-get ov 'face) 'clutch-insert-active-field-face))
                 (should (string-match-p "^severity" (buffer-substring-no-properties
                                                      (overlay-start ov)
-                                                     (overlay-end ov))))))))
+                                                     (overlay-end ov))))
+              (let ((prefix-ov clutch-result-insert--active-prefix-overlay))
+                (should (overlayp prefix-ov))
+                (should (eq (overlay-get prefix-ov 'face)
+                            'clutch-insert-active-field-name-face))
+                (should (string-match-p "^severity[ ]+\\[enum required\\]$"
+                                        (buffer-substring-no-properties
+                                         (overlay-start prefix-ov)
+                                         (overlay-end prefix-ov))))))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-insert-json-editor-save-roundtrip ()
@@ -1111,14 +1127,14 @@
               (clutch-result-insert--populate-buffer "shipping_incidents"
                                                     '("id" "severity" "postmortem" "is_ship_blocked" "opened_at"))
               (let ((rendered (buffer-string)))
-                (should (string-match-p "^id \\[generated\\][ ]*: $" rendered))
-                (should (string-match-p "^severity \\[enum required\\][ ]*: $" rendered))
-                (should (string-match-p "^postmortem \\[json\\][ ]*: $" rendered))
+                (should (string-match-p "^id[ ]+\\[generated\\]: $" rendered))
+                (should (string-match-p "^severity[ ]+\\[enum required\\]: $" rendered))
+                (should (string-match-p "^postmortem[ ]+\\[json\\]: $" rendered))
                 (should (string-match-p "^is_ship_blocked \\[default=0 bool\\]: $" rendered))
-                (should (string-match-p "^opened_at \\[required\\][ ]*: $" rendered)))
+                (should (string-match-p "^opened_at[ ]+\\[datetime required\\]: $" rendered)))
               (goto-char (point-min))
               (should (get-text-property (point) 'read-only))
-              (should (eq (get-text-property (point) 'face) 'clutch-header-face))
+              (should (eq (get-text-property (point) 'face) 'clutch-insert-field-name-face))
               (search-forward "[generated]")
               (should (eq (get-text-property (1- (point)) 'face)
                           'clutch-insert-field-tag-face))
