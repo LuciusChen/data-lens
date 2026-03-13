@@ -264,7 +264,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-t=   | List all tables            |
 | =C-c C-j=   | Browse table data          |
 | =C-c C-d=   | DESCRIBE table at point (errors if not on a table name) |
-| =C-c C-p=   | Preview SQL (dry-run)      |
+| =C-c C-p=   | Preview execution (dry-run) |
 | =C-c C-s=   | Refresh schema cache       |
 | =C-c ?=     | Transient menu             |
 | =TAB=       | Complete table/column name |
@@ -292,12 +292,12 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =S=            | Sort descending                               |
 | =C=            | Jump to column                                |
 | =g=            | Re-execute query                              |
-| =C-c '=       | Edit cell value / re-edit staged insert row   |
+| =C-c '=       | Edit / re-edit at point                       |
 | =i=            | Stage new row for insertion                   |
 | =d=            | Stage row(s) for deletion (supports region)   |
 | =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
-| =C-c C-k=     | Discard pending deletion/insertion at point   |
-| =C-c C-p=      | Preview SQL (current effective query / pending update / selected delete) |
+| =C-c C-k=     | Discard pending change at point               |
+| =C-c C-p=      | Preview execution (pending batch if any; otherwise effective query) |
 | =c=            | Open copy transient menu (choose TSV / CSV / INSERT; toggle =-r= to refine) |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
 | =e=            | Export all rows (copy / file)                     |
@@ -306,6 +306,10 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 
 Tip: =c= supports both regular region and rectangular selection (=C-x SPC=).
 Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
+Tip: the result-buffer status line uses compact staged-change tokens:
+=E= for pending edits, =D= for pending deletions, and =I= for pending inserts.
+When a query result is not updateable because no primary key was detected,
+the same line shows =PK missing= and =E/D off=.
 
 *** Insert Buffer Keys
 
@@ -448,16 +452,19 @@ Step 6 — press RET to confirm.
 6. C-c .                      → fill current date/time field with "now"
 7. Inline validation          → field-level mistakes show up immediately while editing
 8. C-c C-c                    → validate locally, then stage (C-c C-k cancels)
-                               staged rows appear as green ghost rows in result buffer
+                               staged rows appear as ghost rows in result buffer
+                               left marker shows =I= and status line shows =I<n>=
                                missing generated/defaulted columns render as <generated> / <default>
-9. C-c ' on a green ghost row → re-open that staged insert with its previous values
+9. C-c ' on a pending insert row → re-open that staged insert with its previous values
 10. Use normal Emacs region selection to select rows
 11. d                          → stage current row or selected region for deletion
-                               staged rows are highlighted in red with strikethrough
-12. C-c C-k                   → discard pending deletion or insertion at point
+                               left marker shows =D= and status line shows =D<n>=
+                               deleted rows are visually marked in the result buffer
+12. C-c C-k                   → discard pending change at point
 13. g with pending changes    → prompts "Discard pending changes and re-run query?"
 14. C-c C-c in result buffer → confirmation prompt showing all statements
                                commits in order: INSERT → UPDATE → DELETE
+                               edited rows show =E= in the left marker column and =E<n>= in the status line
 #+end_src
 
 ** REPL Mode

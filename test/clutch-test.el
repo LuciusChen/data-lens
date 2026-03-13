@@ -370,8 +370,9 @@
     (let ((footer (substring-no-properties
                    (clutch--render-footer 10 0 500 100 1 1))))
       (should (string-match-p "DESC\\[created_at\\]" footer))
-      (should (string-match-p "1 edit, 1 deletion, 1 insertion" footer))
-      (should (string-match-p "C-c C-c" footer)))))
+      (should (string-match-p "E1 D1 I1" footer))
+      (should (string-match-p "commit:C-c C-c" footer))
+      (should (string-match-p "discard:C-c C-k" footer)))))
 
 (ert-deftest clutch-test-render-footer-warns-when-primary-key-missing ()
   "Footer should explain when edit/delete are disabled due to missing PK."
@@ -382,7 +383,8 @@
     (let ((footer (substring-no-properties
                    (clutch--render-footer 10 0 500 100 1 1))))
       (should (string-match-p "PK missing" footer))
-      (should (string-match-p "users: edit/delete off" footer)))))
+      (should (string-match-p "users" footer))
+      (should (string-match-p "E/D off" footer)))))
 
 (ert-deftest clutch-test-insert-buffer-tab-navigation ()
   "Insert buffer TAB navigation should jump between field value positions."
@@ -660,6 +662,18 @@
           (should (string-match-p "<generated>" rendered))
           (should (string-match-p "<default>" rendered))
           (should (string-match-p "alice" rendered)))))))
+
+(ert-deftest clutch-test-pending-insert-uses-insert-markers ()
+  "Pending insert rows should use insert semantics in the left prefix."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name")
+                clutch--result-column-defs '((:name "id" :type-category numeric)
+                                             (:name "name" :type-category text))
+                clutch--pending-inserts '((("id" . "99") ("name" . "new"))))
+    (let ((row-positions (make-vector 1 nil)))
+      (clutch--insert-pending-insert-rows '(0 1) [8 8] 3 0 row-positions
+                                          (clutch--build-render-state))
+      (should (string-prefix-p "│I I1 " (buffer-string))))))
 
 (ert-deftest clutch-test-insert-fill-current-time-respects-column-type ()
   "C-c . should fill date and datetime fields using result column metadata."
@@ -1430,6 +1444,30 @@
         (clutch-preview-execution-sql)
         (should (string-match-p "UPDATE t SET name='v' WHERE id=1;" captured))))))
 
+(ert-deftest clutch-test-preview-execution-sql-uses-pending-batch-in-result-mode ()
+  "Preview in result mode should mirror the staged commit batch."
+  (with-temp-buffer
+    (let (captured)
+      (setq-local clutch--pending-inserts '(a)
+                  clutch--pending-edits '(b)
+                  clutch--pending-deletes '(c))
+      (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _modes) t))
+                ((symbol-function 'clutch-result--build-pending-insert-statements)
+                 (lambda () '("INSERT INTO t VALUES (1)")))
+                ((symbol-function 'clutch-result--build-update-statements)
+                 (lambda () '("UPDATE t SET name='' WHERE id=1")))
+                ((symbol-function 'clutch-result--build-pending-delete-statements)
+                 (lambda () '("DELETE FROM t WHERE id=1")))
+                ((symbol-function 'clutch--preview-sql-buffer)
+                 (lambda (sql) (setq captured sql))))
+        (clutch-preview-execution-sql)
+        (should (equal captured
+                       (mapconcat #'identity
+                                  '("INSERT INTO t VALUES (1);"
+                                    "UPDATE t SET name='' WHERE id=1;"
+                                    "DELETE FROM t WHERE id=1;")
+                                  "\n")))))))
+
 (ert-deftest clutch-test-result-effective-query-applies-where-filter ()
   "Result workflows should reuse the filtered SQL, not just display the filter."
   (with-temp-buffer
@@ -1713,16 +1751,18 @@
 (ert-deftest clutch-test-build-render-state-creates-fast-lookups ()
   "Render-state tables should preserve pending edit/delete/mark semantics."
   (with-temp-buffer
-    (setq-local clutch--pending-edits '(((0 . 1) . "edited")))
+    (setq-local clutch--pending-edits '((([1] . 1) . "edited")))
     (setq-local clutch--pending-deletes '([1]))
     (setq-local clutch--marked-rows '(0 2))
     (setq-local clutch--cached-pk-indices '(0))
     (let* ((state (clutch--build-render-state))
            (edits (plist-get state :edits))
+           (edit-rows (plist-get state :edit-rows))
            (marked (plist-get state :marked))
            (deletes (plist-get state :deletes)))
-      (should (equal (gethash '(0 . 1) edits)
-                     '((0 . 1) . "edited")))
+      (should (equal (gethash '([1] . 1) edits)
+                     '(([1] . 1) . "edited")))
+      (should (gethash [1] edit-rows))
       (should (gethash 0 marked))
       (should (gethash 2 marked))
       (should (gethash [1] deletes)))))
@@ -1766,13 +1806,51 @@
   "Cell rendering should use render-state lookups instead of alist scans."
   (with-temp-buffer
     (setq-local clutch--result-column-defs '((:name "id" :type-category numeric)
-                                             (:name "name" :type-category text)))
-    (let* ((clutch--pending-edits '(((0 . 1) . "edited")))
+                                             (:name "name" :type-category text))
+                clutch--cached-pk-indices '(0))
+    (let* ((clutch--pending-edits '((([1] . 1) . "edited")))
            (render-state (clutch--build-render-state))
            (cell (clutch--render-cell '(1 "before") 0 1 [4 8] render-state)))
       (should (string-match-p "edited" cell))
       (should (eq (get-text-property 3 'clutch-col-idx cell) 1))
       (should (equal (get-text-property 3 'clutch-full-value cell) "edited")))))
+
+(ert-deftest clutch-test-insert-data-rows-marks-pending-edits ()
+  "Edited rows should show an E marker in the left prefix."
+  (with-temp-buffer
+    (setq-local clutch--result-column-defs '((:name "id" :type-category numeric)
+                                             (:name "name" :type-category text))
+                clutch--cached-pk-indices '(0)
+                clutch--pending-edits '((([1] . 1) . "edited"))
+                clutch--pending-deletes nil
+                clutch--marked-rows nil)
+    (let ((row-positions (make-vector 1 nil)))
+      (clutch--insert-data-rows '((1 "before")) '(0 1) [4 8] 3 0 #'identity
+                                row-positions (clutch--build-render-state))
+      (should (string-prefix-p "│E  1 " (buffer-string))))))
+
+(ert-deftest clutch-test-record-render-uses-pk-keyed-pending-edits ()
+  "Record view should render staged edits keyed by primary key."
+  (let ((result-buf (generate-new-buffer "*clutch-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch--result-columns '("id" "name")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "name" :type-category text))
+                        clutch--result-rows '((1 "before"))
+                        clutch--cached-pk-indices '(0)
+                        clutch--pending-edits '((([1] . 1) . "edited"))
+                        clutch--fk-info nil))
+          (with-temp-buffer
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--row-idx 0
+                        clutch-record--expanded-fields nil)
+            (clutch-record--render)
+            (let ((rendered (buffer-string)))
+              (should (string-match-p "edited" rendered))
+              (should-not (string-match-p "before" rendered)))))
+      (kill-buffer result-buf))))
 
 ;;;; Unit tests — separator rendering
 
@@ -2519,6 +2597,22 @@ Skips if `clutch-test-password' is nil."
               ((symbol-function 'clutch--refresh-display) #'ignore))
       (clutch-result-discard-pending-at-point)
       (should (null clutch--pending-inserts)))))
+
+(ert-deftest clutch-test-discard-edit-removes-cell-entry ()
+  "C-c C-k on an edited cell removes the matching pending edit."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name")
+                clutch--result-rows (list (list 42 "alice"))
+                clutch--cached-pk-indices '(0)
+                clutch--filtered-rows nil
+                clutch--pending-edits (list (cons (cons (vector 42) 1) "carol"))
+                clutch--pending-deletes nil
+                clutch--pending-inserts nil)
+    (cl-letf (((symbol-function 'clutch-result--row-idx-at-line) (lambda () 0))
+              ((symbol-function 'clutch--col-idx-at-point) (lambda () 1))
+              ((symbol-function 'clutch--refresh-display) #'ignore))
+      (clutch-result-discard-pending-at-point)
+      (should (null clutch--pending-edits)))))
 
 (ert-deftest clutch-test-check-pending-changes-blocks-when-deletes-pending ()
   "clutch--check-pending-changes signals user-error when user declines to discard."

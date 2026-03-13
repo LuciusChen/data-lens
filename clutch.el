@@ -1258,19 +1258,40 @@ COL-DEF is the column definition plist, EDITED is the pending edit cons or nil."
 These tables avoid repeated linear scans through pending UI state while
 rendering large result pages."
   (let ((edit-table (make-hash-table :test 'equal))
+        (edit-row-table (make-hash-table :test 'equal))
         (marked-table (make-hash-table :test 'eql))
         (delete-table (make-hash-table :test 'equal)))
     (dolist (edit clutch--pending-edits)
-      (puthash (car edit) edit edit-table))
+      (puthash (car edit) edit edit-table)
+      (puthash (car (car edit)) t edit-row-table))
     (dolist (ridx clutch--marked-rows)
       (puthash ridx t marked-table))
     (dolist (pk-vec clutch--pending-deletes)
       (puthash pk-vec t delete-table))
     (list :edits edit-table
+          :edit-rows edit-row-table
           :marked marked-table
           :deletes delete-table
           :insert-placeholders (clutch--pending-insert-placeholders)
           :pk-indices clutch--cached-pk-indices)))
+
+(defun clutch--render-edit-entry (row ridx cidx render-state)
+  "Return pending edit entry for ROW/RIDX/CIDX from RENDER-STATE, or nil."
+  (let* ((edits (plist-get render-state :edits))
+         (pk-indices (plist-get render-state :pk-indices)))
+    (or (and pk-indices
+             (gethash (cons (clutch-result--extract-pk-vec row pk-indices) cidx)
+                      edits))
+        (gethash (cons ridx cidx) edits))))
+
+(defun clutch--row-pending-edit-p (row ridx render-state)
+  "Return non-nil when ROW/RIDX has any pending edit in RENDER-STATE."
+  (let* ((edit-rows (plist-get render-state :edit-rows))
+         (pk-indices (plist-get render-state :pk-indices)))
+    (or (gethash ridx edit-rows)
+        (and pk-indices
+             (gethash (clutch-result--extract-pk-vec row pk-indices)
+                      edit-rows)))))
 
 (defun clutch--render-cell (row ridx cidx widths render-state)
   "Render cell at column CIDX of ROW at row index RIDX.
@@ -1278,8 +1299,7 @@ WIDTHS is the width vector.  Returns a propertized string
 including the leading border and padding."
   (let* ((val     (nth cidx row))
          (col-def (nth cidx clutch--result-column-defs))
-         (edited  (gethash (cons ridx cidx)
-                           (plist-get render-state :edits)))
+         (edited  (clutch--render-edit-entry row ridx cidx render-state))
          (w       (aref widths cidx))
          (padded  (clutch--cell-display-value val w col-def edited))
          (face    (clutch--cell-face val edited cidx))
@@ -1386,27 +1406,22 @@ Returns a list of propertized strings (may be empty)."
   "Build footer part for staged edits, deletions, or insertions."
   (let (parts)
     (when clutch--pending-edits
-      (push (format "%d edit%s"
-                    (length clutch--pending-edits)
-                    (if (= (length clutch--pending-edits) 1) "" "s"))
+      (push (format "E%d" (length clutch--pending-edits))
             parts))
     (when clutch--pending-deletes
-      (push (format "%d deletion%s"
-                    (length clutch--pending-deletes)
-                    (if (= (length clutch--pending-deletes) 1) "" "s"))
+      (push (format "D%d" (length clutch--pending-deletes))
             parts))
     (when clutch--pending-inserts
-      (push (format "%d insertion%s"
-                    (length clutch--pending-inserts)
-                    (if (= (length clutch--pending-inserts) 1) "" "s"))
+      (push (format "I%d" (length clutch--pending-inserts))
             parts))
     (when parts
       (concat
        (propertize (concat (clutch--icon '(codicon . "nf-cod-diff_modified") "✎") " ")
+                   'face 'font-lock-comment-face)
+       (propertize (mapconcat #'identity (nreverse parts) " ")
                    'face 'clutch-modified-face)
-       (propertize (mapconcat #'identity (nreverse parts) ", ")
-                   'face 'clutch-modified-face)
-       (propertize "  C-c C-c" 'face 'font-lock-comment-face)))))
+       (propertize "  commit:C-c C-c  discard:C-c C-k"
+                   'face 'font-lock-comment-face)))))
 
 (defun clutch--footer-mutation-capability-part ()
   "Build footer part describing update/delete capability for the result."
@@ -1415,9 +1430,10 @@ Returns a list of propertized strings (may be empty)."
     (unless clutch--cached-pk-indices
       (let ((dim 'font-lock-comment-face)
             (warn 'font-lock-warning-face))
-        (concat (propertize "PK " 'face dim)
-                (propertize "missing" 'face warn)
-                (propertize (format "  %s: edit/delete off" table) 'face dim))))))
+        (concat (propertize (concat (clutch--icon '(codicon . "nf-cod-warning") "⚠") " ")
+                            'face dim)
+                (propertize "PK missing" 'face warn)
+                (propertize (format "  %s  E/D off" table) 'face dim))))))
 
 (defun clutch--footer-main-parts (row-count page-num page-size
                                              total-rows col-num-pages col-cur-page)
@@ -1570,6 +1586,7 @@ RENDER-STATE contains render lookup tables for pending UI state."
              for deletingp = (and pk-indices
                                   (gethash (clutch-result--extract-pk-vec row pk-indices)
                                            delete-table))
+             for editedp = (clutch--row-pending-edit-p row ridx render-state)
              for data-row = (let ((r (funcall edge-fn
                                               (clutch--render-row
                                                row ridx visible-cols widths render-state))))
@@ -1577,6 +1594,7 @@ RENDER-STATE contains render lookup tables for pending UI state."
                                    (propertize r 'face 'clutch-pending-delete-face)
                                  r))
              for mark-char = (cond (deletingp "D")
+                                   (editedp "E")
                                    ((gethash ridx marked-table) "*")
                                    (t " "))
              for num-label = (string-pad
@@ -1584,6 +1602,7 @@ RENDER-STATE contains render lookup tables for pending UI state."
                                (1+ (+ global-first-row ridx)))
                               nw nil t)
              for num-face = (cond (deletingp 'clutch-pending-delete-face)
+                                  (editedp 'clutch-modified-face)
                                   ((gethash ridx marked-table) 'clutch-marked-face)
                                   (t 'shadow))
              do (insert (propertize "│" 'face bface)
@@ -1615,9 +1634,9 @@ RENDER-STATE contains render lookup tables for pending UI state."
              for data-row = (propertize
                              (clutch--render-row row ridx visible-cols widths render-state)
                              'face 'clutch-pending-insert-face)
-             for num-label = (string-pad (format "+%d" (1+ iidx)) nw nil t)
+             for num-label = (string-pad (format "I%d" (1+ iidx)) nw nil t)
              do (insert (propertize "│" 'face bface)
-                        (propertize "+" 'face 'clutch-pending-insert-face)
+                        (propertize "I" 'face 'clutch-pending-insert-face)
                         (propertize num-label 'face 'clutch-pending-insert-face)
                         pad-str
                         data-row "\n"))))
@@ -2291,21 +2310,24 @@ Prefers an exact error position; otherwise highlights the whole statement."
     (pop-to-buffer buf)))
 
 (defun clutch-preview-execution-sql ()
-  "Preview SQL that would execute in the current workflow."
+  "Preview the execution payload for the current workflow."
   (interactive)
   (let ((sql
          (cond
           ((derived-mode-p 'clutch-result-mode)
-           (cond
-            (clutch--pending-edits
-             (mapconcat (lambda (s) (concat s ";"))
-                        (nreverse (clutch-result--build-update-statements))
-                        "\n"))
-            ((use-region-p)
-             (mapconcat (lambda (s) (concat s ";"))
-                        (clutch-result--build-delete-statements)
-                        "\n"))
-            ((clutch-result--effective-query))))
+           (if (or clutch--pending-inserts
+                   clutch--pending-edits
+                   clutch--pending-deletes)
+               (mapconcat (lambda (s) (concat s ";"))
+                          (append
+                           (when clutch--pending-inserts
+                             (clutch-result--build-pending-insert-statements))
+                           (when clutch--pending-edits
+                             (clutch-result--build-update-statements))
+                           (when clutch--pending-deletes
+                             (clutch-result--build-pending-delete-statements)))
+                          "\n")
+             (clutch-result--effective-query)))
           ((use-region-p)
            (string-trim (buffer-substring-no-properties
                          (region-beginning) (region-end))))
@@ -3681,7 +3703,7 @@ Key bindings:
   \\[clutch-list-tables]	List tables
   \\[clutch-describe-table-at-point]	Describe table at point
   \\[clutch-browse-table]	Browse table data
-  \\[clutch-preview-execution-sql]	Preview SQL to execute"
+  \\[clutch-preview-execution-sql]	Preview execution"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
   (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
   (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
@@ -3755,7 +3777,7 @@ Priority: region rows > current row."
         (list ridx))))
 
 (defun clutch-result-discard-pending-at-point ()
-  "Discard the staged deletion or insertion for the row at point."
+  "Discard the staged change at point."
   (interactive)
   (let ((ridx (or (clutch-result--row-idx-at-line)
                   (user-error "No row at point")))
@@ -3771,16 +3793,27 @@ Priority: region rows > current row."
       (let* ((pk-indices (or clutch--cached-pk-indices
                              (clutch-result--detect-primary-key)))
              (display-rows (or clutch--filtered-rows clutch--result-rows))
+             (row (nth ridx display-rows))
+             (cidx (clutch--col-idx-at-point))
              (pv (when pk-indices
-                   (clutch-result--extract-pk-vec (nth ridx display-rows) pk-indices)))
-             (was-pending (and pv (cl-find pv clutch--pending-deletes :test #'equal))))
-        (if was-pending
-            (progn
-              (setq clutch--pending-deletes
-                    (cl-remove pv clutch--pending-deletes :test #'equal))
-              (clutch--refresh-display)
-              (message "Pending deletion discarded"))
-          (user-error "No pending deletion or insertion at this row")))))))
+                   (clutch-result--extract-pk-vec row pk-indices)))
+             (edit-key (and pv cidx (cons pv cidx)))
+             (was-edit (and edit-key
+                            (cl-assoc edit-key clutch--pending-edits :test #'equal)))
+             (was-delete (and pv (cl-find pv clutch--pending-deletes :test #'equal))))
+        (cond
+         (was-edit
+          (setq clutch--pending-edits
+                (cl-remove edit-key clutch--pending-edits :test #'equal :key #'car))
+          (clutch--refresh-display)
+          (message "Pending edit discarded"))
+         (was-delete
+          (setq clutch--pending-deletes
+                (cl-remove pv clutch--pending-deletes :test #'equal))
+          (clutch--refresh-display)
+          (message "Pending deletion discarded"))
+         (t
+          (user-error "No pending change at point"))))))))
 
 ;;;; clutch-result-mode
 
@@ -3929,10 +3962,10 @@ Navigate (row):
 Copy:
   \\[clutch-result-copy-dispatch]	Copy… (transient: choose format, -r to refine)
   \\[clutch-result-export]	Export all rows (copy/file)
-  \\[clutch-preview-execution-sql]	Preview SQL to execute
+  \\[clutch-preview-execution-sql]	Preview execution
 Edit:
-  \\[clutch-result-edit-cell]	Edit cell value
-  \\[clutch-result-commit]	Commit edits as UPDATE
+  \\[clutch-result-edit-cell]	Edit / re-edit at point
+  \\[clutch-result-commit]	Commit pending changes
   \\[clutch-result-apply-filter]	Apply WHERE filter
   \\[clutch-result-sort-by-column]	Sort ascending (SQL ORDER BY)
   \\[clutch-result-sort-by-column-desc]	Sort descending (SQL ORDER BY)
@@ -4155,7 +4188,7 @@ Scans text properties across the line."
       (clutch-result-insert--open-buffer table (current-buffer) fields iidx))))
 
 (defun clutch-result-edit-cell ()
-  "Edit the cell at point in a dedicated buffer (like `C-c \\='` in org)."
+  "Edit or re-edit the value at point in a dedicated buffer."
   (interactive)
   (pcase-let* ((`(,ridx ,cidx ,val) (or (clutch-result--cell-at-point)
                                         (user-error "No cell at point"))))
@@ -4218,7 +4251,7 @@ Use C-c C-c in the result buffer to commit all staged edits."
                (if (= (length clutch--pending-edits) 1) "" "s"))
     (message "Edit reverted to original")))
 
-;;;; Commit edits
+;;;; Commit pending changes
 
 (defun clutch-result--table-from-sql (sql)
   "Extract the first table name from the FROM clause of SQL.
@@ -6447,13 +6480,17 @@ Reuses a single *clutch-record* buffer, updating it in place."
       (clutch-record--render))
     (pop-to-buffer buf '(display-buffer-at-bottom))))
 
-(defun clutch-record--render-field (name cidx val col-def ridx edits fk-info
-                                        expanded-fields max-name-w)
+(defun clutch-record--render-field (name cidx val col-def row ridx pk-indices
+                                        edits fk-info expanded-fields max-name-w)
   "Insert one field line for column NAME at CIDX.
-VAL is the cell value, COL-DEF the column metadata, RIDX the row index.
-EDITS, FK-INFO, EXPANDED-FIELDS provide edit/FK/expand state.
-MAX-NAME-W is the label column width."
-  (let* ((edited (assoc (cons ridx cidx) edits))
+VAL is the cell value, COL-DEF the column metadata, ROW the full row.
+RIDX is the row index.  PK-INDICES, EDITS, FK-INFO, and EXPANDED-FIELDS
+provide edit/FK/expand state.  MAX-NAME-W is the label column width."
+  (let* ((pk-indices pk-indices)
+         (pk-vec (and pk-indices row
+                      (clutch-result--extract-pk-vec row pk-indices)))
+         (edited (or (and pk-vec (assoc (cons pk-vec cidx) edits))
+                     (assoc (cons ridx cidx) edits)))
          (display-val (if edited (cdr edited) val))
          (long-p (clutch--long-field-type-p col-def))
          (expanded-p (memq cidx expanded-fields))
@@ -6485,6 +6522,7 @@ MAX-NAME-W is the label column width."
          (col-names (buffer-local-value 'clutch--result-columns result-buf))
          (col-defs (buffer-local-value 'clutch--result-column-defs result-buf))
          (rows (buffer-local-value 'clutch--result-rows result-buf))
+         (pk-indices (buffer-local-value 'clutch--cached-pk-indices result-buf))
          (fk-info (buffer-local-value 'clutch--fk-info result-buf))
          (edits (buffer-local-value 'clutch--pending-edits result-buf))
          (inhibit-read-only t))
@@ -6500,7 +6538,7 @@ MAX-NAME-W is the label column width."
                for cidx from 0
                do (clutch-record--render-field
                    name cidx (nth cidx row) (nth cidx col-defs)
-                   ridx edits fk-info clutch-record--expanded-fields
+                   row ridx pk-indices edits fk-info clutch-record--expanded-fields
                    max-name-w)))
     (goto-char (point-min))))
 
@@ -6696,7 +6734,7 @@ Accumulates input until a semicolon is found, then executes."
     ("x" "Query at point" clutch-execute-query-at-point)
     ("r" "Region"         clutch-execute-region)
     ("b" "Buffer"         clutch-execute-buffer)
-   ("p" "Preview SQL"    clutch-preview-execution-sql)]
+    ("p" "Preview execution" clutch-preview-execution-sql)]
    ["Edit"
     ("'" "Indirect edit"  clutch-edit-indirect)]
    ["Schema"
@@ -6716,7 +6754,7 @@ Accumulates input until a semicolon is found, then executes."
     ("C" "Go to column"      clutch-result-goto-column)]
    ["Query"
     ("g" "Re-execute"        clutch-result-rerun)
-    ("x" "Preview SQL"       clutch-preview-execution-sql)
+    ("x" "Preview execution" clutch-preview-execution-sql)
     ("#" "Count total"       clutch-result-count-total)
     ("A" "Aggregate"         clutch-result-aggregate)]
    ["Filter / Sort"
@@ -6732,11 +6770,11 @@ Accumulates input until a semicolon is found, then executes."
     ("]" "Next col page"     clutch-result-next-col-page)
     ("[" "Prev col page"     clutch-result-prev-col-page)]
    ["Mutate"
-    ("C-c '" "Edit cell"     clutch-result-edit-cell)
+    ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
     ("i" "Stage insert"      clutch-result-insert-row)
     ("d" "Stage delete"      clutch-result-delete-rows)
-    ("C-c C-c" "Commit"      clutch-result-commit)
-    ("C-c C-k" "Discard pending" clutch-result-discard-pending-at-point)]
+    ("C-c C-c" "Commit pending" clutch-result-commit)
+    ("C-c C-k" "Discard pending at point" clutch-result-discard-pending-at-point)]
    ["Layout"
     ("=" "Widen column"      clutch-result-widen-column)
     ("-" "Narrow column"     clutch-result-narrow-column)
