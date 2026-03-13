@@ -36,6 +36,7 @@
 
 (require 'clutch-db)
 (require 'json)
+(require 'sql)
 
 ;;;; Configuration
 
@@ -49,13 +50,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.1.2"
+(defcustom clutch-jdbc-agent-version "0.1.3"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "7faafdbcd75447665241a80372d21628083e62e1bf0a638aafd0b64676a6efd4"
+  "78e566c467e7e2ce53e404f9c2565ce97143232fe9fa690f2a3c257a04013972"
   "Expected SHA-256 for the bundled clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -402,6 +403,10 @@ Returns a `clutch-jdbc-conn'."
   "Oracle JDBC schema enumeration is too slow to block connect."
   (not (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)))
 
+(cl-defmethod clutch-db-completion-sync-columns-p ((conn clutch-jdbc-conn))
+  "Oracle/JDBC completion should not synchronously load columns in the hot path."
+  (not (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)))
+
 ;;;; Query methods
 
 (defun clutch-jdbc--fetch-all (conn cursor-id)
@@ -536,6 +541,40 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server 2012+, DB2)."
   "Escape NAME as a SQL identifier using double quotes (ANSI standard)."
   (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" name)))
 
+(defun clutch-jdbc--oracle-display-identifier (name)
+  "Return Oracle DDL display form for identifier NAME.
+Leave simple uppercase identifiers unquoted so reconstructed DDL reads
+closer to Oracle's native style."
+  (let ((case-fold-search nil))
+    (if (and (string-match-p "\\`[A-Z][A-Z0-9_$#]*\\'" name)
+             (not (clutch-jdbc--oracle-display-keyword-p name)))
+        name
+      (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" name)))))
+
+(defvar clutch-jdbc--oracle-display-keyword-cache (make-hash-table :test 'equal)
+  "Cache of Oracle identifiers that should remain quoted in display DDL.")
+
+(defun clutch-jdbc--oracle-display-keyword-p (name)
+  "Return non-nil when bare NAME would be fontified as Oracle syntax.
+Such identifiers should remain quoted in reconstructed Oracle DDL."
+  (let ((cached (gethash name clutch-jdbc--oracle-display-keyword-cache 'missing)))
+    (if (eq cached 'missing)
+        (let ((keywordp
+               (with-temp-buffer
+                 (sql-mode)
+                 (sql-set-product 'oracle)
+                 (insert name)
+                 (font-lock-ensure)
+                 (let ((face (get-text-property (point-min) 'face)))
+                   (or (eq face 'font-lock-keyword-face)
+                       (eq face 'font-lock-builtin-face)
+                       (and (listp face)
+                            (or (memq 'font-lock-keyword-face face)
+                                (memq 'font-lock-builtin-face face))))))))
+          (puthash name keywordp clutch-jdbc--oracle-display-keyword-cache)
+          keywordp)
+      cached)))
+
 (cl-defmethod clutch-db-escape-literal ((_conn clutch-jdbc-conn) value)
   "Escape VALUE as a SQL string literal using single quotes (ANSI standard)."
   (format "'%s'" (replace-regexp-in-string "'" "''" value)))
@@ -576,23 +615,59 @@ returning tables from SYS/SYSTEM and other visible schemas."
     (mapcar (lambda (col) (plist-get col :name))
             (plist-get result :columns))))
 
+(cl-defmethod clutch-db-complete-tables ((conn clutch-jdbc-conn) prefix)
+  "Return table name candidates matching PREFIX for JDBC CONN."
+  (let* ((params (clutch-jdbc-conn-params conn))
+         (driver (plist-get params :driver)))
+    (when (eq driver 'oracle)
+      (let* ((schema (or (plist-get params :schema)
+                         (clutch-jdbc--default-schema conn)))
+             (result (clutch-jdbc--rpc
+                      "search-tables"
+                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                        (prefix  . ,prefix)
+                        ,@(when schema `((schema . ,schema)))))))
+        (mapcar (lambda (tbl) (plist-get tbl :name))
+                (plist-get result :tables))))))
+
+(cl-defmethod clutch-db-complete-columns ((conn clutch-jdbc-conn) table prefix)
+  "Return column name candidates for TABLE matching PREFIX on JDBC CONN."
+  (let* ((params (clutch-jdbc-conn-params conn))
+         (driver (plist-get params :driver)))
+    (when (eq driver 'oracle)
+      (let* ((schema (or (plist-get params :schema)
+                         (clutch-jdbc--default-schema conn)))
+             (result (clutch-jdbc--rpc
+                      "search-columns"
+                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                        (table   . ,table)
+                        (prefix  . ,prefix)
+                        ,@(when schema `((schema . ,schema)))))))
+        (mapcar (lambda (col) (plist-get col :name))
+                (plist-get result :columns))))))
+
 (cl-defmethod clutch-db-show-create-table ((conn clutch-jdbc-conn) table)
   "Return a best-effort DDL for TABLE on JDBC CONN.
 Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
   (let* ((params (clutch-jdbc-conn-params conn))
+         (driver (plist-get params :driver))
          (schema (or (plist-get params :schema) (clutch-jdbc--default-schema conn)))
          (result (clutch-jdbc--rpc
                   "get-columns"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                     (table   . ,table)
                     ,@(when schema `((schema . ,schema))))))
-         (cols   (plist-get result :columns)))
+         (cols   (plist-get result :columns))
+         (display-ident
+          (if (eq driver 'oracle)
+              #'clutch-jdbc--oracle-display-identifier
+            (lambda (name) (clutch-db-escape-identifier conn name)))))
     (format "-- DDL reconstructed from DatabaseMetaData\nCREATE TABLE %s (\n%s\n);"
-            (clutch-db-escape-identifier conn table)
+            (funcall display-ident table)
             (mapconcat
              (lambda (col)
                (format "    %s %s%s"
-                       (clutch-db-escape-identifier conn (plist-get col :name))
+                       (funcall display-ident (plist-get col :name))
                        (plist-get col :type)
                        (if (plist-get col :nullable) "" " NOT NULL")))
              cols

@@ -352,6 +352,16 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar-local clutch--last-query nil
   "Last executed SQL query string.")
 
+(defun clutch--effective-sql-product (params)
+  "Return the SQL product to use for connection PARAMS."
+  (or (plist-get params :sql-product)
+      (pcase (plist-get params :backend)
+        ((or 'pg 'postgresql) 'postgres)
+        ((or 'mysql 'mariadb) 'mysql)
+        ('sqlite 'sqlite)
+        ('oracle 'oracle)
+        (_ nil))))
+
 (defvar-local clutch--result-columns nil
   "Column names from the last result, as a list of strings.")
 
@@ -813,7 +823,7 @@ params; see `clutch-connection-alist' for details."
     (clutch-db-disconnect clutch-connection)
     (setq clutch-connection nil))
   (let* ((params  (clutch--read-connection-params))
-         (product (plist-get params :sql-product))
+         (product (clutch--effective-sql-product params))
          (conn    (clutch--build-conn params)))
     (setq clutch-connection conn
           clutch--connection-params params
@@ -883,7 +893,7 @@ window rather than replacing the current window."
                   (conn   (clutch--build-conn params)))
         (setq clutch-connection conn
               clutch--connection-params params
-              clutch--conn-sql-product (plist-get params :sql-product))
+              clutch--conn-sql-product (clutch--effective-sql-product params))
         (clutch--set-schema-status conn (if (clutch-db-eager-schema-refresh-p conn)
                                             'refreshing
                                           'stale))
@@ -2912,6 +2922,33 @@ Scans only the SQL statement surrounding point, bounded by semicolons or
 blank lines.  Falls back to `clutch--tables-in-buffer' when none are found."
   (plist-get (clutch--tables-in-query-cache-entry schema) :tables))
 
+(defun clutch--cached-columns (schema table)
+  "Return cached columns for TABLE from SCHEMA, or nil if not loaded."
+  (let ((cols (and schema (gethash table schema 'missing))))
+    (unless (eq cols 'missing) cols)))
+
+(defun clutch--normalize-statement-table-token (token)
+  "Normalize a raw table TOKEN parsed from SQL into a bare table name."
+  (when token
+    (let* ((stripped (replace-regexp-in-string "\\`[\"`]\\|[\"`]\\'" "" token))
+           (parts (split-string stripped "\\." t)))
+      (car (last parts)))))
+
+(defun clutch--statement-table-identifiers ()
+  "Return raw table identifiers referenced in the current statement."
+  (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
+    (let ((text (buffer-substring-no-properties beg end))
+          (case-fold-search t)
+          found
+          (pos 0))
+      (while (string-match
+              "\\b\\(from\\|join\\|update\\|into\\)\\s-+\\([[:alnum:]_$#.`\"]+\\)"
+              text pos)
+        (setq pos (match-end 0))
+        (when-let* ((tbl (clutch--normalize-statement-table-token (match-string 2 text))))
+          (push tbl found)))
+      (nreverse (delete-dups found)))))
+
 (defconst clutch--sql-keywords
   '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"
     "BETWEEN" "EXISTS" "CASE" "WHEN" "THEN" "ELSE" "END" "AS" "ON"
@@ -3390,67 +3427,88 @@ Works without a database connection."
   "Completion-at-point function for SQL identifiers.
 Skips column loading if the connection is busy (prevents re-entrancy
 when completion triggers during an in-flight query)."
-  (when-let* ((schema (clutch--schema-for-connection))
-              (conn clutch-connection)
+  (when-let* ((conn clutch-connection)
               (bounds (bounds-of-thing-at-point 'symbol)))
     (let* ((beg (car bounds))
            (end (cdr bounds))
+           (prefix (buffer-substring-no-properties beg end))
            (prefix-len (- end beg))
+           (schema (clutch--schema-for-connection))
            (line-before (buffer-substring-no-properties
                          (line-beginning-position) beg))
-           ;; After FROM/JOIN/INTO/UPDATE → table names only
            (table-context-p
             (string-match-p
              "\\b\\(FROM\\|JOIN\\|INTO\\|UPDATE\\|TABLE\\|DESCRIBE\\|DESC\\)\\s-+\\S-*\\'"
              (upcase line-before)))
            (busy (clutch-db-busy-p conn))
+           (sync-columns-p (clutch-db-completion-sync-columns-p conn))
+           (direct-table-candidates
+            (when (and table-context-p
+                       (>= prefix-len clutch--schema-inline-min-prefix-length))
+              (clutch-db-complete-tables conn prefix)))
            (context-tables
             (unless (or table-context-p busy
                         (< prefix-len clutch--schema-inline-min-prefix-length))
-              (let ((tables (clutch--tables-in-current-statement schema)))
+              (let ((tables (or (and schema (clutch--tables-in-current-statement schema))
+                                (clutch--statement-table-identifiers))))
                 (when (and tables
                            (<= (length tables) clutch--schema-inline-table-limit))
                   tables))))
-           (candidates
-            (if (not context-tables)
-                (hash-table-keys schema)
-              ;; Load columns only for tables in the current statement
-              (let ((all (copy-sequence (hash-table-keys schema))))
-                (dolist (tbl context-tables)
-                  (when-let* ((cols (clutch--ensure-columns
-                                     conn schema tbl)))
-                    (setq all (nconc all (copy-sequence cols)))))
-                (delete-dups all)))))
-      (list beg end candidates
-            :exclusive 'no
-            :exit-function (lambda (str status)
-                             (when (and (clutch--completion-finished-status-p status)
-                                        (member (upcase str) clutch--sql-keywords)
-                                        (not (looking-at-p "\\s-")))
-                               (insert " ")))))))
+           (candidates nil))
+      (setq candidates
+            (if context-tables
+                (let ((all (copy-sequence (or (and schema (hash-table-keys schema))
+                                              '()))))
+                  (dolist (tbl context-tables)
+                    (let ((cols
+                           (if sync-columns-p
+                               (and schema (clutch--ensure-columns conn schema tbl))
+                             (or (clutch--cached-columns schema tbl)
+                                 (clutch-db-complete-columns conn tbl prefix)))))
+                      (when cols
+                        (setq all (nconc all (copy-sequence cols))))))
+                  (delete-dups all))
+              (delete-dups (append direct-table-candidates
+                                   (and schema (hash-table-keys schema))))))
+      (when candidates
+        (list beg end candidates
+              :exclusive 'no
+              :exit-function
+              (lambda (str status)
+                (when (and (clutch--completion-finished-status-p status)
+                           (member (upcase str) clutch--sql-keywords)
+                           (not (looking-at-p "\\s-")))
+                  (insert " "))))))))
 
 (defun clutch--eldoc-schema-string (conn schema sym)
   "Return an eldoc string for SYM via SCHEMA on CONN, or nil.
 Matches SYM as a table name first, then as a column in any visible table."
-  (cond
-   ((not (eq (gethash sym schema 'missing) 'missing))
-    (let* ((cols    (clutch--ensure-columns conn schema sym))
-           (n       (length cols))
-           (comment (clutch--ensure-table-comment conn sym)))
-      (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
-              (propertize sym 'face 'font-lock-type-face)
-              (propertize (format "  (%d col%s)" n (if (= n 1) "" "s")) 'face 'shadow)
-              (when comment
-                (propertize (format "  — %s" comment) 'face 'shadow)))))
-   (t
-    (when (>= (length sym) clutch--schema-inline-min-prefix-length)
+  (let ((sync-columns-p (clutch-db-completion-sync-columns-p conn)))
+    (cond
+     ((not (eq (gethash sym schema 'missing) 'missing))
+      (let* ((cols    (if sync-columns-p
+                          (clutch--ensure-columns conn schema sym)
+                        (clutch--cached-columns schema sym)))
+             (n       (length cols))
+             (comment (clutch--ensure-table-comment conn sym)))
+        (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
+                (propertize sym 'face 'font-lock-type-face)
+                (when cols
+                  (propertize (format "  (%d col%s)" n (if (= n 1) "" "s"))
+                              'face 'shadow))
+                (when comment
+                  (propertize (format "  — %s" comment) 'face 'shadow)))))
+     ((>= (length sym) clutch--schema-inline-min-prefix-length)
       (let ((tables (clutch--tables-in-current-statement schema)))
         (when (and tables
                    (<= (length tables) clutch--schema-inline-table-limit))
           (cl-loop for tbl in tables
-                   for cols = (clutch--ensure-columns conn schema tbl)
+                   for cols = (if sync-columns-p
+                                  (clutch--ensure-columns conn schema tbl)
+                                (clutch--cached-columns schema tbl))
                    when (and cols (member sym cols))
-                   return (clutch--eldoc-column-string conn tbl sym))))))))
+                   return (clutch--eldoc-column-string conn tbl sym)))))
+     (t nil))))
 
 (defun clutch--eldoc-function (&rest _)
   "Eldoc backend for `clutch-mode'.
@@ -3657,7 +3715,10 @@ can offer table-specific actions on the completion candidates."
            (read-string "Table: "))))
   (clutch--ensure-connection)
   (let* ((conn clutch-connection)
-         (product (or clutch--conn-sql-product clutch-sql-product))
+         (product (or clutch--conn-sql-product
+                      (and clutch--connection-params
+                           (clutch--effective-sql-product clutch--connection-params))
+                      clutch-sql-product))
          (ddl (clutch-db-show-create-table conn table))
          (buf (get-buffer-create (format "*clutch: %s*" table))))
     (with-current-buffer buf

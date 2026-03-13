@@ -155,6 +155,25 @@
         (should (= (alist-get 'query-timeout-seconds captured-params) 16))
         (should (= (clutch-db-result-affected-rows result) 1))))))
 
+(ert-deftest clutch-db-test-jdbc-show-create-table-uses-oracle-style-identifiers ()
+  "Oracle synthesized JDBC DDL should quote only identifiers that need it."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 4
+                                     :params '(:driver oracle :schema "CLUTCH"))))
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op _params &optional _timeout-seconds)
+                 '(:columns ((:name "PK_MAIN" :type "CHAR" :nullable :json-false)
+                             (:name "TYPE" :type "VARCHAR2" :nullable :json-false)
+                             (:name "ACTION" :type "VARCHAR2" :nullable :json-false)
+                             (:name "mixedCase" :type "VARCHAR2" :nullable :json-false))))))
+      (let ((ddl (clutch-db-show-create-table conn "ZJ_NCBUSINESSDATA")))
+        (should (string-match-p "CREATE TABLE ZJ_NCBUSINESSDATA" ddl))
+        (should (string-match-p "PK_MAIN CHAR" ddl))
+        (should (string-match-p "\"TYPE\" VARCHAR2" ddl))
+        (should (string-match-p "\"ACTION\" VARCHAR2" ddl))
+        (should (string-match-p "\"mixedCase\" VARCHAR2" ddl))
+        (should-not (string-match-p "\"ZJ_NCBUSINESSDATA\"" ddl))
+        (should-not (string-match-p "\"PK_MAIN\"" ddl))))))
+
 (ert-deftest clutch-db-test-jdbc-validate-agent-jar-rejects-mismatch ()
   "JDBC agent startup should reject a jar with the wrong checksum."
   (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))

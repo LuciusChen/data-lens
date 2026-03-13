@@ -2583,6 +2583,55 @@
           (should (member "id" candidates))
           (should (member "users" candidates)))))))
 
+(ert-deftest clutch-test-completion-at-point-uses-direct-table-candidates-without-schema-cache ()
+  "Direct backend table completion should work without a schema cache."
+  (with-temp-buffer
+    (insert "select * from zj_")
+    (goto-char (point-max))
+    (let ((clutch-connection 'fake))
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () nil))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-complete-tables)
+                 (lambda (_conn prefix)
+                   (should (equal prefix "zj_"))
+                   '("ZJ_NCBUSINESSDATA" "ZJ_SYS_PARA"))))
+        (let* ((capf (clutch-completion-at-point))
+               (candidates (nth 2 capf)))
+          (should capf)
+          (should (member "ZJ_NCBUSINESSDATA" candidates))
+          (should (member "ZJ_SYS_PARA" candidates)))))))
+
+(ert-deftest clutch-test-completion-at-point-uses-direct-column-candidates-when-sync-loads-disabled ()
+  "Direct backend column completion should avoid synchronous ensure-columns."
+  (with-temp-buffer
+    (insert "select pa from ZJ_SYS_PARA")
+    (goto-char (point-min))
+    (search-forward "pa")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake))
+      (puthash "ZJ_SYS_PARA" nil schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (&rest _args)
+                   (error "should not synchronously load columns")))
+                ((symbol-function 'clutch-db-complete-columns)
+                 (lambda (_conn table prefix)
+                   (should (equal table "ZJ_SYS_PARA"))
+                   (should (equal prefix "pa"))
+                   '("PARA_ID" "PARA_NAME"))))
+        (let* ((capf (clutch-completion-at-point))
+               (candidates (nth 2 capf)))
+          (should capf)
+          (should (member "PARA_ID" candidates))
+          (should (member "PARA_NAME" candidates)))))))
+
 (ert-deftest clutch-test-eldoc-schema-string-skips-large-statement-scope ()
   "Eldoc should not synchronously load columns across too many tables."
   (with-temp-buffer
@@ -2612,6 +2661,24 @@
                    (format "%s.%s bigint" table col-name))))
         (should (equal (clutch--eldoc-schema-string 'fake schema "id")
                        "users.id bigint"))))))
+
+(ert-deftest clutch-test-eldoc-schema-string-uses-cached-columns-when-sync-loads-disabled ()
+  "Eldoc should not synchronously load columns when backend disables it."
+  (let ((schema (make-hash-table :test 'equal)))
+    (puthash "ZJ_SYS_PARA" '("PARA_ID" "PARA_NAME") schema)
+    (cl-letf (((symbol-function 'clutch-db-completion-sync-columns-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--ensure-columns)
+               (lambda (&rest _args)
+                 (error "should not synchronously load columns")))
+              ((symbol-function 'clutch--ensure-table-comment)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch-db-database)
+               (lambda (_conn) "ORCL")))
+      (should (string-match-p "ZJ_SYS_PARA"
+                              (clutch--eldoc-schema-string 'fake schema "ZJ_SYS_PARA")))
+      (should (string-match-p "2 cols"
+                              (clutch--eldoc-schema-string 'fake schema "ZJ_SYS_PARA"))))))
 
 
 ;;;; Unit tests — REPL
@@ -3539,6 +3606,24 @@ Use `cl-letf' to bypass `mysql--ensure-data' in tests."
         (setq-local clutch-connection 'fake-conn)
         (call-interactively #'clutch-describe-table))
       (should (string-match-p "Schema cache is stale" hinted)))))
+
+(ert-deftest clutch-test-describe-table-derives-oracle-sql-product-from-backend ()
+  "Describe-table should use Oracle font-lock when backend is oracle."
+  (let (captured-product)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-show-create-table)
+               (lambda (_conn _table) "CREATE TABLE demo_tasks (id NUMBER)"))
+              ((symbol-function 'sql-mode) #'ignore)
+              ((symbol-function 'sql-set-product)
+               (lambda (product) (setq captured-product product)))
+              ((symbol-function 'font-lock-ensure) #'ignore)
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _args) nil)))
+      (with-temp-buffer
+        (setq-local clutch-connection 'fake-conn)
+        (setq-local clutch--connection-params '(:backend oracle))
+        (setq-local clutch--conn-sql-product nil)
+        (clutch-describe-table "DEMO_TASKS")))
+    (should (eq captured-product 'oracle))))
 
 ;;; Fix 5 — ob-clutch--disconnect-all
 

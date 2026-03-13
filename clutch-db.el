@@ -129,6 +129,13 @@ For example, SET NAMES utf8mb4 on MySQL.")
   "Most backends refresh schema immediately after connect."
   t)
 
+(cl-defgeneric clutch-db-completion-sync-columns-p (conn)
+  "Return non-nil when completion may synchronously load column metadata for CONN.")
+
+(cl-defmethod clutch-db-completion-sync-columns-p ((_conn t))
+  "Most backends can synchronously load column metadata during completion."
+  t)
+
 ;; Query
 
 (cl-defgeneric clutch-db-query (conn sql)
@@ -155,6 +162,21 @@ the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
 
 (cl-defgeneric clutch-db-list-columns (conn table)
   "Return a list of column name strings for TABLE on CONN.")
+
+(cl-defgeneric clutch-db-complete-tables (conn prefix)
+  "Return table name candidates for PREFIX on CONN, or nil when unsupported.")
+
+(cl-defmethod clutch-db-complete-tables ((_conn t) _prefix)
+  "Backends without direct completion support return nil."
+  nil)
+
+(cl-defgeneric clutch-db-complete-columns (conn table prefix)
+  "Return column candidates for TABLE and PREFIX on CONN.
+Return nil when the backend does not support direct column completion.")
+
+(cl-defmethod clutch-db-complete-columns ((_conn t) _table _prefix)
+  "Backends without direct column completion support return nil."
+  nil)
 
 (cl-defgeneric clutch-db-show-create-table (conn table)
   "Return the DDL string for TABLE on CONN.")

@@ -593,7 +593,7 @@ Driver jars are stored in =~/.emacs.d/clutch-jdbc/drivers/=
 (configurable via =clutch-jdbc-agent-dir=).
 
 The agent jar itself is verified against the release SHA-256 before startup.
-This catches the common case where a local =clutch-jdbc-agent-0.1.2.jar=
+This catches the common case where a local =clutch-jdbc-agent-0.1.3.jar=
 exists but does not actually match the current release asset.
 Running =clutch-jdbc-ensure-agent= also removes stale versioned
 =clutch-jdbc-agent-*.jar= files from the same directory.
@@ -669,6 +669,10 @@ backends.  See [[*Password Management]] for details.
   (=@//host:port/service=).  Mixing them up causes the connection to hang.
   When in doubt, check with your DBA or use =:url= for full control.
 - Schema is automatically set to the uppercase username (Oracle convention).
+- Oracle/JDBC completion does not rely on a full eager schema refresh.  Table
+  names and column names are resolved through Oracle-specific prefix lookups, so
+  connect stays non-blocking and completion does not have to enumerate the whole
+  schema up front.
 - Pagination uses =ROWNUM= subquery, compatible with all Oracle versions (9i+).
 - CJK character sets (e.g. ZHS16GBK) require =orai18n.jar= in addition to =ojdbc11.jar=.
 - Oracle =DATE= columns include a time component; the agent always uses =getTimestamp()=
