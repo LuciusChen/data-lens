@@ -582,7 +582,7 @@ drivers directory.
 (setq clutch-jdbc-agent-sha256 nil)
 
 ;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift):
-(clutch-jdbc-install-driver 'oracle)      ; ojdbc11.jar from Maven Central
+(clutch-jdbc-install-driver 'oracle)      ; ojdbc11.jar + orai18n.jar from Maven Central
 (clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar from Maven Central
 (clutch-jdbc-install-driver 'snowflake)   ; snowflake-jdbc.jar from Maven Central
 (clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc.jar from Maven Central
@@ -602,10 +602,11 @@ If you intentionally use a locally built jar, set
 =clutch-jdbc-agent-sha256= to =nil= to disable verification.  That is the
 escape hatch for custom development builds.
 
-Oracle users on CJK character sets also need =orai18n.jar=:
-#+begin_src emacs-lisp
-(clutch-jdbc-install-driver 'oracle-i18n)
-#+end_src
+Oracle installs now also pull =orai18n.jar= automatically, which is
+required for CJK database character sets such as =ZHS16GBK=.  If you
+install drivers while the shared JDBC agent is already running, clutch
+will restart that agent on the next JDBC use; reconnecting is enough,
+you do not need to restart Emacs.
 
 *** Connection Examples
 

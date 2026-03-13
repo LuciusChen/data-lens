@@ -349,6 +349,9 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar-local clutch--conn-sql-product nil
   "SQL product for the current connection, or nil to use the default.")
 
+(defvar clutch--oracle-i18n-warning-shown nil
+  "Non-nil after showing the Oracle orai18n completion warning once.")
+
 (defvar-local clutch--last-query nil
   "Last executed SQL query string.")
 
@@ -361,6 +364,27 @@ Dynamically bound by `clutch--execute-and-mark'.")
         ('sqlite 'sqlite)
         ('oracle 'oracle)
         (_ nil))))
+
+(defun clutch--oracle-i18n-missing-p (err)
+  "Return non-nil when ERR indicates Oracle needs orai18n.jar."
+  (string-match-p
+   "orai18n\\.jar\\|Non supported character set"
+   (error-message-string err)))
+
+(defun clutch--warn-oracle-i18n-once ()
+  "Warn once that Oracle completion needs orai18n.jar for this session."
+  (unless clutch--oracle-i18n-warning-shown
+    (setq clutch--oracle-i18n-warning-shown t)
+    (message "Oracle completion needs orai18n.jar for this character set. Run M-x clutch-jdbc-install-driver RET oracle-i18n")))
+
+(defun clutch--safe-completion-call (thunk)
+  "Call THUNK for completion and swallow recoverable metadata errors."
+  (condition-case err
+      (funcall thunk)
+    (clutch-db-error
+     (when (clutch--oracle-i18n-missing-p err)
+       (clutch--warn-oracle-i18n-once))
+     nil)))
 
 (defvar-local clutch--result-columns nil
   "Column names from the last result, as a list of strings.")
@@ -3445,7 +3469,8 @@ when completion triggers during an in-flight query)."
            (direct-table-candidates
             (when (and table-context-p
                        (>= prefix-len clutch--schema-inline-min-prefix-length))
-              (clutch-db-complete-tables conn prefix)))
+              (clutch--safe-completion-call
+               (lambda () (clutch-db-complete-tables conn prefix)))))
            (context-tables
             (unless (or table-context-p busy
                         (< prefix-len clutch--schema-inline-min-prefix-length))
@@ -3464,7 +3489,9 @@ when completion triggers during an in-flight query)."
                            (if sync-columns-p
                                (and schema (clutch--ensure-columns conn schema tbl))
                              (or (clutch--cached-columns schema tbl)
-                                 (clutch-db-complete-columns conn tbl prefix)))))
+                                 (clutch--safe-completion-call
+                                  (lambda ()
+                                    (clutch-db-complete-columns conn tbl prefix)))))))
                       (when cols
                         (setq all (nconc all (copy-sequence cols))))))
                   (delete-dups all))

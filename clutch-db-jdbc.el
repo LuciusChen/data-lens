@@ -117,6 +117,11 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
   '(oracle sqlserver db2 snowflake redshift)
   "Driver symbols that are automatically routed to the JDBC backend.")
 
+(defconst clutch-jdbc--driver-companions
+  '((oracle oracle-i18n)
+    (oracle-8 oracle-i18n))
+  "Optional companion driver artifacts to install alongside a primary driver.")
+
 ;;;; Connection struct
 
 (cl-defstruct clutch-jdbc-conn
@@ -229,6 +234,13 @@ JAR defaults to `clutch-jdbc--agent-jar'."
         (unless (plist-get ready :ok)
           (error "clutch-jdbc-agent failed to start: %s" (plist-get ready :error))))
       proc)))
+
+(defun clutch-jdbc--stop-agent ()
+  "Stop the shared clutch-jdbc-agent process, if running."
+  (when (clutch-jdbc--agent-live-p)
+    (delete-process clutch-jdbc--agent-process))
+  (setq clutch-jdbc--agent-process nil
+        clutch-jdbc--response-queue nil))
 
 (defun clutch-jdbc--ensure-agent ()
   "Ensure the agent process is running, starting it if necessary."
@@ -789,16 +801,26 @@ Fetches from GitHub Releases."
    (list (intern (completing-read "Driver: "
                                   (mapcar #'car clutch-jdbc--driver-sources)
                                   nil t))))
-  (let* ((spec     (alist-get driver clutch-jdbc--driver-sources))
-         (filename (plist-get spec :filename))
-         (dest     (expand-file-name filename (clutch-jdbc--drivers-dir))))
+  (let* ((spec       (alist-get driver clutch-jdbc--driver-sources))
+         (filename   (plist-get spec :filename))
+         (dest       (expand-file-name filename (clutch-jdbc--drivers-dir)))
+         (companions (alist-get driver clutch-jdbc--driver-companions)))
     (make-directory (clutch-jdbc--drivers-dir) t)
     (if (file-exists-p dest)
         (message "Driver already installed: %s" dest)
       (if (plist-get spec :maven)
           (clutch-jdbc--download-maven-driver (plist-get spec :maven) dest)
         (message "Manual download required for %s.\nURL: %s\nPlace as: %s"
-                 driver (plist-get spec :manual) dest)))))
+                 driver (plist-get spec :manual) dest)))
+    (dolist (companion companions)
+      (unless (file-exists-p
+               (expand-file-name
+                (plist-get (alist-get companion clutch-jdbc--driver-sources) :filename)
+                (clutch-jdbc--drivers-dir)))
+        (clutch-jdbc-install-driver companion)))
+    (when (clutch-jdbc--agent-live-p)
+      (clutch-jdbc--stop-agent)
+      (message "Installed JDBC driver(s); shared clutch-jdbc-agent restarted on next use"))))
 
 (defun clutch-jdbc--download-maven-driver (coords dest)
   "Download a Maven artifact at COORDS (\"group:artifact:version\") to DEST."

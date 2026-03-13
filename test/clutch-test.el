@@ -2632,6 +2632,31 @@
           (should (member "PARA_ID" candidates))
           (should (member "PARA_NAME" candidates)))))))
 
+(ert-deftest clutch-test-completion-at-point-swallows-oracle-i18n-completion-errors ()
+  "Oracle completion should fail soft when orai18n.jar is missing."
+  (let ((clutch--oracle-i18n-warning-shown nil)
+        warned)
+    (with-temp-buffer
+      (insert "select * from zj_")
+      (goto-char (point-max))
+      (let ((clutch-connection 'fake))
+        (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                   (lambda () nil))
+                  ((symbol-function 'clutch-db-busy-p)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'clutch-db-complete-tables)
+                   (lambda (_conn _prefix)
+                     (signal 'clutch-db-error
+                             '("Non supported character set (add orai18n.jar in your classpath): ZHS16GBK"))))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq warned (apply #'format fmt args)))))
+          (should-not (clutch-completion-at-point))
+          (should (string-match-p "orai18n.jar" warned))
+          (setq warned nil)
+          (should-not (clutch-completion-at-point))
+          (should-not warned))))))
+
 (ert-deftest clutch-test-eldoc-schema-string-skips-large-statement-scope ()
   "Eldoc should not synchronously load columns across too many tables."
   (with-temp-buffer

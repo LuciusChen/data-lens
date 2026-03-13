@@ -227,6 +227,21 @@
           (should (progn (clutch-jdbc--validate-agent-jar jar) t)))
       (delete-directory tmpdir t))))
 
+(ert-deftest clutch-db-test-jdbc-install-driver-installs-oracle-i18n-companion ()
+  "Installing Oracle JDBC should also install the orai18n companion jar."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
+         (clutch-jdbc-agent-dir tmpdir)
+         downloaded)
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (_coords dest)
+                     (push (file-name-nondirectory dest) downloaded)
+                     (with-temp-file dest (insert "jar")))))
+          (clutch-jdbc-install-driver 'oracle)
+          (should (member "ojdbc11.jar" downloaded))
+          (should (member "orai18n.jar" downloaded)))
+      (delete-directory tmpdir t))))
+
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()
