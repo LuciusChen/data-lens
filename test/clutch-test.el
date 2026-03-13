@@ -2859,16 +2859,17 @@ Skips if `clutch-test-password' is nil."
   (declare (indent 1))
   `(if (null clutch-test-password)
        (ert-skip "Set clutch-test-password to enable live tests")
-     (let ((,var (clutch-db-connect
-                  clutch-test-backend
-                  (list :host clutch-test-host
-                        :port clutch-test-port
-                        :user clutch-test-user
-                        :password clutch-test-password
-                        :database clutch-test-database))))
-       (unwind-protect
-           (progn ,@body)
-         (clutch-db-disconnect ,var)))))
+     (let ((mysql-tls-verify-server nil))
+       (let ((,var (clutch-db-connect
+                    clutch-test-backend
+                    (list :host clutch-test-host
+                          :port clutch-test-port
+                          :user clutch-test-user
+                          :password clutch-test-password
+                          :database clutch-test-database))))
+         (unwind-protect
+             (progn ,@body)
+           (clutch-db-disconnect ,var))))))
 
 (ert-deftest clutch-test-live-display-select-result ()
   :tags '(:clutch-live)

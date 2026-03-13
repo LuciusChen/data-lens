@@ -6,7 +6,7 @@
 An Emacs database client with an interactive data browsing UI.
 Supports MySQL, PostgreSQL, and SQLite via pure Elisp backends, plus Oracle,
 SQL Server, DB2, Snowflake, and Amazon Redshift through a lightweight JVM
-sidecar (=clutch-jdbc-agent=, Java 11+).
+sidecar (=clutch-jdbc-agent=, Java 21+).
 
 - =mysql.el= — pure Elisp MySQL wire protocol implementation (no external CLI needed)
 - =pg.el= — pure Elisp PostgreSQL wire protocol v3 implementation
@@ -27,7 +27,7 @@ MariaDB 10.11 through the same =mysql= backend.  PostgreSQL support is
 functional and compatible, but has not been tested as extensively in daily
 use.
 SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external dependencies.
-The JDBC backend requires Java 11+ and =clutch-jdbc-agent.jar= (auto-downloaded on first use).
+The JDBC backend requires Java 21+ and =clutch-jdbc-agent.jar= (auto-downloaded on first use).
 
 * Features
 
@@ -36,6 +36,7 @@ The JDBC backend requires Java 11+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 - Pure Elisp — no external dependencies
 - MySQL wire protocol (HandshakeV10 + HandshakeResponse41)
 - =mysql_native_password= and =caching_sha2_password= authentication
+  (=caching_sha2_password= auto-retries over TLS when the server requires a secure channel)
 - =COM_QUERY= (text protocol) for executing SQL
 - Prepared statements (=COM_STMT_PREPARE= / =COM_STMT_EXECUTE= / =COM_STMT_CLOSE=) with binary protocol
 - TLS/SSL support via Emacs built-in GnuTLS (STARTTLS upgrade)
@@ -94,7 +95,7 @@ The JDBC backend requires Java 11+ and =clutch-jdbc-agent.jar= (auto-downloaded 
   TLS with =mysql_native_password= has also been live-validated; other
   MariaDB versions are expected to be broadly compatible but are not yet part
   of the regular test matrix
-- Java 11+ for the JDBC backend (Oracle, SQL Server, DB2, Snowflake, Redshift)
+- Java 21+ for the JDBC backend (Oracle, SQL Server, DB2, Snowflake, Redshift)
 
 For MySQL-family servers, core functionality (connect/query/schema browsing,
 editing, prepared statements, and clutch UI workflows) is expected to work on
@@ -553,7 +554,7 @@ the Embark key and =d= to describe it instead — without cancelling and re-runn
 =clutch-db-jdbc.el= adds support for databases that have no pure Elisp wire
 protocol implementation.  It delegates all SQL execution and metadata queries
 to =clutch-jdbc-agent=, a minimal JVM sidecar process that speaks a
-one-JSON-object-per-line protocol on stdin/stdout.  Java 11+ is required.
+one-JSON-object-per-line protocol on stdin/stdout.  Java 21+ is required.
 
 *** Supported Databases
 
@@ -830,6 +831,12 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
 When =:tls t= is used, certificate and hostname verification are enabled by
 default (secure-by-default).  If verification fails, connection setup aborts
 with an error; it does not silently downgrade to insecure mode.
+
+For MySQL 8.x servers using =caching_sha2_password=, clutch will also retry the
+handshake over TLS when the server rejects cleartext-free full authentication on
+an insecure channel.  That retry still honors verification settings: for local
+or self-signed dev servers, either configure =mysql-tls-trustfiles= or set
+=mysql-tls-verify-server= to =nil= explicitly.
 
 To trust private/internal CAs, configure:
 

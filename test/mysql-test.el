@@ -408,6 +408,36 @@
               (should-not (plist-member captured-args :type)))
           (kill-buffer buf))))))
 
+(ert-deftest mysql-test-connect-retries-caching-sha2-full-auth-with-tls ()
+  "A non-TLS caching_sha2 full-auth failure should reconnect with TLS."
+  (let ((auth-tls-flags nil)
+        (buffers nil))
+    (cl-letf (((symbol-function 'mysql--tls-available-p) (lambda () t))
+              ((symbol-function 'mysql--open-connection)
+               (lambda (_host _port _timeout)
+                 (let ((buf (generate-new-buffer " *mysql-test-auto-tls*")))
+                   (push buf buffers)
+                   (cons (gensym "proc") buf))))
+              ((symbol-function 'mysql--authenticate)
+               (lambda (conn _password tls)
+                 (push tls auth-tls-flags)
+                 (if tls
+                     (setf (mysql-conn-tls conn) t)
+                   (signal 'mysql-auth-error
+                           '("caching_sha2_password full authentication requires TLS")))))
+              ((symbol-function 'process-live-p) (lambda (_proc) t))
+              ((symbol-function 'delete-process) (lambda (_proc) nil)))
+      (unwind-protect
+          (let ((conn (mysql-connect :host "127.0.0.1" :port 3306
+                                     :user "root" :password "pw"
+                                     :database "mysql")))
+            (should (equal (nreverse auth-tls-flags) '(nil t)))
+            (should (mysql-conn-tls conn)))
+        (mapc (lambda (buf)
+                (when (buffer-live-p buf)
+                  (kill-buffer buf)))
+              buffers)))))
+
 ;;;; Live integration tests (require a running MySQL server)
 
 (defmacro mysql-test--with-conn (var &rest body)
@@ -416,14 +446,15 @@ Skips if `mysql-test-password' is nil."
   (declare (indent 1))
   `(if (null mysql-test-password)
        (ert-skip "Set mysql-test-password to enable live tests")
-     (let ((,var (mysql-connect :host mysql-test-host
-                                :port mysql-test-port
-                                :user mysql-test-user
-                                :password mysql-test-password
-                                :database mysql-test-database)))
-       (unwind-protect
-           (progn ,@body)
-         (mysql-disconnect ,var)))))
+     (let ((mysql-tls-verify-server nil))
+       (let ((,var (mysql-connect :host mysql-test-host
+                                  :port mysql-test-port
+                                  :user mysql-test-user
+                                  :password mysql-test-password
+                                  :database mysql-test-database)))
+         (unwind-protect
+             (progn ,@body)
+           (mysql-disconnect ,var))))))
 
 (ert-deftest mysql-test-live-connect-disconnect ()
   :tags '(:mysql-live)
@@ -482,12 +513,13 @@ Skips if `mysql-test-password' is nil."
   "Test that wrong password signals mysql-auth-error."
   (if (null mysql-test-password)
       (ert-skip "Set mysql-test-password to enable live tests")
-    (should-error (mysql-connect :host mysql-test-host
-                                 :port mysql-test-port
-                                 :user mysql-test-user
-                                 :password "definitely-wrong-password"
-                                 :database mysql-test-database)
-                  :type 'mysql-auth-error)))
+    (let ((mysql-tls-verify-server nil))
+      (should-error (mysql-connect :host mysql-test-host
+                                   :port mysql-test-port
+                                   :user mysql-test-user
+                                   :password "definitely-wrong-password"
+                                   :database mysql-test-database)
+                    :type 'mysql-auth-error))))
 
 (ert-deftest mysql-test-live-null-values ()
   :tags '(:mysql-live)

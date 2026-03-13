@@ -716,6 +716,26 @@ Returns the converted Elisp value, or nil for SQL NULL."
      :verify-error mysql-tls-verify-server)
     (setf (mysql-conn-tls conn) t)))
 
+(defun mysql--cleanup-connection-resources (proc buf)
+  "Dispose of partially opened MySQL transport resources PROC and BUF."
+  (when (process-live-p proc) (delete-process proc))
+  (when (buffer-live-p buf) (kill-buffer buf)))
+
+(defun mysql--caching-sha2-full-auth-requires-tls-p (err)
+  "Return non-nil when ERR is the caching_sha2 full-auth TLS requirement."
+  (pcase err
+    (`(mysql-auth-error ,message)
+     (equal message "caching_sha2_password full authentication requires TLS"))
+    (_ nil)))
+
+(defun mysql--retry-auth-with-tls-p (err tls)
+  "Return non-nil when ERR should trigger a TLS reconnect retry.
+ERR is the condition data raised during authentication and TLS reflects the
+original connection attempt."
+  (and (not tls)
+       (mysql--tls-available-p)
+       (mysql--caching-sha2-full-auth-requires-tls-p err)))
+
 ;;;; Connection
 
 (defun mysql--authenticate (conn password tls)
@@ -806,9 +826,17 @@ TCP connection wait."
           (progn
             (mysql--authenticate conn password tls)
             conn)
+        (mysql-auth-error
+         (mysql--cleanup-connection-resources proc buf)
+         (if (mysql--retry-auth-with-tls-p err tls)
+             (mysql-connect :host host :port port
+                            :user user :password password
+                            :database database :tls t
+                            :read-idle-timeout read-idle-timeout
+                            :connect-timeout connect-timeout)
+           (signal (car err) (cdr err))))
         (error
-         (when (process-live-p proc) (delete-process proc))
-         (when (buffer-live-p buf) (kill-buffer buf))
+         (mysql--cleanup-connection-resources proc buf)
          (signal (car err) (cdr err)))))))
 
 (defun mysql--handle-auth-switch (conn password packet)
