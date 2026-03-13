@@ -134,6 +134,7 @@ semantics:
 - temporal `C-c .`
 - metadata tags such as `[enum]`, `[json]`, `[datetime]` in the header line
 - the same local field validation rules used by insert staging
+- the same compact error-token model used by insert live validation
 
 This gives edit buffers the same useful guidance as insert buffers without
 pretending they are the same workflow.
@@ -141,6 +142,16 @@ pretending they are the same workflow.
 Validation now happens before the edit buffer closes.  That matters because a
 failed local check should keep the user in the editing context, not throw the
 buffer away and force them to re-open it just to fix one value.
+
+Both buffers now follow the same split:
+
+- numeric / enum / bool / temporal validation can update immediately
+- JSON validation waits for a short idle pause
+- the visible UI shows a short token such as `invalid numeric` instead of
+  rendering the full long-form error inline
+
+The long-form error still matters for correctness, but it does not belong in
+the primary form layout.
 
 ### Why not bring `default` and `generated` over too?
 
@@ -187,6 +198,8 @@ The changes were locked down with tests covering:
 - edit-buffer metadata and completion hints
 - edit-buffer temporal `C-c .`
 - edit-buffer JSON child-editor roundtrip
+- insert/edit live validation convergence
+- compact inline error-token rendering
 - insert-buffer temporal replacement semantics
 
 Full suite status after the change:

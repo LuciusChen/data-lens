@@ -439,7 +439,10 @@ Step 6 — press RET to confirm.
                                C-c ' opens a JSON sub-editor for JSON columns
                                C-c . sets temporal columns to now
 5. Edit the value, C-c C-c to stage (C-c C-k to cancel)
-                               enum / bool / numeric / temporal / JSON values validate locally before staging
+                               enum / bool / numeric / temporal fields validate locally as you edit
+                               JSON validation follows the same model but waits for a short idle pause
+                               validation shows a compact inline token instead of a long full-line message
+                               C-c C-c reuses the same validation rules before staging
                                tab-line shows staged edit/delete/insert summary
 6. Repeat for other cells — modified cells are highlighted
 7. C-c C-c in result buffer  → confirmation prompt showing the UPDATE statements
@@ -456,6 +459,8 @@ Step 6 — press RET to confirm.
 5. C-c ' on a JSON field      → open a dedicated JSON editor when the value gets large
 6. C-c .                      → set current date/time field to "now"
 7. Inline validation          → field-level mistakes show up immediately while editing
+                               JSON validation waits for a short idle pause
+                               validation uses compact inline tokens so long errors do not deform the form layout
 8. C-c C-c                    → validate locally, then stage (C-c C-k cancels)
                                staged rows appear as ghost rows in result buffer
                                left marker shows =I= and status line shows =I-<n>=

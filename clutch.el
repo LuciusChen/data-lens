@@ -4170,6 +4170,15 @@ Scans text properties across the line."
 (defvar-local clutch-result-edit--column-detail nil
   "Schema detail plist for the current single-cell edit buffer.")
 
+(defvar-local clutch-result-edit--row-idx nil
+  "Source row index for the current single-cell edit buffer.")
+
+(defvar-local clutch-result-edit--validation-timer nil
+  "Idle validation timer for the current single-cell edit buffer.")
+
+(defvar-local clutch-result-edit--error-message nil
+  "Current validation message for the single-cell edit buffer, or nil.")
+
 (defvar-local clutch-result-edit-json--parent-buffer nil
   "Parent edit buffer for the current JSON sub-editor.")
 
@@ -4196,7 +4205,12 @@ Scans text properties across the line."
   \\[clutch-result-edit-set-current-time]	Set temporal field to now
   \\[clutch-result-edit-json-field]	Open JSON editor"
   :lighter " DB-Edit"
-  :keymap clutch-result-edit-mode-map)
+  :keymap clutch-result-edit-mode-map
+  (if clutch-result-edit-mode
+      (add-hook 'after-change-functions #'clutch-result-edit--after-change nil t)
+    (remove-hook 'after-change-functions #'clutch-result-edit--after-change t)
+    (clutch-result-edit--cancel-validation-timer)
+    (setq-local clutch-result-edit--error-message nil)))
 
 (defun clutch-result--column-detail (result-buf col-name)
   "Return schema detail plist for COL-NAME in RESULT-BUF, or nil."
@@ -4273,6 +4287,70 @@ Scans text properties across the line."
             (if affordances
                 (concat (string-join (nreverse affordances) "  ") "  ")
               ""))))
+
+(defun clutch-result-edit--refresh-header-line ()
+  "Refresh the edit-buffer header line, including any validation token."
+  (setq-local
+   header-line-format
+   (concat
+    (clutch-result-edit--header-line
+     (or clutch-result-edit--row-idx 0)
+     clutch-result-edit--column-name)
+    (if clutch-result-edit--error-message
+        (propertize
+         (format "  [%s]"
+                 (clutch-result-insert--short-error-message
+                  clutch-result-edit--error-message))
+         'face 'clutch-insert-inline-error-face)
+      ""))))
+
+(defun clutch-result-edit--cancel-validation-timer ()
+  "Cancel any pending edit-buffer validation timer."
+  (when (timerp clutch-result-edit--validation-timer)
+    (cancel-timer clutch-result-edit--validation-timer))
+  (setq-local clutch-result-edit--validation-timer nil))
+
+(defun clutch-result-edit--current-validation-message ()
+  "Return a validation message for the current edit buffer, or nil."
+  (let* ((raw-value (string-trim-right (buffer-string)))
+         (value (if (string= raw-value "NULL") nil raw-value)))
+    (condition-case err
+        (progn
+          (clutch-result--validate-field-value
+           clutch-result-edit--column-name
+           value
+           clutch-result-edit--column-def
+           clutch-result-edit--column-detail)
+          nil)
+      (user-error (error-message-string err)))))
+
+(defun clutch-result-edit--validate-live ()
+  "Run local validation for the current edit buffer and refresh UI."
+  (setq-local clutch-result-edit--error-message
+              (clutch-result-edit--current-validation-message))
+  (clutch-result-edit--refresh-header-line))
+
+(defun clutch-result-edit--run-idle-validation (buffer)
+  "Validate edit BUFFER after an idle delay."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq-local clutch-result-edit--validation-timer nil)
+      (clutch-result-edit--validate-live))))
+
+(defun clutch-result-edit--schedule-validation ()
+  "Validate the current edit buffer immediately or after a short idle delay."
+  (clutch-result-edit--cancel-validation-timer)
+  (if (clutch-result-edit--json-p)
+      (setq-local clutch-result-edit--validation-timer
+                  (run-with-idle-timer
+                   clutch-insert-validation-idle-delay nil
+                   #'clutch-result-edit--run-idle-validation
+                   (current-buffer)))
+    (clutch-result-edit--validate-live)))
+
+(defun clutch-result-edit--after-change (_beg _end _len)
+  "Schedule local validation after any edit-buffer change."
+  (clutch-result-edit--schedule-validation))
 
 (defun clutch-result-edit-complete-field ()
   "Complete the current edit buffer when the column has candidates."
@@ -4388,10 +4466,10 @@ Scans text properties across the line."
           (setq-local clutch-result-edit--column-name col-name
                       clutch-result-edit--column-def col-def
                       clutch-result-edit--column-detail detail
+                      clutch-result-edit--row-idx ridx
                       completion-at-point-functions
                       '(clutch-result-edit-completion-at-point))
-          (setq-local header-line-format
-                      (clutch-result-edit--header-line ridx col-name))
+          (clutch-result-edit--refresh-header-line)
           (setq-local clutch-result--edit-callback
                       (lambda (new-value)
                         (with-current-buffer result-buf
@@ -4406,11 +4484,13 @@ Use C-c C-c in the result buffer to commit all staged edits."
   (let* ((raw-value (string-trim-right (buffer-string)))
          (new-value (if (string= raw-value "NULL") nil raw-value))
          (cb clutch-result--edit-callback))
+    (clutch-result-edit--cancel-validation-timer)
     (clutch-result--validate-field-value
      clutch-result-edit--column-name
      new-value
      clutch-result-edit--column-def
      clutch-result-edit--column-detail)
+    (setq-local clutch-result-edit--error-message nil)
     (quit-window 'kill)
     (when cb
       (funcall cb new-value))))
@@ -4418,6 +4498,7 @@ Use C-c C-c in the result buffer to commit all staged edits."
 (defun clutch-result-edit-cancel ()
   "Cancel the edit and return to the result buffer."
   (interactive)
+  (clutch-result-edit--cancel-validation-timer)
   (quit-window 'kill))
 
 (defun clutch-result--apply-edit (ridx cidx new-value)
@@ -4956,6 +5037,19 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   (clutch-result-insert--set-field-prop field :error-overlay nil)
   (clutch-result-insert--set-field-prop field :error-message nil))
 
+(defun clutch-result-insert--short-error-message (message)
+  "Return a compact inline summary for validation MESSAGE."
+  (cond
+   ((string-match-p " must be one of: " message) "invalid enum")
+   ((string-match-p " expects true/false\\'" message) "invalid bool")
+   ((string-match-p " expects 0/1\\'" message) "invalid bool")
+   ((string-match-p " expects a numeric value\\'" message) "invalid numeric")
+   ((string-match-p " expects YYYY-MM-DD\\'" message) "invalid date")
+   ((string-match-p " expects HH:MM\\[:SS\\]\\'" message) "invalid time")
+   ((string-match-p " expects YYYY-MM-DD HH:MM\\[:SS\\]\\'" message) "invalid datetime")
+   ((string-match-p " expects valid JSON\\'" message) "invalid JSON")
+   (t "invalid value")))
+
 (defun clutch-result-insert--show-field-error (field message)
   "Show inline validation MESSAGE for structured FIELD."
   (clutch-result-insert--clear-field-error field)
@@ -4963,8 +5057,10 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     (let* ((beg (car bounds))
            (end (cdr bounds))
            (ov (make-overlay beg end nil t t))
-           (hint (propertize (format "  %s" message)
-                             'face 'clutch-insert-inline-error-face)))
+           (hint (propertize
+                  (format "  [%s]"
+                          (clutch-result-insert--short-error-message message))
+                  'face 'clutch-insert-inline-error-face)))
       (overlay-put ov 'face 'clutch-insert-field-error-face)
       (overlay-put ov 'after-string hint)
       (overlay-put ov 'help-echo message)

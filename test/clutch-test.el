@@ -568,13 +568,14 @@
                          (list (list :name "impact_score" :type "decimal(5,1)")))))
               (goto-char (clutch-result-insert--current-field-value-start))
               (insert "x")
-              (let ((field (clutch-result-insert--field-state "impact_score")))
+              (let* ((field (clutch-result-insert--field-state "impact_score"))
+                     (after (overlay-get (plist-get field :error-overlay)
+                                         'after-string)))
                 (should (equal (plist-get field :error-message)
                                "Field impact_score expects a numeric value"))
                 (should (overlayp (plist-get field :error-overlay)))
-                (should (string-match-p "numeric value"
-                                        (overlay-get (plist-get field :error-overlay)
-                                                     'after-string)))))))
+                (should (string-match-p "\\[invalid numeric\\]" after))
+                (should-not (string-prefix-p "\n" after))))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-insert-local-validation-clears-inline-error ()
@@ -800,6 +801,58 @@
                (lambda () (encode-time 30 45 13 12 3 2026))))
       (clutch-result-edit-set-current-time)
       (should (equal (buffer-string) "2026-03-12 13:45:30")))))
+
+(ert-deftest clutch-test-edit-live-validation-shows-short-token ()
+  "Edit buffers should surface a compact live-validation token."
+  (with-temp-buffer
+    (insert "xx")
+    (clutch-result-edit-mode 1)
+    (setq-local clutch-result-edit--row-idx 0
+                clutch-result-edit--column-name "impact_score"
+                clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
+                clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)"))
+    (clutch-result-edit--refresh-header-line)
+    (clutch-result-edit--validate-live)
+    (should (equal clutch-result-edit--error-message
+                   "Field impact_score expects a numeric value"))
+    (should (string-match-p "\\[invalid numeric\\]"
+                            (format "%s" header-line-format)))))
+
+(ert-deftest clutch-test-edit-live-validation-clears-when-fixed ()
+  "Fixing an invalid edit value should clear the live-validation token."
+  (with-temp-buffer
+    (insert "xx")
+    (clutch-result-edit-mode 1)
+    (setq-local clutch-result-edit--row-idx 0
+                clutch-result-edit--column-name "impact_score"
+                clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
+                clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)"))
+    (clutch-result-edit--refresh-header-line)
+    (clutch-result-edit--validate-live)
+    (erase-buffer)
+    (insert "1.5")
+    (clutch-result-edit--validate-live)
+    (should-not clutch-result-edit--error-message)
+    (should-not (string-match-p "\\[invalid numeric\\]"
+                                (format "%s" header-line-format)))))
+
+(ert-deftest clutch-test-edit-json-live-validation-is-scheduled-on-idle ()
+  "JSON edit buffers should defer live validation until the user goes idle."
+  (with-temp-buffer
+    (let (scheduled)
+      (clutch-result-edit-mode 1)
+      (setq-local clutch-result-edit--row-idx 0
+                  clutch-result-edit--column-name "payload"
+                  clutch-result-edit--column-def '(:name "payload" :type-category json)
+                  clutch-result-edit--column-detail '(:name "payload" :type "json"))
+      (cl-letf (((symbol-function 'run-with-idle-timer)
+                 (lambda (delay _repeat fn &rest args)
+                   (setq scheduled (list delay fn args))
+                   :fake-timer)))
+        (clutch-result-edit--schedule-validation)
+        (should (= (car scheduled) clutch-insert-validation-idle-delay))
+        (should (eq (cadr scheduled) #'clutch-result-edit--run-idle-validation))
+        (should (equal (caddr scheduled) (list (current-buffer))))))))
 
 (ert-deftest clutch-test-edit-finish-validates-numeric-before-stage ()
   "Edit staging should reject invalid numeric values and keep the edit buffer open."
