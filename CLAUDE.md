@@ -17,6 +17,19 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **No side effects on load**: Loading a file should not alter Emacs behavior. All behavior activation must be explicit (user calls a command or enables a mode).
 - **Reuse Emacs infrastructure**: Use `completing-read` (not framework-specific APIs), `special-mode` for read-only buffers, `text-property-search-forward` for navigation, standard hooks, etc.
 
+## Version Baseline
+
+- `clutch` targets **Emacs 28.1+** for the native MySQL/PostgreSQL backends.
+- The SQLite backend requires **Emacs 29.1+** because it depends on the built-in
+  `sqlite-*` functions.
+- The JDBC path depends on `clutch-jdbc-agent`, whose published baseline is
+  **Java 17+**.
+- Do not silently raise any of these baselines in code, docs, or release assets.
+  If a change requires a higher Emacs or Java version, update:
+  - `README.org`
+  - the relevant release/version metadata
+  - a postmortem explaining why the higher baseline is justified
+
 ## Naming
 
 - **Public API**: `clutch-` prefix for UI layer, `mysql-` / `pg-` prefix for protocol layers. No double dash for public symbols.
