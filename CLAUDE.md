@@ -57,6 +57,15 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Overlays** only for ephemeral visual effects that should not be part of the text (e.g., header active-column highlight). Keep overlay count minimal (O(n) lookup).
 - Build buffer content from scratch via `erase-buffer` + `insert` (magit-section pattern). Never parse buffer text to extract data — always read from the cached data structures (`--result-rows`, `--result-columns`).
 
+## Mutation Workflow Convergence
+
+- **One staged-mutation vocabulary everywhere**: If the UI exposes staged edits / deletes / inserts, the left marker column, footer, transient labels, mode help, and `README.org` must use the same terminology and the same behavior boundaries. Do not let `preview`, `discard`, or `commit` mean different things in different surfaces.
+- **If mutation identity becomes PK-based, every lookup must become PK-based**: Once pending state is keyed by primary key, render paths, record view, discard actions, and summary/state lookups must also move to PK-based identity. Partial migration is not acceptable; it creates invisible staged state.
+- **Preview must show what would really execute**: A command named `Preview execution` must preview the actual execution payload for the current workflow. Do not switch between query-preview and mutation-preview heuristics based on incidental UI state.
+- **Nearby workflows should share helpers, not drift**: Insert and edit flows must reuse the same completion candidates, temporal helpers, and field validation rules when the write semantics are the same. Do not fork a second "almost the same" rule set for edit buffers.
+- **UI symmetry must follow write semantics, not visual symmetry**: Do not copy insert-buffer metadata or controls into edit buffers unless the underlying SQL semantics really match. Tags such as `default` or `generated` need explicit update semantics before they belong in edit UI.
+- **Validation must happen before the editing context is destroyed**: For insert/edit buffers, local validation errors should keep the user in the current buffer so they can repair the value immediately. Do not close the buffer first and then surface the error.
+
 ## Function Design
 
 - Keep functions under ~30 lines. Extract helpers when a function exceeds this.

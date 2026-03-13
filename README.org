@@ -307,7 +307,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 Tip: =c= supports both regular region and rectangular selection (=C-x SPC=).
 Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
 Tip: the result-buffer status line uses compact staged-change tokens:
-=E= for pending edits, =D= for pending deletions, and =I= for pending inserts.
+=E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts.
 When a query result is not updateable because no primary key was detected,
 the same line shows =PK missing= and =E/D off=.
 
@@ -322,7 +322,7 @@ while completion stays on Emacs' completion keys.
 | =TAB= / =S-TAB=      | Next field / previous field                     |
 | =M-TAB= / =C-M-i=    | Complete current field value (prefers CAPF; falls back to chooser) |
 | =C-c '=              | Edit current JSON field in a dedicated buffer   |
-| =C-c .=              | Fill current date/time field with "now"         |
+| =C-c .=              | Set current date/time field to "now"            |
 | =C-c C-c=            | Stage new row / update staged insert            |
 | =C-c C-k=            | Cancel                                          |
 
@@ -434,10 +434,15 @@ Step 6 — press RET to confirm.
 1. SELECT * FROM users;      → C-c C-c to execute
 2. Move cursor to the cell to modify
 3. C-c '                      → opens edit buffer
-4. Edit the value, C-c C-c to stage (C-c C-k to cancel)
+4. Header shows edit-relevant tags like [enum], [json], or [datetime]
+                               M-TAB completes enum / bool-like values when available
+                               C-c ' opens a JSON sub-editor for JSON columns
+                               C-c . sets temporal columns to now
+5. Edit the value, C-c C-c to stage (C-c C-k to cancel)
+                               enum / bool / numeric / temporal / JSON values validate locally before staging
                                tab-line shows staged edit/delete/insert summary
-5. Repeat for other cells — modified cells are highlighted
-6. C-c C-c in result buffer  → confirmation prompt showing the UPDATE statements
+6. Repeat for other cells — modified cells are highlighted
+7. C-c C-c in result buffer  → confirmation prompt showing the UPDATE statements
 #+end_src
 
 *** Insert / Delete Rows
@@ -449,22 +454,22 @@ Step 6 — press RET to confirm.
                                field labels are read-only, aligned, and can show tags like [enum], [json], [default=...]
 4. M-TAB / C-M-i              → complete enum / bool-like fields (falls back to a chooser if needed)
 5. C-c ' on a JSON field      → open a dedicated JSON editor when the value gets large
-6. C-c .                      → fill current date/time field with "now"
+6. C-c .                      → set current date/time field to "now"
 7. Inline validation          → field-level mistakes show up immediately while editing
 8. C-c C-c                    → validate locally, then stage (C-c C-k cancels)
                                staged rows appear as ghost rows in result buffer
-                               left marker shows =I= and status line shows =I<n>=
+                               left marker shows =I= and status line shows =I-<n>=
                                missing generated/defaulted columns render as <generated> / <default>
 9. C-c ' on a pending insert row → re-open that staged insert with its previous values
 10. Use normal Emacs region selection to select rows
 11. d                          → stage current row or selected region for deletion
-                               left marker shows =D= and status line shows =D<n>=
+                               left marker shows =D= and status line shows =D-<n>=
                                deleted rows are visually marked in the result buffer
 12. C-c C-k                   → discard pending change at point
 13. g with pending changes    → prompts "Discard pending changes and re-run query?"
 14. C-c C-c in result buffer → confirmation prompt showing all statements
                                commits in order: INSERT → UPDATE → DELETE
-                               edited rows show =E= in the left marker column and =E<n>= in the status line
+                               edited rows show =E= in the left marker column and =E-<n>= in the status line
 #+end_src
 
 ** REPL Mode

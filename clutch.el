@@ -1406,13 +1406,13 @@ Returns a list of propertized strings (may be empty)."
   "Build footer part for staged edits, deletions, or insertions."
   (let (parts)
     (when clutch--pending-edits
-      (push (format "E%d" (length clutch--pending-edits))
+      (push (format "E-%d" (length clutch--pending-edits))
             parts))
     (when clutch--pending-deletes
-      (push (format "D%d" (length clutch--pending-deletes))
+      (push (format "D-%d" (length clutch--pending-deletes))
             parts))
     (when clutch--pending-inserts
-      (push (format "I%d" (length clutch--pending-inserts))
+      (push (format "I-%d" (length clutch--pending-inserts))
             parts))
     (when parts
       (concat
@@ -4161,20 +4161,200 @@ Scans text properties across the line."
 (defvar-local clutch-result--edit-result-buffer nil
   "The result buffer to commit edits to after clutch-result-edit-finish.")
 
+(defvar-local clutch-result-edit--column-name nil
+  "Column name for the current single-cell edit buffer.")
+
+(defvar-local clutch-result-edit--column-def nil
+  "Column definition plist for the current single-cell edit buffer.")
+
+(defvar-local clutch-result-edit--column-detail nil
+  "Schema detail plist for the current single-cell edit buffer.")
+
+(defvar-local clutch-result-edit-json--parent-buffer nil
+  "Parent edit buffer for the current JSON sub-editor.")
+
+(defvar-local clutch-result-edit-json--field-name nil
+  "Field name for the current JSON sub-editor.")
+
 (defvar clutch-result-edit-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'clutch-result-edit-finish)
     (define-key map (kbd "C-c C-k") #'clutch-result-edit-cancel)
+    (define-key map (kbd "C-c '") #'clutch-result-edit-json-field)
+    (define-key map (kbd "M-TAB") #'clutch-result-edit-complete-field)
+    (define-key map (kbd "C-M-i") #'clutch-result-edit-complete-field)
+    (define-key map (kbd "C-c .") #'clutch-result-edit-set-current-time)
     map)
   "Keymap for the cell edit buffer.")
 
 (define-minor-mode clutch-result-edit-mode
   "Minor mode for editing a database cell value.
-\\<clutch-result-edit-mode-map>
+  \\<clutch-result-edit-mode-map>
   \\[clutch-result-edit-finish]	Accept edit
-  \\[clutch-result-edit-cancel]	Cancel"
+  \\[clutch-result-edit-cancel]	Cancel
+  \\[clutch-result-edit-complete-field]	Complete enum/bool-like values
+  \\[clutch-result-edit-set-current-time]	Set temporal field to now
+  \\[clutch-result-edit-json-field]	Open JSON editor"
   :lighter " DB-Edit"
   :keymap clutch-result-edit-mode-map)
+
+(defun clutch-result--column-detail (result-buf col-name)
+  "Return schema detail plist for COL-NAME in RESULT-BUF, or nil."
+  (with-current-buffer result-buf
+    (when-let* ((table (ignore-errors (clutch-result--detect-table)))
+                (details (ignore-errors
+                           (clutch--ensure-column-details clutch-connection table))))
+      (cl-find-if (lambda (detail)
+                    (equal (plist-get detail :name) col-name))
+                  details))))
+
+(defun clutch-result-edit--field-candidates ()
+  "Return completion candidates for the current edit buffer, or nil."
+  (let ((type (downcase (or (plist-get clutch-result-edit--column-detail :type) ""))))
+    (or (clutch-result-insert--enum-candidates type)
+        (cond
+         ((member type '("boolean" "bool"))
+          '("true" "false"))
+         ((member type '("tinyint(1)" "bit(1)"))
+          '("0" "1"))
+         (t nil)))))
+
+(defun clutch-result-edit-completion-at-point ()
+  "Return CAPF data for the current edit buffer, or nil."
+  (when-let* ((candidates (clutch-result-edit--field-candidates)))
+    (list (point-min) (point-max) candidates :exclusive 'no)))
+
+(defun clutch-result-edit--temporal-p ()
+  "Return non-nil when the current edit buffer is for a temporal column."
+  (memq (plist-get clutch-result-edit--column-def :type-category)
+        '(date time datetime)))
+
+(defun clutch-result-edit--json-p ()
+  "Return non-nil when the current edit buffer is for a JSON column."
+  (let ((type (downcase (or (plist-get clutch-result-edit--column-detail :type) ""))))
+    (or (eq (plist-get clutch-result-edit--column-def :type-category) 'json)
+        (string= type "json"))))
+
+(defun clutch-result-edit--metadata-tags ()
+  "Return short metadata tags for the current edit buffer."
+  (let* ((type-category (plist-get clutch-result-edit--column-def :type-category))
+         (type (downcase (or (plist-get clutch-result-edit--column-detail :type) "")))
+         tags)
+    (when (clutch-result-insert--enum-candidates type)
+      (push "enum" tags))
+    (when (or (member type '("boolean" "bool"))
+              (member type '("tinyint(1)" "bit(1)")))
+      (push "bool" tags))
+    (when (clutch-result-edit--json-p)
+      (push "json" tags))
+    (when (eq type-category 'date)
+      (push "date" tags))
+    (when (eq type-category 'time)
+      (push "time" tags))
+    (when (eq type-category 'datetime)
+      (push "datetime" tags))
+    (nreverse tags)))
+
+(defun clutch-result-edit--header-line (ridx col-name)
+  "Build the edit-buffer header line for ROW RIDX and COL-NAME."
+  (let* ((tags (clutch-result-edit--metadata-tags))
+         (tag-text (if tags
+                       (format " [%s]" (string-join tags " "))
+                     ""))
+         (affordances nil))
+    (when (clutch-result-edit--field-candidates)
+      (push "M-TAB: complete" affordances))
+    (when (clutch-result-edit--temporal-p)
+      (push "C-c .: now" affordances))
+    (when (clutch-result-edit--json-p)
+      (push "C-c ': JSON" affordances))
+    (format " Editing row %d, column \"%s\"%s  |  %sC-c C-c: stage  C-c C-k: cancel"
+            ridx col-name tag-text
+            (if affordances
+                (concat (string-join (nreverse affordances) "  ") "  ")
+              ""))))
+
+(defun clutch-result-edit-complete-field ()
+  "Complete the current edit buffer when the column has candidates."
+  (interactive)
+  (let ((handled (condition-case nil
+                     (completion-at-point)
+                   (error nil))))
+    (unless handled
+      (let* ((candidates (or (clutch-result-edit--field-candidates)
+                             (user-error "No completion candidates for %s"
+                                         clutch-result-edit--column-name)))
+             (current (buffer-substring-no-properties (point-min) (point-max)))
+             (choice (completing-read (format "%s: " clutch-result-edit--column-name)
+                                      candidates nil t current nil current)))
+        (erase-buffer)
+        (insert choice)))))
+
+(defun clutch-result-edit-set-current-time ()
+  "Replace the current edit buffer contents with a current time value."
+  (interactive)
+  (let ((value (or (clutch-result-insert--current-time-value
+                    (plist-get clutch-result-edit--column-def :type-category))
+                   (user-error "Column %s is not a date/time field"
+                               clutch-result-edit--column-name))))
+    (erase-buffer)
+    (insert value)
+    (goto-char (point-max))))
+
+(defun clutch-result-edit-json-field ()
+  "Open a dedicated JSON editor for the current edit buffer."
+  (interactive)
+  (unless (clutch-result-edit--json-p)
+    (user-error "Column %s is not a JSON field" clutch-result-edit--column-name))
+  (let ((parent-buf (current-buffer))
+        (field-name clutch-result-edit--column-name)
+        (parent-text (buffer-substring-no-properties (point-min) (point-max)))
+        (buf (get-buffer-create
+              (format "*clutch-edit-json: %s*" clutch-result-edit--column-name))))
+    (with-current-buffer buf
+      (erase-buffer)
+      (insert parent-text)
+      (goto-char (point-min))
+      (condition-case nil
+          (unless (string-empty-p (buffer-string))
+            (json-pretty-print-buffer))
+        (error nil))
+      (clutch-result-insert--json-editor-mode)
+      (let ((map (copy-keymap (or (current-local-map) (make-sparse-keymap)))))
+        (define-key map (kbd "C-c C-c") #'clutch-result-edit-json-finish)
+        (define-key map (kbd "C-c C-k") #'clutch-result-edit-json-cancel)
+        (use-local-map map))
+      (setq-local header-line-format
+                  (format " JSON field %s  |  C-c C-c: save  C-c C-k: cancel"
+                          field-name)
+                  clutch-result-edit-json--parent-buffer parent-buf
+                  clutch-result-edit-json--field-name field-name))
+    (pop-to-buffer buf)))
+
+(defun clutch-result-edit-json-finish ()
+  "Save the JSON sub-editor contents back to the parent edit buffer."
+  (interactive)
+  (let* ((parent clutch-result-edit-json--parent-buffer)
+         (field-name clutch-result-edit-json--field-name)
+         (raw (string-trim (buffer-substring-no-properties (point-min) (point-max))))
+         (value (clutch-result-insert--json-normalize-string raw)))
+    (unless (buffer-live-p parent)
+      (user-error "Edit buffer no longer exists"))
+    (quit-window 'kill)
+    (with-current-buffer parent
+      (erase-buffer)
+      (insert value)
+      (goto-char (point-min)))
+    (pop-to-buffer parent)
+    (message "Updated JSON for %s" field-name)))
+
+(defun clutch-result-edit-json-cancel ()
+  "Cancel JSON sub-editing and return to the parent edit buffer."
+  (interactive)
+  (let ((parent clutch-result-edit-json--parent-buffer))
+    (quit-window 'kill)
+    (when (buffer-live-p parent)
+      (pop-to-buffer parent))))
 
 (defun clutch-result--edit-pending-insert (ridx)
   "Re-open staged insert at result row RIDX in the insert buffer."
@@ -4195,6 +4375,8 @@ Scans text properties across the line."
     (if (>= ridx (length clutch--result-rows))
         (clutch-result--edit-pending-insert ridx)
       (let* ((col-name (nth cidx clutch--result-columns))
+             (col-def (nth cidx clutch--result-column-defs))
+             (detail (clutch-result--column-detail (current-buffer) col-name))
              (result-buf (current-buffer))
              (edit-buf (get-buffer-create
                         (format "*clutch-edit: [%d].%s*" ridx col-name))))
@@ -4203,9 +4385,13 @@ Scans text properties across the line."
           (insert (clutch--format-value val))
           (goto-char (point-min))
           (clutch-result-edit-mode 1)
+          (setq-local clutch-result-edit--column-name col-name
+                      clutch-result-edit--column-def col-def
+                      clutch-result-edit--column-detail detail
+                      completion-at-point-functions
+                      '(clutch-result-edit-completion-at-point))
           (setq-local header-line-format
-                      (format " Editing row %d, column \"%s\"  |  C-c C-c: stage  C-c C-k: cancel"
-                              ridx col-name))
+                      (clutch-result-edit--header-line ridx col-name))
           (setq-local clutch-result--edit-callback
                       (lambda (new-value)
                         (with-current-buffer result-buf
@@ -4217,11 +4403,17 @@ Scans text properties across the line."
   "Stage the edit and return to the result buffer.
 Use C-c C-c in the result buffer to commit all staged edits."
   (interactive)
-  (let ((new-value (string-trim-right (buffer-string)))
-        (cb clutch-result--edit-callback))
+  (let* ((raw-value (string-trim-right (buffer-string)))
+         (new-value (if (string= raw-value "NULL") nil raw-value))
+         (cb clutch-result--edit-callback))
+    (clutch-result--validate-field-value
+     clutch-result-edit--column-name
+     new-value
+     clutch-result-edit--column-def
+     clutch-result-edit--column-detail)
     (quit-window 'kill)
     (when cb
-      (funcall cb (if (string= new-value "NULL") nil new-value)))))
+      (funcall cb new-value))))
 
 (defun clutch-result-edit-cancel ()
   "Cancel the edit and return to the result buffer."
@@ -5082,7 +5274,7 @@ If nothing handles the completion, fall back to `completing-read'."
         (insert choice)))))
 
 (defun clutch-result-insert-fill-current-time ()
-  "Fill the current insert field with a current date/time value."
+  "Replace the current insert field with a current date/time value."
   (interactive)
   (let* ((field-name (or (clutch-result-insert--current-field-name)
                          (user-error "Point is not on an insert field")))
@@ -5282,11 +5474,10 @@ Skips columns with empty values."
    "\\`[+-]?\\(?:[0-9]+\\(?:\\.[0-9]*\\)?\\|\\.[0-9]+\\)\\(?:[eE][+-]?[0-9]+\\)?\\'"
    value))
 
-(defun clutch-result-insert--validate-field (field-name value)
-  "Validate VALUE for FIELD-NAME in the current insert buffer."
-  (when-let* ((detail (clutch-result-insert--column-detail field-name)))
-    (let* ((col-def (clutch-result-insert--column-def field-name))
-           (type-category (plist-get col-def :type-category))
+(defun clutch-result--validate-field-value (field-name value col-def detail)
+  "Validate VALUE for FIELD-NAME using COL-DEF and schema DETAIL."
+  (when (and detail value)
+    (let* ((type-category (plist-get col-def :type-category))
            (type (downcase (or (plist-get detail :type) "")))
            (enum-candidates (clutch-result-insert--enum-candidates type)))
       (cond
@@ -5316,6 +5507,12 @@ Skips columns with empty values."
        ((or (eq type-category 'json)
             (string= type "json"))
         (clutch-result-insert--validate-json field-name value))))))
+
+(defun clutch-result-insert--validate-field (field-name value)
+  "Validate VALUE for FIELD-NAME in the current insert buffer."
+  (when-let* ((detail (clutch-result-insert--column-detail field-name)))
+    (clutch-result--validate-field-value
+     field-name value (clutch-result-insert--column-def field-name) detail)))
 
 (defun clutch-result-insert--validate-fields (fields)
   "Validate staged insert FIELDS in the current insert buffer."
