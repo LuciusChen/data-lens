@@ -6,7 +6,7 @@
 An Emacs database client with an interactive data browsing UI.
 Supports MySQL, PostgreSQL, and SQLite via pure Elisp backends, plus Oracle,
 SQL Server, DB2, Snowflake, and Amazon Redshift through a lightweight JVM
-sidecar (=clutch-jdbc-agent=, Java 21+).
+sidecar (=clutch-jdbc-agent=, Java 17+).
 
 - =mysql.el= — pure Elisp MySQL wire protocol implementation (no external CLI needed)
 - =pg.el= — pure Elisp PostgreSQL wire protocol v3 implementation
@@ -27,7 +27,7 @@ MariaDB 10.11 through the same =mysql= backend.  PostgreSQL support is
 functional and compatible, but has not been tested as extensively in daily
 use.
 SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external dependencies.
-The JDBC backend requires Java 21+ and =clutch-jdbc-agent.jar= (auto-downloaded on first use).
+The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded on first use).
 
 * Features
 
@@ -95,7 +95,7 @@ The JDBC backend requires Java 21+ and =clutch-jdbc-agent.jar= (auto-downloaded 
   TLS with =mysql_native_password= has also been live-validated; other
   MariaDB versions are expected to be broadly compatible but are not yet part
   of the regular test matrix
-- Java 21+ for the JDBC backend (Oracle, SQL Server, DB2, Snowflake, Redshift)
+- Java 17+ for the JDBC backend (Oracle, SQL Server, DB2, Snowflake, Redshift)
 
 For MySQL-family servers, core functionality (connect/query/schema browsing,
 editing, prepared statements, and clutch UI workflows) is expected to work on
@@ -554,7 +554,7 @@ the Embark key and =d= to describe it instead — without cancelling and re-runn
 =clutch-db-jdbc.el= adds support for databases that have no pure Elisp wire
 protocol implementation.  It delegates all SQL execution and metadata queries
 to =clutch-jdbc-agent=, a minimal JVM sidecar process that speaks a
-one-JSON-object-per-line protocol on stdin/stdout.  Java 21+ is required.
+one-JSON-object-per-line protocol on stdin/stdout.  Java 17+ is required.
 
 *** Supported Databases
 
