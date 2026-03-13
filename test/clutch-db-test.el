@@ -238,8 +238,24 @@
                      (push (file-name-nondirectory dest) downloaded)
                      (with-temp-file dest (insert "jar")))))
           (clutch-jdbc-install-driver 'oracle)
-          (should (member "ojdbc11.jar" downloaded))
+          (should (member "ojdbc8.jar" downloaded))
           (should (member "orai18n.jar" downloaded)))
+      (delete-directory tmpdir t))))
+
+(ert-deftest clutch-db-test-jdbc-install-driver-removes-conflicting-oracle-jar ()
+  "Installing an Oracle driver should remove the conflicting Oracle jar."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
+         (clutch-jdbc-agent-dir tmpdir))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (_coords dest)
+                     (with-temp-file dest (insert "jar")))))
+          (make-directory (expand-file-name "drivers" tmpdir) t)
+          (with-temp-file (expand-file-name "drivers/ojdbc11.jar" tmpdir)
+            (insert "jar"))
+          (clutch-jdbc-install-driver 'oracle)
+          (should (file-exists-p (expand-file-name "drivers/ojdbc8.jar" tmpdir)))
+          (should-not (file-exists-p (expand-file-name "drivers/ojdbc11.jar" tmpdir))))
       (delete-directory tmpdir t))))
 
 ;;;; Unit tests — backend registry

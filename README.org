@@ -583,7 +583,8 @@ drivers directory.
 (setq clutch-jdbc-agent-sha256 nil)
 
 ;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift):
-(clutch-jdbc-install-driver 'oracle)      ; ojdbc11.jar + orai18n.jar from Maven Central
+(clutch-jdbc-install-driver 'oracle)      ; ojdbc8.jar + orai18n.jar from Maven Central
+(clutch-jdbc-install-driver 'oracle-11)   ; ojdbc11.jar + orai18n.jar for newer Oracle-only setups
 (clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar from Maven Central
 (clutch-jdbc-install-driver 'snowflake)   ; snowflake-jdbc.jar from Maven Central
 (clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc.jar from Maven Central
@@ -608,6 +609,12 @@ required for CJK database character sets such as =ZHS16GBK=.  If you
 install drivers while the shared JDBC agent is already running, clutch
 will restart that agent on the next JDBC use; reconnecting is enough,
 you do not need to restart Emacs.
+
+Oracle installs also keep the active JDBC line unambiguous:
+=clutch-jdbc-install-driver 'oracle= enables =ojdbc8.jar= and disables
+=ojdbc11.jar= by removing it if present; =clutch-jdbc-install-driver
+'oracle-11= does the inverse.  This avoids loading both Oracle driver lines
+at once.
 
 *** Connection Examples
 
@@ -662,10 +669,14 @@ backends.  See [[*Password Management]] for details.
 
 *** Oracle-specific Notes
 
-- *Oracle 11g*: use =ojdbc8= instead of =ojdbc11=.  ojdbc11 has LOB compatibility
-  issues with Oracle 11g that cause queries involving BLOB/CLOB columns to hang.
-  Install with =(clutch-jdbc-install-driver 'oracle-8)= and remove =ojdbc11.jar=
-  from the drivers directory (having both causes driver conflicts).
+- *Oracle driver default*: =clutch-jdbc-install-driver 'oracle= now installs
+  =ojdbc8= by default.  It is the safest choice across Oracle 11g/12c/19c and
+  avoids the known 11g LOB compatibility problems seen with =ojdbc11=.
+- *Oracle 11g*: keep using =ojdbc8=.  If =ojdbc11.jar= is present from an older
+  setup, reinstall with =(clutch-jdbc-install-driver 'oracle)= to re-enable
+  =ojdbc8.jar= and remove the conflicting =ojdbc11.jar= copy automatically.
+- *Oracle 19c+ only*: if you specifically want the newer driver line, install
+  it with =(clutch-jdbc-install-driver 'oracle-11)=.
 - *SID vs service name*: use =:sid "MYSID"= for SID-style connections
   (=@host:port:SID=); use =:database "myservice"= for service name style
   (=@//host:port/service=).  Mixing them up causes the connection to hang.
@@ -676,7 +687,8 @@ backends.  See [[*Password Management]] for details.
   connect stays non-blocking and completion does not have to enumerate the whole
   schema up front.
 - Pagination uses =ROWNUM= subquery, compatible with all Oracle versions (9i+).
-- CJK character sets (e.g. ZHS16GBK) require =orai18n.jar= in addition to =ojdbc11.jar=.
+- CJK character sets (e.g. ZHS16GBK) require =orai18n.jar= in addition to the
+  active Oracle JDBC jar (=ojdbc8.jar= or =ojdbc11.jar=).
 - Oracle =DATE= columns include a time component; the agent always uses =getTimestamp()=
   to avoid silent data loss.
 

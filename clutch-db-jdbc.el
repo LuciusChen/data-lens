@@ -99,11 +99,14 @@ Examples:
                   :filename "mssql-jdbc.jar"))
     (snowflake . (:maven "net.snowflake:snowflake-jdbc:3.14.4"
                   :filename "snowflake-jdbc.jar"))
-    (oracle    . (:maven "com.oracle.database.jdbc:ojdbc11:21.13.0.0"
-                  :filename "ojdbc11.jar"))
-    ;; ojdbc8 (19c driver) — use for Oracle 11g/12c; ojdbc11 has LOB compatibility issues with 11g.
+    ;; ojdbc8 (19c driver) is the safest default across Oracle 11g/12c/19c.
+    (oracle    . (:maven "com.oracle.database.jdbc:ojdbc8:19.21.0.0"
+                  :filename "ojdbc8.jar"))
     (oracle-8  . (:maven "com.oracle.database.jdbc:ojdbc8:19.21.0.0"
                   :filename "ojdbc8.jar"))
+    ;; ojdbc11 remains available for users who explicitly want the newer line.
+    (oracle-11 . (:maven "com.oracle.database.jdbc:ojdbc11:21.13.0.0"
+                  :filename "ojdbc11.jar"))
     (oracle-i18n . (:maven "com.oracle.database.nls:orai18n:21.13.0.0"
                     :filename "orai18n.jar"))
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
@@ -119,8 +122,13 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 
 (defconst clutch-jdbc--driver-companions
   '((oracle oracle-i18n)
-    (oracle-8 oracle-i18n))
+    (oracle-8 oracle-i18n)
+    (oracle-11 oracle-i18n))
   "Optional companion driver artifacts to install alongside a primary driver.")
+
+(defconst clutch-jdbc--oracle-driver-filenames
+  '("ojdbc8.jar" "ojdbc11.jar")
+  "Oracle JDBC driver jar filenames that conflict with each other.")
 
 ;;;; Connection struct
 
@@ -806,12 +814,16 @@ Fetches from GitHub Releases."
          (dest       (expand-file-name filename (clutch-jdbc--drivers-dir)))
          (companions (alist-get driver clutch-jdbc--driver-companions)))
     (make-directory (clutch-jdbc--drivers-dir) t)
-    (if (file-exists-p dest)
-        (message "Driver already installed: %s" dest)
-      (if (plist-get spec :maven)
-          (clutch-jdbc--download-maven-driver (plist-get spec :maven) dest)
-        (message "Manual download required for %s.\nURL: %s\nPlace as: %s"
-                 driver (plist-get spec :manual) dest)))
+    (cond
+     ((file-exists-p dest)
+      (message "Driver already installed: %s" dest))
+     ((plist-get spec :maven)
+      (clutch-jdbc--download-maven-driver (plist-get spec :maven) dest))
+     (t
+      (message "Manual download required for %s.\nURL: %s\nPlace as: %s"
+               driver (plist-get spec :manual) dest)))
+    (when (clutch-jdbc--oracle-driver-symbol-p driver)
+      (clutch-jdbc--disable-conflicting-oracle-jars filename))
     (dolist (companion companions)
       (unless (file-exists-p
                (expand-file-name
@@ -832,6 +844,18 @@ Fetches from GitHub Releases."
       (message "Downloading %s from Maven Central..." coords)
       (url-copy-file url dest)
       (message "Downloaded driver to %s" dest))))
+
+(defun clutch-jdbc--oracle-driver-symbol-p (driver)
+  "Return non-nil when DRIVER selects an Oracle JDBC jar."
+  (memq driver '(oracle oracle-8 oracle-11)))
+
+(defun clutch-jdbc--disable-conflicting-oracle-jars (selected-filename)
+  "Remove Oracle JDBC jars that conflict with SELECTED-FILENAME."
+  (dolist (filename clutch-jdbc--oracle-driver-filenames)
+    (unless (string-equal filename selected-filename)
+      (let ((path (expand-file-name filename (clutch-jdbc--drivers-dir))))
+        (when (file-exists-p path)
+          (delete-file path))))))
 
 (provide 'clutch-db-jdbc)
 ;;; clutch-db-jdbc.el ends here
