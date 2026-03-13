@@ -2136,6 +2136,22 @@
       (should (equal (plist-get captured :query-timeout) 13))
       (should (equal (plist-get captured :rpc-timeout) 14)))))
 
+(ert-deftest clutch-test-build-conn-errors-early-when-jdbc-pass-entry-is-unresolved ()
+  "JDBC connections should fail fast when :pass-entry resolves to no password."
+  (let (connect-called)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (&rest _args)
+                 (setq connect-called t)
+                 'fake-conn)))
+      (should-error
+       (clutch--build-conn
+        '(:backend oracle :host "db" :port 1521 :user "u" :sid "orcl"
+          :pass-entry "prod-oracle"))
+       :type 'user-error)
+      (should-not connect-called))))
+
 (ert-deftest clutch-test-build-conn-skips-timeouts-for-sqlite ()
   "Test that `clutch--build-conn' does not pass network timeout keys to sqlite."
   (let ((clutch-connect-timeout-seconds 11)

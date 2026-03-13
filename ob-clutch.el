@@ -151,6 +151,19 @@ SOURCE-PARAMS is the plist used for password resolution."
         (plist-put conn-params :password pw)
       conn-params)))
 
+(defun ob-clutch--guard-jdbc-pass-entry (backend source-params conn-params)
+  "Fail early when JDBC BACKEND has an unresolved explicit :pass-entry.
+Return CONN-PARAMS unchanged otherwise."
+  (when (and (memq backend '(oracle sqlserver db2 snowflake redshift))
+             (plist-get source-params :pass-entry)
+             (null (plist-get conn-params :password)))
+    (user-error
+     (concat "No password resolved for JDBC Org-Babel block %s (:pass-entry %s). "
+             "Enable auth-source-pass/auth-source, or set :password explicitly")
+     backend
+     (plist-get source-params :pass-entry)))
+  conn-params)
+
 (defun ob-clutch--resolve-connection (params default-backend)
   "Return (BACKEND . CONN-PARAMS) from Babel PARAMS.
 DEFAULT-BACKEND is used by language-specific executors."
@@ -163,7 +176,9 @@ DEFAULT-BACKEND is used by language-specific executors."
                        (or (plist-get plist :backend) default-backend)))
              (conn-params (ob-clutch--plist-without-meta plist)))
         (cons backend
-              (ob-clutch--maybe-inject-password backend conn-params plist)))
+              (ob-clutch--guard-jdbc-pass-entry
+               backend plist
+               (ob-clutch--maybe-inject-password backend conn-params plist))))
     (let* ((backend (ob-clutch--normalize-backend
                      (or (cdr (assq :backend params)) default-backend)))
            (conn-params (ob-clutch--inline-params params backend))
@@ -171,7 +186,9 @@ DEFAULT-BACKEND is used by language-specific executors."
                                   (when-let* ((entry (cdr (assq :pass-entry params))))
                                     (list :pass-entry entry)))))
       (cons backend
-            (ob-clutch--maybe-inject-password backend conn-params source-params)))))
+            (ob-clutch--guard-jdbc-pass-entry
+             backend source-params
+             (ob-clutch--maybe-inject-password backend conn-params source-params))))))
 
 (defun ob-clutch--connect (params default-backend)
   "Get or create a cached clutch-db connection for PARAMS."

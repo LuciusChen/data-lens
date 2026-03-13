@@ -225,6 +225,11 @@ The pass store reveals only =mysql/dev-mysql= — no host or username.
 Use =:pass-entry "other-name"= to override the suffix when the entry
 name must differ from the connection name.
 
+For JDBC connections (including Org-Babel blocks), an explicit =:pass-entry=
+that resolves to no password now fails fast in Emacs instead of sending a null
+password to the driver.  If you use =pass=, make sure =auth-source-pass= is
+enabled first.
+
 *** Fallback: standard auth-source lookup
 
 If no pass entry matches the connection name, clutch falls back to

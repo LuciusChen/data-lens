@@ -64,6 +64,21 @@
         (should (equal (plist-get conn-params :password) "secret"))
         (should (equal (plist-get resolved :pass-entry) "db/dev"))))))
 
+(ert-deftest ob-clutch-test-resolve-connection-errors-early-for-unresolved-jdbc-pass-entry ()
+  "JDBC Org-Babel params should fail fast when explicit :pass-entry resolves to no password."
+  (cl-letf (((symbol-function 'ob-clutch--resolve-password)
+             (lambda (_params) nil)))
+    (should-error
+     (ob-clutch--resolve-connection
+      '((:backend . oracle)
+        (:host . "db")
+        (:port . 1521)
+        (:user . "scott")
+        (:sid . "ORCL")
+        (:pass-entry . "prod-oracle"))
+      'oracle)
+     :type 'user-error)))
+
 (ert-deftest ob-clutch-test-resolve-connection-inline-sqlite-requires-database ()
   "Test sqlite inline params require :database."
   (should-error

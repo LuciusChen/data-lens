@@ -701,6 +701,15 @@ Returns a live connection object or signals a `user-error'."
   (let* ((backend  (or (plist-get params :backend) 'mysql))
          (params   (clutch--normalize-timeout-params backend params))
          (password (clutch--resolve-password params))
+         (_guard
+          (when (and (clutch--jdbc-backend-p backend)
+                     (plist-get params :pass-entry)
+                     (null password))
+            (user-error
+             (concat "No password resolved for JDBC connection %s (:pass-entry %s). "
+                     "Enable auth-source-pass/auth-source, or set :password explicitly")
+             backend
+             (plist-get params :pass-entry))))
          (db-params (cl-loop for (k v) on params by #'cddr
                              unless (memq k '(:sql-product :backend :password :pass-entry))
                              append (list k v)))
