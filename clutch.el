@@ -509,6 +509,58 @@ Set by `clutch-query-console'; used to save/restore buffer content.")
     (rename-buffer (clutch--console-buffer-name clutch--console-name clutch-connection)
                    t)))
 
+(defun clutch--refresh-current-schema (&optional quiet)
+  "Refresh schema for the current connection and report the outcome.
+When QUIET is non-nil, do not emit a minibuffer message.
+Returns non-nil on success, nil on failure."
+  (clutch--ensure-connection)
+  (let* ((conn clutch-connection)
+         (entry (clutch--schema-status-entry conn)))
+    (if (eq (plist-get entry :state) 'refreshing)
+        (progn
+          (unless quiet
+            (message "Schema refresh already in progress"))
+          nil)
+      (let* ((ok (clutch--refresh-schema-cache conn))
+             (entry (clutch--schema-status-entry conn))
+             (tables (plist-get entry :tables))
+             (err (plist-get entry :error)))
+        (unless quiet
+          (message (if ok
+                       (format "Schema refreshed%s"
+                               (if tables (format " (%d tables)" tables) ""))
+                     (format "Schema refresh failed%s"
+                             (if err (format ": %s" err) "")))))
+        ok))))
+
+(defun clutch--schema-cache-guidance (conn)
+  "Return a recovery hint for CONN schema cache state, or nil."
+  (when-let* ((entry (clutch--schema-status-entry conn))
+              (state (plist-get entry :state)))
+    (pcase state
+      ('stale
+       "Schema cache is stale — press C-c C-s before relying on cached table names or completion")
+      ('failed
+       "Schema refresh failed earlier — press C-c C-s to retry before relying on cached table names or completion")
+      ('refreshing
+       "Schema refresh is in progress — cached table names or completion may still be behind")
+      (_ nil))))
+
+(defun clutch--warn-schema-cache-state (&optional conn)
+  "Show a recovery hint when CONN schema cache is not ready."
+  (when-let* ((hint (clutch--schema-cache-guidance (or conn clutch-connection))))
+    (message "%s" hint)))
+
+(defun clutch--schema-browser-status-line (conn)
+  "Return a compact schema browser status line for CONN, or nil."
+  (when-let* ((entry (clutch--schema-status-entry conn))
+              (state (plist-get entry :state)))
+    (pcase state
+      ('refreshing "-- schema refresh in progress\n")
+      ('stale "-- schema cache stale · refresh with g or C-c C-s\n")
+      ('failed "-- schema refresh failed · retry with g or C-c C-s\n")
+      (_ nil))))
+
 ;;;; Console persistence
 
 (defun clutch--console-file (name)
@@ -2679,10 +2731,7 @@ Only loads table names (fast).  Column info is loaded lazily."
 Useful after DDL operations (CREATE TABLE, ALTER TABLE, DROP TABLE)
 executed outside clutch that would otherwise leave stale completions."
   (interactive)
-  (clutch--ensure-connection)
-  (if (clutch--refresh-schema-cache clutch-connection)
-      (message "Schema refreshed")
-    (message "Schema refresh failed")))
+  (clutch--refresh-current-schema))
 
 (defun clutch--ensure-columns (conn schema table)
   "Ensure column info for TABLE is loaded in SCHEMA.
@@ -2702,8 +2751,8 @@ Fetches from the backend if not yet cached.  Returns column list."
               (state (plist-get entry :state)))
     (pcase state
       ('refreshing " · schema…")
-      ('stale " · schema~")
-      ('failed " · schema!")
+      ('stale " · schema~ refresh:C-c C-s")
+      ('failed " · schema! retry:C-c C-s")
       (_ nil))))
 
 (defun clutch--ensure-column-details (conn table)
@@ -3528,6 +3577,9 @@ If EXPANDED-P, also insert column detail lines using CONN."
                      (or (clutch-db-database conn) "?")
                      (length tables))
              'face 'font-lock-comment-face))
+    (when-let* ((status-line (clutch--schema-browser-status-line conn)))
+      (insert (propertize status-line 'face 'font-lock-comment-face))
+      (insert "\n"))
     (dolist (tbl tables)
       (clutch-schema--insert-table
        conn tbl (member tbl expanded)))))
@@ -3547,7 +3599,9 @@ If EXPANDED-P, also insert column detail lines using CONN."
                   clutch-schema--tables tables)
       (clutch-schema--render)
       (goto-char (point-min)))
-    (pop-to-buffer buf '((display-buffer-at-bottom)))))
+    (pop-to-buffer buf '((display-buffer-at-bottom)))
+    (when-let* ((hint (clutch--schema-cache-guidance conn)))
+      (message "%s  Use g or C-c C-s to refresh cache state." hint))))
 
 (defun clutch-schema-toggle-expand ()
   "Toggle column expansion for the table at point."
@@ -3597,7 +3651,9 @@ can offer table-specific actions on the completion candidates."
   "Show the DDL of TABLE using SHOW CREATE TABLE."
   (interactive
    (list (if-let* ((schema (clutch--schema-for-connection)))
-             (clutch--read-table-name "Table: " (hash-table-keys schema))
+             (progn
+               (clutch--warn-schema-cache-state)
+               (clutch--read-table-name "Table: " (hash-table-keys schema)))
            (read-string "Table: "))))
   (clutch--ensure-connection)
   (let* ((conn clutch-connection)
@@ -3634,11 +3690,11 @@ can offer table-specific actions on the completion candidates."
 (defun clutch-schema-refresh ()
   "Refresh the schema browser and cache."
   (interactive)
-  (clutch--ensure-connection)
-  (clutch--refresh-schema-cache clutch-connection)
-  (setq clutch-schema--tables
-        (clutch-db-list-tables clutch-connection))
   (let ((line (line-number-at-pos)))
+    (clutch--refresh-current-schema t)
+    (when-let* ((schema (clutch--schema-for-connection)))
+      (setq clutch-schema--tables
+            (sort (hash-table-keys schema) #'string<)))
     (clutch-schema--render)
     (goto-char (point-min))
     (forward-line (1- line))))
@@ -3673,6 +3729,8 @@ Prompts for TABLE via `completing-read' using schema cache table names."
                 (tables (or (and schema (hash-table-keys schema))
                             (progn (clutch--ensure-connection)
                                    (clutch-db-list-tables clutch-connection)))))
+           (when schema
+             (clutch--warn-schema-cache-state))
            (clutch--read-table-name "Browse table: " tables))))
   (clutch--ensure-connection)
   (let ((sql (format "SELECT * FROM %s;"
@@ -4396,27 +4454,15 @@ Scans text properties across the line."
   (let ((parent-buf (current-buffer))
         (field-name clutch-result-edit--column-name)
         (parent-text (buffer-substring-no-properties (point-min) (point-max)))
-        (buf (get-buffer-create
-              (format "*clutch-edit-json: %s*" clutch-result-edit--column-name))))
-    (with-current-buffer buf
-      (erase-buffer)
-      (insert parent-text)
-      (goto-char (point-min))
-      (condition-case nil
-          (unless (string-empty-p (buffer-string))
-            (json-pretty-print-buffer))
-        (error nil))
-      (clutch-result-insert--json-editor-mode)
-      (let ((map (copy-keymap (or (current-local-map) (make-sparse-keymap)))))
-        (define-key map (kbd "C-c C-c") #'clutch-result-edit-json-finish)
-        (define-key map (kbd "C-c C-k") #'clutch-result-edit-json-cancel)
-        (use-local-map map))
-      (setq-local header-line-format
-                  (format " JSON field %s  |  C-c C-c: save  C-c C-k: cancel"
-                          field-name)
-                  clutch-result-edit-json--parent-buffer parent-buf
-                  clutch-result-edit-json--field-name field-name))
-    (pop-to-buffer buf)))
+        (buf-name (format "*clutch-edit-json: %s*" clutch-result-edit--column-name)))
+    (let ((buf (clutch--open-json-sub-editor
+                buf-name parent-text field-name
+                #'clutch-result-edit-json-finish
+                #'clutch-result-edit-json-cancel)))
+      (with-current-buffer buf
+        (setq-local clutch-result-edit-json--parent-buffer parent-buf
+                    clutch-result-edit-json--field-name field-name))
+      buf)))
 
 (defun clutch-result-edit-json-finish ()
   "Save the JSON sub-editor contents back to the parent edit buffer."
@@ -4484,7 +4530,11 @@ Scans text properties across the line."
                         (with-current-buffer result-buf
                           (clutch-result--apply-edit ridx cidx new-value))))
           (setq-local clutch-result--edit-result-buffer result-buf))
-        (pop-to-buffer edit-buf)))))
+        (if (with-current-buffer edit-buf
+              (clutch-result-edit--json-p))
+            (with-current-buffer edit-buf
+              (clutch-result-edit-json-field))
+          (pop-to-buffer edit-buf))))))
 
 (defun clutch-result-edit-finish ()
   "Stage the edit and return to the result buffer.
@@ -5161,6 +5211,31 @@ Use \\[clutch-result-commit] in the result buffer to commit."
    ((fboundp 'js-mode) (js-mode))
    (t (text-mode))))
 
+(defun clutch--open-json-sub-editor (buffer-name initial-text field-name finish-fn cancel-fn)
+  "Open a shared JSON sub-editor buffer and return it.
+BUFFER-NAME is the buffer to reuse or create.
+INITIAL-TEXT seeds the editor contents.
+FIELD-NAME is shown in the header line.
+FINISH-FN and CANCEL-FN become the local `C-c C-c' / `C-c C-k' bindings."
+  (let ((buf (get-buffer-create buffer-name)))
+    (with-current-buffer buf
+      (erase-buffer)
+      (insert initial-text)
+      (goto-char (point-min))
+      (condition-case nil
+          (unless (string-empty-p initial-text)
+            (json-pretty-print-buffer))
+        (error nil))
+      (clutch-result-insert--json-editor-mode)
+      (let ((map (copy-keymap (or (current-local-map) (make-sparse-keymap)))))
+        (define-key map (kbd "C-c C-c") finish-fn)
+        (define-key map (kbd "C-c C-k") cancel-fn)
+        (use-local-map map))
+      (setq-local header-line-format
+                  (format " JSON field %s  |  C-c C-c: save  C-c C-k: cancel"
+                          field-name)))
+    (pop-to-buffer buf)))
+
 (defun clutch-result-insert--current-field-or-error ()
   "Return the structured field at point or signal a user error."
   (or (clutch-result-insert--field-state-at-position)
@@ -5406,25 +5481,17 @@ If nothing handles the completion, fall back to `completing-read'."
          (parent-buf (current-buffer)))
     (unless (clutch-result-insert--json-field-p field)
       (user-error "Field %s is not a JSON column" field-name))
-    (let ((buf (get-buffer-create
+    (let ((buf (clutch--open-json-sub-editor
                 (format "*clutch-insert-json: %s.%s*"
-                        clutch-result-insert--table field-name))))
+                        clutch-result-insert--table field-name)
+                value field-name
+                #'clutch-result-insert-json-finish
+                #'clutch-result-insert-json-cancel)))
       (with-current-buffer buf
-        (erase-buffer)
-        (insert value)
-        (goto-char (point-min))
-        (condition-case nil
-            (unless (string-empty-p value)
-              (json-pretty-print-buffer))
-          (error nil))
-        (clutch-result-insert--json-editor-mode)
         (clutch-result-insert-json-mode 1)
-        (setq-local clutch-result-insert-json--parent-buffer parent-buf)
-        (setq-local clutch-result-insert-json--field-name field-name
-                    header-line-format
-                    (format " JSON field %s  |  C-c C-c: save  C-c C-k: cancel"
-                            field-name)))
-      (pop-to-buffer buf))))
+        (setq-local clutch-result-insert-json--parent-buffer parent-buf
+                    clutch-result-insert-json--field-name field-name))
+      buf)))
 
 (defun clutch-result-insert-json-finish ()
   "Save the JSON editor contents back to the parent insert buffer."

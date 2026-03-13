@@ -153,6 +153,17 @@ Both buffers now follow the same split:
 The long-form error still matters for correctness, but it does not belong in
 the primary form layout.
 
+The JSON child editor is now also implemented as a shared sub-editor path
+instead of two separate open-buffer flows.  Insert and edit still write back to
+different parent contexts, but the JSON editor lifecycle itself is now one
+helper, not two near-identical copies.
+
+Once that shared helper existed, the next UX step became straightforward:
+editing a JSON cell now enters the JSON sub-editor directly.  The plain
+single-field edit buffer still exists as the parent context for staging and for
+cancel/fallback behavior, but it is no longer the first stop for the common
+JSON-editing path.
+
 ### Why not bring `default` and `generated` over too?
 
 Because the semantics are different.

@@ -789,6 +789,36 @@
                                           (format "%s" header-line-format))))))))
       (kill-buffer result-buf))))
 
+(ert-deftest clutch-test-edit-cell-opens-json-sub-editor-directly ()
+  "JSON cells should jump straight into the JSON sub-editor."
+  (let ((result-buf (generate-new-buffer "*clutch-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("payload")
+                        clutch--result-column-defs '((:name "payload" :type-category json))
+                        clutch--result-rows '(("{\"a\":1}"))))
+          (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+                     (lambda () (list 0 0 "{\"a\":1}")))
+                    ((symbol-function 'clutch-result--detect-table)
+                     (lambda () "shipping_incidents"))
+                    ((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table)
+                       (list (list :name "payload" :type "json"))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args) buf)))
+            (with-current-buffer result-buf
+              (let ((buf (clutch-result-edit-cell)))
+                (should (string-match-p "\\*clutch-edit-json: payload\\*" (buffer-name buf)))
+                (with-current-buffer buf
+                  (should (equal clutch-result-edit-json--field-name "payload"))
+                  (should (string-match-p "JSON field payload"
+                                          (format "%s" header-line-format)))
+                  (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                                 "{\n  \"a\": 1\n}")))))))
+      (kill-buffer result-buf))))
+
 (ert-deftest clutch-test-edit-set-current-time-replaces-existing-value ()
   "C-c . in edit buffers should replace the current value with now."
   (with-temp-buffer
@@ -960,6 +990,45 @@
               (should (equal (with-current-buffer parent-buf (buffer-string))
                              "{\"a\":2}")))))
       (kill-buffer parent-buf))))
+
+(ert-deftest clutch-test-json-sub-editor-open-path-is-shared ()
+  "Insert and edit JSON editors should both reuse the shared open helper."
+  (let ((insert-parent (generate-new-buffer "*clutch-insert-parent*"))
+        (edit-parent (generate-new-buffer "*clutch-edit-parent*"))
+        opened
+        spawned)
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--open-json-sub-editor)
+                   (lambda (buffer-name initial-text field-name finish-fn cancel-fn)
+                     (let ((buf (generate-new-buffer buffer-name)))
+                       (push (list buffer-name initial-text field-name finish-fn cancel-fn) opened)
+                       (push buf spawned)
+                       buf)))
+                  ((symbol-function 'clutch-result-insert--current-field-or-error)
+                   (lambda () '(:name "payload" :value "{\"a\":1}")))
+                  ((symbol-function 'clutch-result-insert--json-field-p)
+                   (lambda (_field) t))
+                  ((symbol-function 'clutch-result-insert--sync-field-value) #'ignore))
+          (with-current-buffer insert-parent
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--table "events")
+            (clutch-result-insert-edit-json-field))
+          (with-current-buffer edit-parent
+            (insert "{\"b\":2}")
+            (clutch-result-edit-mode 1)
+            (setq-local clutch-result-edit--column-name "payload"
+                        clutch-result-edit--column-def '(:name "payload" :type-category json)
+                        clutch-result-edit--column-detail '(:name "payload" :type "json"))
+            (clutch-result-edit-json-field))
+          (should (= (length opened) 2))
+          (should (equal (mapcar (lambda (entry) (nth 2 entry)) opened)
+                         '("payload" "payload"))))
+      (mapc (lambda (buf)
+              (when (buffer-live-p buf)
+                (kill-buffer buf)))
+            spawned)
+      (kill-buffer insert-parent)
+      (kill-buffer edit-parent))))
 
 (ert-deftest clutch-test-insert-commit-replaces-existing-pending-insert ()
   "Committing a re-edited insert should replace the staged entry in place."
@@ -1294,6 +1363,75 @@
         (puthash "dev-key" '(:state ready :tables 42) clutch--schema-status-cache)
         (clutch--update-console-buffer-name)
         (should (equal (buffer-name) "*clutch: dev* [schema 42t]"))))))
+
+(ert-deftest clutch-test-schema-status-mode-line-suffix-includes-action-hints ()
+  "Stale and failed schema states should advertise the recovery key."
+  (let ((clutch--schema-status-cache (make-hash-table :test 'equal)))
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key")))
+      (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
+      (should (equal (clutch--schema-status-mode-line-suffix 'fake-conn)
+                     " · schema~ refresh:C-c C-s"))
+      (puthash "dev-key" '(:state failed) clutch--schema-status-cache)
+      (should (equal (clutch--schema-status-mode-line-suffix 'fake-conn)
+                     " · schema! retry:C-c C-s"))
+      (puthash "dev-key" '(:state refreshing) clutch--schema-status-cache)
+      (should (equal (clutch--schema-status-mode-line-suffix 'fake-conn)
+                     " · schema…")))))
+
+(ert-deftest clutch-test-schema-cache-guidance-reflects-recovery-state ()
+  "Schema cache guidance should explain how to recover from non-ready states."
+  (let ((clutch--schema-status-cache (make-hash-table :test 'equal)))
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key")))
+      (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
+      (should (string-match-p "C-c C-s"
+                              (clutch--schema-cache-guidance 'fake-conn)))
+      (puthash "dev-key" '(:state failed) clutch--schema-status-cache)
+      (should (string-match-p "retry"
+                              (clutch--schema-cache-guidance 'fake-conn)))
+      (puthash "dev-key" '(:state refreshing) clutch--schema-status-cache)
+      (should (string-match-p "in progress"
+                              (clutch--schema-cache-guidance 'fake-conn)))
+      (puthash "dev-key" '(:state ready :tables 2) clutch--schema-status-cache)
+      (should-not (clutch--schema-cache-guidance 'fake-conn)))))
+
+(ert-deftest clutch-test-schema-browser-status-line-reflects-recovery-state ()
+  "Schema browser status line should surface stale/failed/refreshing states."
+  (let ((clutch--schema-status-cache (make-hash-table :test 'equal)))
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key")))
+      (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
+      (should (equal (clutch--schema-browser-status-line 'fake-conn)
+                     "-- schema cache stale · refresh with g or C-c C-s\n"))
+      (puthash "dev-key" '(:state failed) clutch--schema-status-cache)
+      (should (equal (clutch--schema-browser-status-line 'fake-conn)
+                     "-- schema refresh failed · retry with g or C-c C-s\n"))
+      (puthash "dev-key" '(:state refreshing) clutch--schema-status-cache)
+      (should (equal (clutch--schema-browser-status-line 'fake-conn)
+                     "-- schema refresh in progress\n"))
+      (puthash "dev-key" '(:state ready :tables 2) clutch--schema-status-cache)
+      (should-not (clutch--schema-browser-status-line 'fake-conn)))))
+
+(ert-deftest clutch-test-refresh-current-schema-avoids-duplicate-refresh ()
+  "Refreshing state should block duplicate schema refresh attempts."
+  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
+        seen-message
+        refresh-called)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch--refresh-schema-cache)
+               (lambda (_conn) (setq refresh-called t) t))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq seen-message (apply #'format fmt args)))))
+      (puthash "dev-key" '(:state refreshing) clutch--schema-status-cache)
+      (with-temp-buffer
+        (setq-local clutch-connection 'fake-conn)
+        (should-not (clutch--refresh-current-schema))
+        (should-not refresh-called)
+        (should (string-match-p "already in progress" seen-message))))))
 
 (ert-deftest clutch-test-icon-supports-octicon-family ()
   "Icon helper should dispatch octicon names when nerd-icons is available."
@@ -2578,28 +2716,35 @@
 
 (ert-deftest clutch-test-schema-toggle-expand-keeps-point-on-table-header ()
   "Toggling expand from a column line should keep point on that table header."
-  (with-temp-buffer
-    (clutch-schema-mode)
-    (setq-local clutch-connection 'fake-conn
-                clutch-schema--tables '("a" "b")
-                clutch-schema--expanded-tables '("a"))
-    (cl-letf (((symbol-function 'clutch-db-database)
-               (lambda (_conn) "db"))
-              ((symbol-function 'clutch-db-column-details)
-               (lambda (_conn tbl)
-                 (if (equal tbl "a")
-                     (list (list :name "c1" :type "int")
-                           (list :name "c2" :type "int")
-                           (list :name "c3" :type "int"))
-                   nil))))
-      (clutch-schema--render)
-      (goto-char (point-min))
-      (search-forward "c2")
-      (beginning-of-line)
-      (should (equal (clutch-schema--table-at-point) "a"))
-      (clutch-schema-toggle-expand)
-      (should (equal (clutch-schema--table-at-point) "a"))
-      (should (looking-at-p "▸ a")))))
+  (let ((clutch--schema-status-cache (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (clutch-schema-mode)
+      (setq-local clutch-connection 'fake-conn
+                  clutch-schema--tables '("a" "b")
+                  clutch-schema--expanded-tables '("a"))
+      (cl-letf (((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "dev-key"))
+                ((symbol-function 'clutch-db-database)
+                 (lambda (_conn) "db"))
+                ((symbol-function 'clutch-db-column-details)
+                 (lambda (_conn tbl)
+                   (if (equal tbl "a")
+                       (list (list :name "c1" :type "int")
+                             (list :name "c2" :type "int")
+                             (list :name "c3" :type "int"))
+                     nil))))
+        (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
+        (clutch-schema--render)
+        (goto-char (point-min))
+        (should (search-forward "-- Tables in db (2)" nil t))
+        (should (search-forward "-- schema cache stale · refresh with g or C-c C-s" nil t))
+        (goto-char (point-min))
+        (search-forward "c2")
+        (beginning-of-line)
+        (should (equal (clutch-schema--table-at-point) "a"))
+        (clutch-schema-toggle-expand)
+        (should (equal (clutch-schema--table-at-point) "a"))
+        (should (looking-at-p "▸ a"))))))
 
 (ert-deftest clutch-test-browse-table-inserts-escaped-select ()
   "Browse table command should escape identifier before inserting SQL."
@@ -3332,15 +3477,68 @@ Use `cl-letf' to bypass `mysql--ensure-data' in tests."
 ;;; Fix 4 — clutch-refresh-schema
 
 (ert-deftest clutch-test-refresh-schema-calls-refresh ()
-  "clutch-refresh-schema calls clutch--refresh-schema-cache."
+  "clutch-refresh-schema delegates to the shared refresh helper."
   (let (refresh-called)
-    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-              ((symbol-function 'clutch--refresh-schema-cache)
-               (lambda (_conn) (setq refresh-called t))))
+    (cl-letf (((symbol-function 'clutch--refresh-current-schema)
+               (lambda (&optional _quiet) (setq refresh-called t))))
       (with-temp-buffer
         (setq-local clutch-connection 'fake-conn)
         (clutch-refresh-schema)
         (should refresh-called)))))
+
+(ert-deftest clutch-test-schema-refresh-reuses-current-connection-refresh ()
+  "Schema browser refresh should reuse the shared connection refresh path."
+  (let ((refresh-called nil)
+        (render-called nil))
+    (with-temp-buffer
+      (clutch-schema-mode)
+      (setq-local clutch-connection 'fake-conn
+                  clutch-schema--tables '("old"))
+      (cl-letf (((symbol-function 'clutch--refresh-current-schema)
+                 (lambda (&optional quiet)
+                   (setq refresh-called quiet)
+                   t))
+                ((symbol-function 'clutch--schema-for-connection)
+                 (lambda ()
+                   (let ((h (make-hash-table :test 'equal)))
+                     (puthash "b" nil h)
+                     (puthash "a" nil h)
+                     h)))
+                ((symbol-function 'clutch-schema--render)
+                 (lambda () (setq render-called t))))
+        (clutch-schema-refresh)
+        (should (eq refresh-called t))
+        (should render-called)
+        (should (equal clutch-schema--tables '("a" "b")))))))
+
+(ert-deftest clutch-test-describe-table-warns-when-schema-cache-is-stale ()
+  "Cache-backed table prompts should surface stale-schema recovery hints."
+  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
+        hinted)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch--schema-for-connection)
+               (lambda ()
+                 (let ((h (make-hash-table :test 'equal)))
+                   (puthash "users" nil h)
+                   h)))
+              ((symbol-function 'clutch--read-table-name)
+               (lambda (_prompt _tables) "users"))
+              ((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-show-create-table)
+               (lambda (_conn _table) "CREATE TABLE users (id INT)"))
+              ((symbol-function 'sql-mode) #'ignore)
+              ((symbol-function 'sql-set-product) #'ignore)
+              ((symbol-function 'font-lock-ensure) #'ignore)
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _args) nil))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq hinted (apply #'format fmt args)))))
+      (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
+      (with-temp-buffer
+        (setq-local clutch-connection 'fake-conn)
+        (call-interactively #'clutch-describe-table))
+      (should (string-match-p "Schema cache is stale" hinted)))))
 
 ;;; Fix 5 — ob-clutch--disconnect-all
 

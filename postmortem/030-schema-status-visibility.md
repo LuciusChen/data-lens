@@ -86,11 +86,53 @@ Successful schema-affecting statements now mark schema state stale:
 That does not auto-refresh schema immediately; it simply stops implying that
 the old cache is still current after DDL.
 
+## Follow-Through: Turn State Into a Recovery Hint
+
+The original change made schema freshness visible, but still left too much of
+the recovery step implicit. Seeing `schema~` or `schema!` was truthful, but the
+UI still expected the user to remember which command repaired that state.
+
+The follow-through decision is intentionally small:
+
+- keep buffer-name markers compact
+- use the console mode-line to append the direct recovery hint
+- converge console refresh and schema-browser refresh on the same
+  connection-level refresh action
+
+This keeps the state model simple while making the stale/failed path more
+operational:
+
+- `schema~` now points directly to refresh
+- `schema!` now points directly to retry
+- schema browser refresh reuses the same connection refresh semantics instead of
+  behaving like a parallel workflow
+
+The next follow-through keeps the same philosophy for cache-backed actions:
+
+- do not auto-refresh schema just because a prompt wants table names
+- do not silently pretend cached metadata is current
+- do show a direct recovery hint before cache-backed table prompts and similar
+  schema-dependent actions
+
+That keeps performance predictable while still telling the truth about cache
+freshness.
+
+The same state should remain visible after the user leaves the console and
+enters the schema browser.  The schema browser now renders a compact status
+line near the top of the buffer for `stale`, `failed`, and `refreshing`
+states, using the same recovery vocabulary (`g` / `C-c C-s`) instead of
+inventing a different browser-only language.
+
 ## Known Limitations
 
 - The state model currently tracks table-name refresh freshness, not every lazy
   column-detail cache individually.
-- A stale state tells the truth ("do not trust this cache as current"), but it
-  does not yet provide one-click background refresh.
+- The model still does not auto-refresh schema in the background; this remains
+  deliberate because synchronous or overly eager refreshes can regress slow
+  backends.
+- Completion and other cache-backed helpers now warn more clearly when schema is
+  stale or failed, but they still do not auto-heal the cache on their own.
+- The schema browser status line is still a summary, not a richer background
+  job UI; it does not show refresh progress beyond the current coarse state.
 - PostgreSQL native `query-timeout` remains a separate in-progress effort and
   is not part of this change.
