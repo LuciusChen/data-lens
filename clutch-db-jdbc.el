@@ -713,6 +713,26 @@ returning tables from SYS/SYSTEM and other visible schemas."
      rpc-timeout)
     t))
 
+(cl-defmethod clutch-db-column-details-async ((conn clutch-jdbc-conn) table callback
+                                              &optional errback)
+  "Fetch JDBC column details for TABLE on CONN asynchronously."
+  (let* ((params (clutch-jdbc-conn-params conn))
+         (schema (or (plist-get params :schema)
+                     (clutch-jdbc--default-schema conn)))
+         (rpc-timeout (or (plist-get params :rpc-timeout)
+                          clutch-jdbc-rpc-timeout-seconds)))
+    (clutch-jdbc--rpc-async
+     "get-columns"
+     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+       (table . ,table)
+       ,@(when schema `((schema . ,schema))))
+     (lambda (result)
+       (when callback
+         (funcall callback (plist-get result :columns))))
+     errback
+     rpc-timeout)
+    t))
+
 (cl-defmethod clutch-db-list-columns ((conn clutch-jdbc-conn) table)
   "Return column names for TABLE on JDBC CONN using DatabaseMetaData."
   (let* ((params  (clutch-jdbc-conn-params conn))

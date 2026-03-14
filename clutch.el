@@ -2683,6 +2683,11 @@ Values are hash-tables mapping table-name → list of column-name strings.")
 Values are hash-tables mapping table-name → list of column-detail plists
 as returned by `clutch-db-column-details'.")
 
+(defvar clutch--column-details-status-cache (make-hash-table :test 'equal)
+  "Per-connection async status for column detail fetches.
+Values are hash-tables mapping table-name to a plist with :state and
+optional :error.")
+
 (defvar clutch--table-comment-cache (make-hash-table :test 'equal)
   "Cache for table comments.  Keys are connection-key strings.
 Values are hash-tables mapping table-name → comment string or nil.")
@@ -2778,6 +2783,7 @@ When TICKET is non-nil, ignore the update unless it is still current."
         (puthash tbl nil schema))
       (puthash key schema clutch--schema-cache)
       (remhash key clutch--column-details-cache)
+      (remhash key clutch--column-details-status-cache)
       (remhash key clutch--table-comment-cache)
       (remhash key clutch--help-doc-cache)
       (clutch--set-schema-status conn 'ready (hash-table-count schema))
@@ -2865,6 +2871,52 @@ or nil on error."
             (puthash table details cache)
             details)
         (clutch-db-error nil)))))
+
+(defun clutch--column-details-status (conn table)
+  "Return async column-detail status plist for TABLE on CONN, or nil."
+  (let* ((key (clutch--connection-key conn))
+         (cache (gethash key clutch--column-details-status-cache)))
+    (and cache (gethash table cache))))
+
+(defun clutch--cached-column-details (conn table)
+  "Return cached column details for TABLE on CONN, or nil if not loaded."
+  (let* ((key (clutch--connection-key conn))
+         (cache (gethash key clutch--column-details-cache))
+         (details (and cache (gethash table cache 'missing))))
+    (unless (eq details 'missing) details)))
+
+(defun clutch--set-column-details-status (conn table state &optional error-message)
+  "Record async column-detail STATE for TABLE on CONN."
+  (let* ((key (clutch--connection-key conn))
+         (cache (or (gethash key clutch--column-details-status-cache)
+                    (let ((h (make-hash-table :test 'equal)))
+                      (puthash key h clutch--column-details-status-cache)
+                      h))))
+    (puthash table (list :state state :error error-message) cache)))
+
+(defun clutch--ensure-column-details-async (conn table)
+  "Start an async column-detail fetch for TABLE on CONN when possible."
+  (unless (or (clutch--cached-column-details conn table)
+              (eq (plist-get (clutch--column-details-status conn table) :state)
+                  'loading))
+    (when (clutch-db-column-details-async
+           conn table
+           (lambda (details)
+             (let* ((key (clutch--connection-key conn))
+                    (cache (or (gethash key clutch--column-details-cache)
+                               (let ((h (make-hash-table :test 'equal)))
+                                 (puthash key h clutch--column-details-cache)
+                                 h)))
+                    (status-cache (gethash key clutch--column-details-status-cache)))
+               (puthash table details cache)
+               (when status-cache
+                 (remhash table status-cache))
+               (clutch--refresh-schema-status-ui conn)))
+           (lambda (message)
+             (clutch--set-column-details-status conn table 'failed message)
+             (clutch--refresh-schema-status-ui conn)))
+      (clutch--set-column-details-status conn table 'loading)
+      t)))
 
 (defun clutch--ensure-table-comment (conn table)
   "Return the comment for TABLE on CONN, loading lazily if needed.
@@ -3688,23 +3740,39 @@ SQL keyword/function docs are shown even without a connection."
 
 (defun clutch-schema--insert-columns (conn tbl)
   "Insert indented column detail lines for TBL using CONN."
-  (condition-case nil
-      (let ((details (clutch-db-column-details conn tbl)))
-        (when details
-          (let ((last-idx (1- (length details))))
-            (cl-loop for col in details
-                     for i from 0
-                     for branch = (if (= i last-idx) "└── " "├── ")
-                     do (insert
-                         (propertize
-                          (format "  %s%-20s %s%s\n"
-                                  branch
-                                  (plist-get col :name)
-                                  (plist-get col :type)
-                                  (clutch-schema--column-annotation col))
+  (let* ((sync-p (clutch-db-completion-sync-columns-p conn))
+         (details (if sync-p
+                      (condition-case nil
+                          (clutch-db-column-details conn tbl)
+                        (clutch-db-error nil))
+                    (or (clutch--cached-column-details conn tbl)
+                        (progn
+                          (clutch--ensure-column-details-async conn tbl)
+                          nil))))
+         (status (unless sync-p (clutch--column-details-status conn tbl))))
+    (cond
+     (details
+      (let ((last-idx (1- (length details))))
+        (cl-loop for col in details
+                 for i from 0
+                 for branch = (if (= i last-idx) "└── " "├── ")
+                 do (insert
+                     (propertize
+                      (format "  %s%-20s %s%s\n"
+                              branch
+                              (plist-get col :name)
+                              (plist-get col :type)
+                              (clutch-schema--column-annotation col))
+                      'clutch-schema-table tbl
+                      'face 'font-lock-comment-face)))))
+     ((eq (plist-get status :state) 'failed)
+      (insert (propertize "  └── column details unavailable\n"
                           'clutch-schema-table tbl
-                          'face 'font-lock-comment-face))))))
-    (clutch-db-error nil)))
+                          'face 'font-lock-warning-face)))
+     ((not sync-p)
+      (insert (propertize "  └── loading column details...\n"
+                          'clutch-schema-table tbl
+                          'face 'shadow))))))
 
 (defun clutch-schema--insert-table (conn tbl expanded-p)
   "Insert a table line for TBL.
@@ -3750,7 +3818,12 @@ Preserve the current table when possible."
   (interactive)
   (clutch--ensure-connection)
   (let* ((conn clutch-connection)
-         (tables (clutch-db-list-tables conn))
+         (schema (clutch--schema-for-connection))
+         (eager-p (clutch-db-eager-schema-refresh-p conn))
+         (tables (cond
+                  (schema (sort (hash-table-keys schema) #'string<))
+                  (eager-p (clutch-db-list-tables conn))
+                  (t nil)))
          (buf (get-buffer-create
                (format "*clutch: %s tables*"
                        (or (clutch-db-database conn) "?")))))
@@ -3761,6 +3834,8 @@ Preserve the current table when possible."
       (clutch-schema--render)
       (goto-char (point-min)))
     (pop-to-buffer buf '((display-buffer-at-bottom)))
+    (when (and (not eager-p) (null schema))
+      (clutch--refresh-current-schema t))
     (when-let* ((hint (clutch--schema-cache-guidance conn)))
       (message "%s  Use g or C-c C-s to refresh cache state." hint))))
 

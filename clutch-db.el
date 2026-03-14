@@ -146,6 +146,17 @@ was started, nil when unsupported.")
   "Backends without asynchronous schema refresh support return nil."
   nil)
 
+(cl-defgeneric clutch-db-column-details-async (conn table callback &optional errback)
+  "Start an asynchronous column-detail fetch for TABLE on CONN.
+CALLBACK receives the column detail plist list on success.  ERRBACK
+receives an error message string on failure.  Return non-nil when async
+fetch was started, nil when unsupported.")
+
+(cl-defmethod clutch-db-column-details-async ((_conn t) _table _callback
+                                              &optional _errback)
+  "Backends without asynchronous column detail support return nil."
+  nil)
+
 ;; Query
 
 (cl-defgeneric clutch-db-query (conn sql)
