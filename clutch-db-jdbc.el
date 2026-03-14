@@ -50,13 +50,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.1.4"
+(defcustom clutch-jdbc-agent-version "0.1.5"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "3e12ce01959c74d8886580c5b14166e5efd8996bbab3cdda84dc77bb6581cb91"
+  "ffddcbfec38ef72518136b3f9c2ee7922ae39924c09c6b25942dd1f5b5594cea"
   "Expected SHA-256 for the bundled clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -110,7 +110,9 @@ Examples:
     (oracle-i18n . (:maven "com.oracle.database.nls:orai18n:21.13.0.0"
                     :filename "orai18n.jar"))
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
-                  :filename "db2jcc4.jar")))
+                  :filename "db2jcc4.jar"))
+    (redshift  . (:maven "com.amazon.redshift:redshift-jdbc42:2.1.0.30"
+                  :filename "redshift-jdbc42.jar")))
   "Known JDBC driver sources.
 All entries support auto-download via `clutch-jdbc-install-driver'.")
 
@@ -410,35 +412,30 @@ or :sid (Oracle SID-style connection)."
 
 ;;;; Connect function
 
+(defun clutch-jdbc--apply-timeout-defaults (params)
+  "Return a copy of PARAMS with absent timeout keys set to their global defaults."
+  (let ((p (copy-sequence params)))
+    (setq p (plist-put p :connect-timeout
+                       (or (plist-get p :connect-timeout) clutch-connect-timeout-seconds)))
+    (setq p (plist-put p :read-idle-timeout
+                       (or (plist-get p :read-idle-timeout) clutch-read-idle-timeout-seconds)))
+    (setq p (plist-put p :query-timeout
+                       (or (plist-get p :query-timeout) clutch-query-timeout-seconds)))
+    (setq p (plist-put p :rpc-timeout
+                       (or (plist-get p :rpc-timeout) clutch-jdbc-rpc-timeout-seconds)))
+    p))
+
 (defun clutch-db-jdbc-connect (driver params)
   "Connect to a JDBC data source of type DRIVER using PARAMS plist.
 DRIVER is a symbol (e.g. \\='oracle, \\='sqlserver) captured by the
 registration closure — users do not pass it directly.
 Returns a `clutch-jdbc-conn'."
   (clutch-jdbc--ensure-agent)
-  (let* ((normalized-params
-          (let ((normalized (copy-sequence params)))
-            (setq normalized
-                  (plist-put normalized :connect-timeout
-                             (or (plist-get normalized :connect-timeout)
-                                 clutch-connect-timeout-seconds)))
-            (setq normalized
-                  (plist-put normalized :read-idle-timeout
-                             (or (plist-get normalized :read-idle-timeout)
-                                 clutch-read-idle-timeout-seconds)))
-            (setq normalized
-                  (plist-put normalized :query-timeout
-                             (or (plist-get normalized :query-timeout)
-                                 clutch-query-timeout-seconds)))
-            (setq normalized
-                  (plist-put normalized :rpc-timeout
-                             (or (plist-get normalized :rpc-timeout)
-                                 clutch-jdbc-rpc-timeout-seconds)))
-            normalized))
+  (let* ((normalized-params (clutch-jdbc--apply-timeout-defaults params))
          (url      (clutch-jdbc--build-url driver normalized-params))
          (user     (plist-get normalized-params :user))
          (password (plist-get normalized-params :password))
-         (props    (plist-get normalized-params :props))
+         (props    (clutch-jdbc--normalize-props (plist-get normalized-params :props)))
          (connect-timeout (plist-get normalized-params :connect-timeout))
          (read-idle-timeout (plist-get normalized-params :read-idle-timeout))
          (result   (clutch-jdbc--rpc
@@ -533,15 +530,29 @@ Returns a `clutch-jdbc-conn'."
                      :type-category (clutch-jdbc--type-category type)))
              col-names col-types))
 
+(defun clutch-jdbc--normalize-props (props)
+  "Return PROPS as an alist with string keys, suitable for JSON encoding.
+Accepts either an alist ((\"key\" . val) ...) or a plist (:key val ...)."
+  (when props
+    (if (consp (car props))
+        props
+      (cl-loop for (k v) on props by #'cddr
+               collect (cons (substring (symbol-name k) 1) v)))))
+
 (defun clutch-jdbc--normalize-row (row)
   "Convert JDBC-specific value representations in ROW to generic forms.
-Blob plists with :text content become plain strings."
+Blob plists with :text content become plain strings.
+Clob plists become their :preview string."
   (mapcar (lambda (val)
-            (if (and (listp val)
-                     (equal (plist-get val :__type) "blob")
-                     (plist-get val :text))
-                (plist-get val :text)
-              val))
+            (cond
+             ((and (listp val)
+                   (equal (plist-get val :__type) "blob")
+                   (plist-get val :text))
+              (plist-get val :text))
+             ((and (listp val)
+                   (equal (plist-get val :__type) "clob"))
+              (plist-get val :preview))
+             (t val)))
           row))
 
 (cl-defmethod clutch-db-query ((conn clutch-jdbc-conn) sql)
@@ -678,13 +689,16 @@ Oracle uses the username as schema (uppercased).  Other backends return nil."
     (when-let* ((user (plist-get (clutch-jdbc-conn-params conn) :user)))
       (upcase user))))
 
+(defun clutch-jdbc--conn-schema (conn)
+  "Return the effective schema for CONN: explicit :schema or the Oracle default."
+  (or (plist-get (clutch-jdbc-conn-params conn) :schema)
+      (clutch-jdbc--default-schema conn)))
+
 (cl-defmethod clutch-db-list-tables ((conn clutch-jdbc-conn))
   "Return table names for JDBC CONN using DatabaseMetaData.
 For Oracle, defaults the schema filter to the connected username to avoid
 returning tables from SYS/SYSTEM and other visible schemas."
-  (let* ((params  (clutch-jdbc-conn-params conn))
-         (schema  (or (plist-get params :schema)
-                      (clutch-jdbc--default-schema conn)))
+  (let* ((schema  (clutch-jdbc--conn-schema conn))
          (result  (clutch-jdbc--rpc
                    "get-tables"
                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -696,8 +710,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
                                               &optional errback)
   "Refresh JDBC table names for CONN asynchronously."
   (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (or (plist-get params :schema)
-                     (clutch-jdbc--default-schema conn)))
+         (schema (clutch-jdbc--conn-schema conn))
          (rpc-timeout (or (plist-get params :rpc-timeout)
                           clutch-jdbc-rpc-timeout-seconds)))
     (clutch-jdbc--rpc-async
@@ -717,8 +730,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
                                               &optional errback)
   "Fetch JDBC column details for TABLE on CONN asynchronously."
   (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (or (plist-get params :schema)
-                     (clutch-jdbc--default-schema conn)))
+         (schema (clutch-jdbc--conn-schema conn))
          (rpc-timeout (or (plist-get params :rpc-timeout)
                           clutch-jdbc-rpc-timeout-seconds)))
     (clutch-jdbc--rpc-async
@@ -735,9 +747,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
 
 (cl-defmethod clutch-db-list-columns ((conn clutch-jdbc-conn) table)
   "Return column names for TABLE on JDBC CONN using DatabaseMetaData."
-  (let* ((params  (clutch-jdbc-conn-params conn))
-         (schema  (or (plist-get params :schema)
-                      (clutch-jdbc--default-schema conn)))
+  (let* ((schema  (clutch-jdbc--conn-schema conn))
          (result  (clutch-jdbc--rpc
                    "get-columns"
                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -751,8 +761,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
   (let* ((params (clutch-jdbc-conn-params conn))
          (driver (plist-get params :driver)))
     (when (eq driver 'oracle)
-      (let* ((schema (or (plist-get params :schema)
-                         (clutch-jdbc--default-schema conn)))
+      (let* ((schema (clutch-jdbc--conn-schema conn))
              (result (clutch-jdbc--rpc
                       "search-tables"
                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -766,8 +775,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
   (let* ((params (clutch-jdbc-conn-params conn))
          (driver (plist-get params :driver)))
     (when (eq driver 'oracle)
-      (let* ((schema (or (plist-get params :schema)
-                         (clutch-jdbc--default-schema conn)))
+      (let* ((schema (clutch-jdbc--conn-schema conn))
              (result (clutch-jdbc--rpc
                       "search-columns"
                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -782,7 +790,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
 Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
   (let* ((params (clutch-jdbc-conn-params conn))
          (driver (plist-get params :driver))
-         (schema (or (plist-get params :schema) (clutch-jdbc--default-schema conn)))
+         (schema (clutch-jdbc--conn-schema conn))
          (result (clutch-jdbc--rpc
                   "get-columns"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -810,8 +818,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 (cl-defmethod clutch-db-primary-key-columns ((conn clutch-jdbc-conn) table)
   "Return primary key columns for TABLE on JDBC CONN."
-  (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (or (plist-get params :schema) (clutch-jdbc--default-schema conn)))
+  (let* ((schema (clutch-jdbc--conn-schema conn))
          (result (clutch-jdbc--rpc
                   "get-primary-keys"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -821,8 +828,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-jdbc-conn) table)
   "Return foreign key info for TABLE on JDBC CONN."
-  (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (or (plist-get params :schema) (clutch-jdbc--default-schema conn)))
+  (let* ((schema (clutch-jdbc--conn-schema conn))
          (result (clutch-jdbc--rpc
                   "get-foreign-keys"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -836,8 +842,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 (cl-defmethod clutch-db-column-details ((conn clutch-jdbc-conn) table)
   "Return detailed column info for TABLE on JDBC CONN."
-  (let* ((params  (clutch-jdbc-conn-params conn))
-         (schema  (or (plist-get params :schema) (clutch-jdbc--default-schema conn)))
+  (let* ((schema  (clutch-jdbc--conn-schema conn))
          (pk-cols (clutch-db-primary-key-columns conn table))
          (fks     (clutch-db-foreign-keys conn table))
          (result  (clutch-jdbc--rpc
@@ -887,6 +892,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
     ('sqlserver "SQL Server")
     ('db2       "DB2")
     ('snowflake "Snowflake")
+    ('redshift  "Redshift")
     (_          "JDBC")))
 
 ;;;; Agent installation helpers

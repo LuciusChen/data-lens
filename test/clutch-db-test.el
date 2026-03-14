@@ -332,6 +332,142 @@
           (should (file-exists-p (expand-file-name "drivers/mssql-jdbc.jar" tmpdir))))
       (delete-directory tmpdir t))))
 
+;;;; Unit tests — props normalization
+
+(ert-deftest clutch-db-test-jdbc-normalize-props-converts-plist ()
+  "A plist :props should be converted to an alist before JSON encoding."
+  (should (equal (clutch-jdbc--normalize-props '(:role "reporting" :schema "HR"))
+                 '(("role" . "reporting") ("schema" . "HR"))))
+  (should (equal (clutch-jdbc--normalize-props '(:key "val"))
+                 '(("key" . "val"))))
+  (should (null  (clutch-jdbc--normalize-props nil))))
+
+(ert-deftest clutch-db-test-jdbc-normalize-props-passes-alist-through ()
+  "An alist :props should be passed through unchanged."
+  (let ((alist '(("role" . "reporting") ("schema" . "HR"))))
+    (should (equal (clutch-jdbc--normalize-props alist) alist))))
+
+(ert-deftest clutch-db-test-jdbc-connect-normalizes-plist-props ()
+  "JDBC connect should send props as an alist even when given a plist."
+  (let (captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op params &optional _timeout-seconds)
+                 (setq captured-params params)
+                 '(:conn-id 1))))
+      (clutch-db-jdbc-connect
+       'oracle
+       '(:host "db" :port 1521 :database "svc"
+         :user "scott" :password "tiger"
+         :props (:role "reporting" :schema "HR"))))
+    (should (equal (alist-get 'props captured-params)
+                   '(("role" . "reporting") ("schema" . "HR"))))))
+
+;;;; Unit tests — row normalization
+
+(ert-deftest clutch-db-test-jdbc-normalize-row-clob ()
+  "Clob plists should be replaced with their :preview string."
+  (let ((row (list "text"
+                   '(:__type "clob" :length 1000 :preview "hello clob")
+                   42)))
+    (should (equal (clutch-jdbc--normalize-row row)
+                   '("text" "hello clob" 42)))))
+
+(ert-deftest clutch-db-test-jdbc-normalize-row-clob-nil-preview ()
+  "Clob plists with no preview should normalize to nil."
+  (let ((row (list '(:__type "clob" :length 0))))
+    (should (equal (clutch-jdbc--normalize-row row) '(nil)))))
+
+(ert-deftest clutch-db-test-jdbc-normalize-row-blob-with-text ()
+  "Blob plists with :text should still normalize to the text string."
+  (let ((row (list '(:__type "blob" :length 5 :text "hello"))))
+    (should (equal (clutch-jdbc--normalize-row row) '("hello")))))
+
+(ert-deftest clutch-db-test-jdbc-normalize-row-plain-values ()
+  "Plain values should pass through normalize-row unchanged."
+  (let ((row '(1 "str" nil t)))
+    (should (equal (clutch-jdbc--normalize-row row) row))))
+
+;;;; Unit tests — Redshift driver support
+
+(ert-deftest clutch-db-test-jdbc-build-url-redshift ()
+  "Redshift URL builder should produce a jdbc:redshift URL with default port 5439."
+  (should (equal (clutch-jdbc--build-url
+                  'redshift
+                  '(:host "cluster.us-east-1.redshift.amazonaws.com" :database "mydb"))
+                 "jdbc:redshift://cluster.us-east-1.redshift.amazonaws.com:5439/mydb"))
+  (should (equal (clutch-jdbc--build-url
+                  'redshift
+                  '(:host "cluster.example.com" :port 5440 :database "analytics"))
+                 "jdbc:redshift://cluster.example.com:5440/analytics")))
+
+(ert-deftest clutch-db-test-jdbc-display-name-redshift ()
+  "Redshift connections should display as \"Redshift\"."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver redshift))))
+    (should (equal (clutch-db-display-name conn) "Redshift"))))
+
+(ert-deftest clutch-db-test-jdbc-install-driver-installs-redshift ()
+  "Installing Redshift JDBC should download the redshift-jdbc42 Maven artifact."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
+         (clutch-jdbc-agent-dir tmpdir)
+         requested-coords)
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (coords dest)
+                     (setq requested-coords coords)
+                     (with-temp-file dest (insert "jar")))))
+          (clutch-jdbc-install-driver 'redshift)
+          (should (string-prefix-p "com.amazon.redshift:redshift-jdbc42:" requested-coords))
+          (should (file-exists-p (expand-file-name "drivers/redshift-jdbc42.jar" tmpdir))))
+      (delete-directory tmpdir t))))
+
+;;;; Unit tests — clutch-jdbc--conn-schema
+
+(ert-deftest clutch-db-test-jdbc-conn-schema-oracle-defaults-to-user ()
+  "Oracle with no explicit :schema returns the uppercased :user as the schema."
+  (let ((conn (make-clutch-jdbc-conn
+               :params '(:driver oracle :user "zjsy"))))
+    (should (equal (clutch-jdbc--conn-schema conn) "ZJSY"))))
+
+(ert-deftest clutch-db-test-jdbc-conn-schema-explicit-overrides-default ()
+  "An explicit :schema is returned as-is, even for Oracle."
+  (let ((conn (make-clutch-jdbc-conn
+               :params '(:driver oracle :user "zjsy" :schema "REPORTING"))))
+    (should (equal (clutch-jdbc--conn-schema conn) "REPORTING"))))
+
+(ert-deftest clutch-db-test-jdbc-conn-schema-non-oracle-returns-nil ()
+  "Non-Oracle drivers with no :schema return nil."
+  (let ((conn (make-clutch-jdbc-conn
+               :params '(:driver sqlserver :user "sa"))))
+    (should (null (clutch-jdbc--conn-schema conn)))))
+
+;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
+
+(ert-deftest clutch-db-test-jdbc-apply-timeout-defaults-fills-missing ()
+  "Empty params get all four timeouts filled from the global defcustoms."
+  (let* ((clutch-connect-timeout-seconds 10)
+         (clutch-read-idle-timeout-seconds 20)
+         (clutch-query-timeout-seconds 30)
+         (clutch-jdbc-rpc-timeout-seconds 40)
+         (result (clutch-jdbc--apply-timeout-defaults nil)))
+    (should (= (plist-get result :connect-timeout) 10))
+    (should (= (plist-get result :read-idle-timeout) 20))
+    (should (= (plist-get result :query-timeout) 30))
+    (should (= (plist-get result :rpc-timeout) 40))))
+
+(ert-deftest clutch-db-test-jdbc-apply-timeout-defaults-preserves-existing ()
+  "Timeouts already present in params are not overwritten by global defaults."
+  (let* ((clutch-connect-timeout-seconds 10)
+         (clutch-read-idle-timeout-seconds 20)
+         (clutch-query-timeout-seconds 30)
+         (clutch-jdbc-rpc-timeout-seconds 40)
+         (params '(:connect-timeout 99 :query-timeout 88))
+         (result (clutch-jdbc--apply-timeout-defaults params)))
+    (should (= (plist-get result :connect-timeout) 99))
+    (should (= (plist-get result :read-idle-timeout) 20))
+    (should (= (plist-get result :query-timeout) 88))
+    (should (= (plist-get result :rpc-timeout) 40))))
+
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()
