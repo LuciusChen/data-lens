@@ -204,6 +204,14 @@ JAR defaults to `clutch-jdbc--agent-jar'."
   (and clutch-jdbc--agent-process
        (process-live-p clutch-jdbc--agent-process)))
 
+(defun clutch-jdbc--clear-async-callbacks ()
+  "Cancel and clear all pending asynchronous JDBC callbacks."
+  (maphash (lambda (_id entry)
+             (when-let* ((timer (plist-get entry :timer)))
+               (cancel-timer timer)))
+           clutch-jdbc--async-callbacks)
+  (clrhash clutch-jdbc--async-callbacks))
+
 (defun clutch-jdbc--dispatch-async-response (response)
   "Dispatch asynchronous RESPONSE when a callback is registered.
 Return non-nil when RESPONSE was consumed asynchronously."
@@ -211,6 +219,8 @@ Return non-nil when RESPONSE was consumed asynchronously."
          (entry (and id (gethash id clutch-jdbc--async-callbacks))))
     (when entry
       (remhash id clutch-jdbc--async-callbacks)
+      (when-let* ((timer (plist-get entry :timer)))
+        (cancel-timer timer))
       (let ((callback (plist-get entry :callback))
             (errback (plist-get entry :errback)))
         (run-at-time
@@ -274,7 +284,7 @@ Return non-nil when RESPONSE was consumed asynchronously."
                   :noquery t)))
       (setq clutch-jdbc--agent-process proc)
       (setq clutch-jdbc--response-queue nil)
-      (clrhash clutch-jdbc--async-callbacks)
+      (clutch-jdbc--clear-async-callbacks)
       ;; Wait for the ready message (id=0).
       (let ((ready (clutch-jdbc--recv-response 0)))
         (unless (plist-get ready :ok)
@@ -287,7 +297,7 @@ Return non-nil when RESPONSE was consumed asynchronously."
     (delete-process clutch-jdbc--agent-process))
   (setq clutch-jdbc--agent-process nil
         clutch-jdbc--response-queue nil)
-  (clrhash clutch-jdbc--async-callbacks))
+  (clutch-jdbc--clear-async-callbacks))
 
 (defun clutch-jdbc--ensure-agent ()
   "Ensure the agent process is running, starting it if necessary."
@@ -347,8 +357,18 @@ Signals `clutch-db-error' on agent-reported errors."
 CALLBACK receives the result plist on success.  ERRBACK receives a
 string error message on failure.  Return the request id."
   (clutch-jdbc--ensure-agent)
-  (let ((id (clutch-jdbc--send op params)))
-    (puthash id (list :callback callback :errback errback)
+  (let* ((id (clutch-jdbc--send op params))
+         (timer (run-at-time
+                 clutch-jdbc-rpc-timeout-seconds nil
+                 (lambda ()
+                   (let ((entry (gethash id clutch-jdbc--async-callbacks)))
+                     (when entry
+                       (remhash id clutch-jdbc--async-callbacks)
+                       (when-let* ((timeout-errback (plist-get entry :errback)))
+                         (funcall timeout-errback
+                                  (format "clutch-jdbc-agent: timeout waiting for async response to request %d"
+                                          id)))))))))
+    (puthash id (list :callback callback :errback errback :timer timer)
              clutch-jdbc--async-callbacks)
     id))
 

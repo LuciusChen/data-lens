@@ -195,6 +195,28 @@
       (should (equal (alist-get 'schema captured-params) "SCOTT"))
       (should (equal callback-result '("USERS" "ORDERS"))))))
 
+(ert-deftest clutch-db-test-jdbc-rpc-async-times-out-and-cleans-up ()
+  "Async JDBC RPC should call ERRBACK and clear state on timeout."
+  (let ((clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+        (clutch-jdbc-rpc-timeout-seconds 1)
+        timeout-message
+        timer-fn)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (_op _params) 77))
+              ((symbol-function 'run-at-time)
+               (lambda (_secs _repeat fn)
+                 (setq timer-fn fn)
+                 'fake-timer)))
+      (clutch-jdbc--rpc-async
+       "get-tables" '((conn-id . 1))
+       #'ignore
+       (lambda (message)
+         (setq timeout-message message)))
+      (funcall timer-fn)
+      (should (string-match-p "timeout waiting for async response" timeout-message))
+      (should-not (gethash 77 clutch-jdbc--async-callbacks)))))
+
 (ert-deftest clutch-db-test-jdbc-validate-agent-jar-rejects-mismatch ()
   "JDBC agent startup should reject a jar with the wrong checksum."
   (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))

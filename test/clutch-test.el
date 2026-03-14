@@ -1505,6 +1505,31 @@
         (should-not refresh-called)
         (should (string-match-p "already in progress" seen-message))))))
 
+(ert-deftest clutch-test-refresh-current-schema-starts-background-refresh-for-lazy-backends ()
+  "Lazy backends should start schema refresh in the background."
+  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
+        seen-message
+        sync-called
+        async-called)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-eager-schema-refresh-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--refresh-schema-cache)
+               (lambda (_conn) (setq sync-called t) t))
+              ((symbol-function 'clutch--refresh-schema-cache-async)
+               (lambda (_conn) (setq async-called t) t))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq seen-message (apply #'format fmt args)))))
+      (with-temp-buffer
+        (setq-local clutch-connection 'fake-conn)
+        (should (clutch--refresh-current-schema))
+        (should async-called)
+        (should-not sync-called)
+        (should (string-match-p "started in background" seen-message))))))
+
 (ert-deftest clutch-test-icon-supports-octicon-family ()
   "Icon helper should dispatch octicon names when nerd-icons is available."
   (cl-letf (((symbol-function 'require) (lambda (&rest _) t))

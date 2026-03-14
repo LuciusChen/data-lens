@@ -565,17 +565,24 @@ Returns non-nil on success, nil on failure."
           (unless quiet
             (message "Schema refresh already in progress"))
           nil)
-      (let* ((ok (clutch--refresh-schema-cache conn))
-             (entry (clutch--schema-status-entry conn))
-             (tables (plist-get entry :tables))
-             (err (plist-get entry :error)))
-        (unless quiet
-          (message (if ok
-                       (format "Schema refreshed%s"
-                               (if tables (format " (%d tables)" tables) ""))
-                     (format "Schema refresh failed%s"
-                             (if err (format ": %s" err) "")))))
-        ok))))
+      (if (clutch-db-eager-schema-refresh-p conn)
+          (let* ((ok (clutch--refresh-schema-cache conn))
+                 (entry (clutch--schema-status-entry conn))
+                 (tables (plist-get entry :tables))
+                 (err (plist-get entry :error)))
+            (unless quiet
+              (message (if ok
+                           (format "Schema refreshed%s"
+                                   (if tables (format " (%d tables)" tables) ""))
+                         (format "Schema refresh failed%s"
+                                 (if err (format ": %s" err) "")))))
+            ok)
+        (let ((started (clutch--refresh-schema-cache-async conn)))
+          (unless quiet
+            (message (if started
+                         "Schema refresh started in background"
+                       "Schema refresh is unavailable for this backend")))
+          started)))))
 
 (defun clutch--schema-cache-guidance (conn)
   "Return a recovery hint for CONN schema cache state, or nil."
@@ -583,11 +590,11 @@ Returns non-nil on success, nil on failure."
               (state (plist-get entry :state)))
     (pcase state
       ('stale
-       "Schema cache is stale — press C-c C-s before relying on cached table names or completion")
+       "Schema cache is stale — press C-c C-s before relying on cached table names or schema browser state")
       ('failed
-       "Schema refresh failed earlier — press C-c C-s to retry before relying on cached table names or completion")
+       "Schema refresh failed earlier — press C-c C-s to retry before relying on cached table names or schema browser state")
       ('refreshing
-       "Schema refresh is in progress — cached table names or completion may still be behind")
+       "Schema refresh is in progress — cached table names or schema browser state may still be behind")
       (_ nil))))
 
 (defun clutch--warn-schema-cache-state (&optional conn)
