@@ -1580,11 +1580,15 @@
   (with-temp-buffer
     (let (called)
       (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _args) "copy"))
+                 (lambda (&rest _args) "csv-copy"))
                 ((symbol-function 'clutch--export-csv-all-to-clipboard)
                  (lambda () (setq called 'copy)))
                 ((symbol-function 'clutch--export-csv-all-file)
-                 (lambda () (setq called 'file))))
+                 (lambda () (setq called 'file)))
+                ((symbol-function 'clutch--export-insert-all-to-clipboard)
+                 (lambda () (setq called 'insert-copy)))
+                ((symbol-function 'clutch--export-insert-all-file)
+                 (lambda () (setq called 'insert-file))))
         (clutch-result-export)
         (should (eq called 'copy))))))
 
@@ -1593,13 +1597,51 @@
   (with-temp-buffer
     (let (called)
       (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _args) "file"))
+                 (lambda (&rest _args) "csv-file"))
                 ((symbol-function 'clutch--export-csv-all-to-clipboard)
                  (lambda () (setq called 'copy)))
                 ((symbol-function 'clutch--export-csv-all-file)
-                 (lambda () (setq called 'file))))
+                 (lambda () (setq called 'file)))
+                ((symbol-function 'clutch--export-insert-all-to-clipboard)
+                 (lambda () (setq called 'insert-copy)))
+                ((symbol-function 'clutch--export-insert-all-file)
+                 (lambda () (setq called 'insert-file))))
         (clutch-result-export)
         (should (eq called 'file))))))
+
+(ert-deftest clutch-test-export-command-dispatches-insert-copy ()
+  "Export command should dispatch to all-rows INSERT clipboard export."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "insert-copy"))
+                ((symbol-function 'clutch--export-csv-all-to-clipboard)
+                 (lambda () (setq called 'copy)))
+                ((symbol-function 'clutch--export-csv-all-file)
+                 (lambda () (setq called 'file)))
+                ((symbol-function 'clutch--export-insert-all-to-clipboard)
+                 (lambda () (setq called 'insert-copy)))
+                ((symbol-function 'clutch--export-insert-all-file)
+                 (lambda () (setq called 'insert-file))))
+        (clutch-result-export)
+        (should (eq called 'insert-copy))))))
+
+(ert-deftest clutch-test-export-command-dispatches-insert-file ()
+  "Export command should dispatch to all-rows INSERT file export."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "insert-file"))
+                ((symbol-function 'clutch--export-csv-all-to-clipboard)
+                 (lambda () (setq called 'copy)))
+                ((symbol-function 'clutch--export-csv-all-file)
+                 (lambda () (setq called 'file)))
+                ((symbol-function 'clutch--export-insert-all-to-clipboard)
+                 (lambda () (setq called 'insert-copy)))
+                ((symbol-function 'clutch--export-insert-all-file)
+                 (lambda () (setq called 'insert-file))))
+        (clutch-result-export)
+        (should (eq called 'insert-file))))))
 
 (ert-deftest clutch-test-csv-content-escaping ()
   "CSV content should include header and escaped values."
@@ -1609,6 +1651,25 @@
       (should (string-match-p "^id,name\n" csv))
       (should (string-match-p "1,\"a,b\"" csv))
       (should (string-match-p "2,\"x\"\"y\"" csv)))))
+
+(ert-deftest clutch-test-insert-content-builds-full-row-sql ()
+  "INSERT export content should reuse the existing INSERT builder for all rows."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-columns '("id" "name"))
+    (cl-letf (((symbol-function 'clutch-result--detect-table)
+               (lambda () "users"))
+              ((symbol-function 'clutch-result--build-insert-statements)
+               (lambda (indices col-indices table)
+                 (should (equal indices '(0 1)))
+                 (should (equal col-indices '(0 1)))
+                 (should (equal table "users"))
+                 '("INSERT INTO users (id, name) VALUES (1, 'a');"
+                   "INSERT INTO users (id, name) VALUES (2, 'b');"))))
+      (should (equal (clutch--insert-content '((1 "a") (2 "b")))
+                     (concat
+                      "INSERT INTO users (id, name) VALUES (1, 'a');\n"
+                      "INSERT INTO users (id, name) VALUES (2, 'b');\n"))))))
 
 (ert-deftest clutch-test-strip-leading-comments ()
   "Test stripping leading SQL comments."

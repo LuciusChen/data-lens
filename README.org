@@ -308,7 +308,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-p=      | Preview execution (pending batch if any; otherwise effective query) |
 | =c=            | Open copy transient menu (choose TSV / CSV / INSERT; toggle =-r= to refine) |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
-| =e=            | Export all rows (copy / file)                     |
+| =e=            | Export all rows (CSV copy/file or INSERT copy/file) |
 | =f=            | Toggle fullscreen                             |
 | =C-c ?=        | Transient menu                                |
 

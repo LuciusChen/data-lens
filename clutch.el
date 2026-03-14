@@ -6940,15 +6940,19 @@ Includes a header row with column names."
 (defun clutch-result-export ()
   "Export the current result.
 Prompts for format:
-- copy: all rows to clipboard as CSV text
-- file: all rows to CSV file."
+- csv-copy: all rows to clipboard as CSV text
+- csv-file: all rows to CSV file
+- insert-copy: all rows to clipboard as INSERT statements
+- insert-file: all rows to a .sql file as INSERT statements."
   (interactive)
   (let ((fmt (completing-read "Export format: "
-                              '("copy" "file")
+                              '("csv-copy" "csv-file" "insert-copy" "insert-file")
                               nil t)))
     (pcase fmt
-      ("copy" (clutch--export-csv-all-to-clipboard))
-      ("file" (clutch--export-csv-all-file)))))
+      ("csv-copy" (clutch--export-csv-all-to-clipboard))
+      ("csv-file" (clutch--export-csv-all-file))
+      ("insert-copy" (clutch--export-insert-all-to-clipboard))
+      ("insert-file" (clutch--export-insert-all-file)))))
 
 (defun clutch--csv-escape (val)
   "Return CSV-escaped string for VAL."
@@ -7045,6 +7049,45 @@ Prompts for format:
   "Copy all query rows as CSV text to the kill ring."
   (let ((rows (clutch-result--collect-all-export-rows)))
     (clutch--export-csv-rows-to-clipboard rows)))
+
+(defun clutch--insert-content (rows)
+  "Return INSERT statement text for ROWS using current result metadata."
+  (let* ((table (or (clutch-result--detect-table)
+                    (user-error "Cannot detect source table for INSERT export")))
+         (col-indices (cl-loop for i below (length clutch--result-columns) collect i))
+         (stmts (clutch-result--build-insert-statements
+                 (cl-loop for i below (length rows) collect i)
+                 col-indices
+                 table)))
+    (if stmts
+        (concat (mapconcat #'identity stmts "\n") "\n")
+      "")))
+
+(defun clutch--export-insert-rows-to-file (rows)
+  "Export ROWS as INSERT statements to a SQL file."
+  (let ((path (read-file-name "Export SQL to file: " nil nil nil "export.sql")))
+    (with-temp-buffer
+      (insert (clutch--insert-content rows))
+      (write-region (point-min) (point-max) path nil 'silent))
+    (message "Exported %d row%s as INSERT SQL to %s"
+             (length rows) (if (= (length rows) 1) "" "s")
+             path)))
+
+(defun clutch--export-insert-rows-to-clipboard (rows)
+  "Copy ROWS as INSERT statements to the kill ring."
+  (kill-new (clutch--insert-content rows))
+  (message "Copied %d row%s as INSERT SQL"
+           (length rows) (if (= (length rows) 1) "" "s")))
+
+(defun clutch--export-insert-all-file ()
+  "Export all query rows as INSERT statements to a SQL file."
+  (let ((rows (clutch-result--collect-all-export-rows)))
+    (clutch--export-insert-rows-to-file rows)))
+
+(defun clutch--export-insert-all-to-clipboard ()
+  "Copy all query rows as INSERT statements to the kill ring."
+  (let ((rows (clutch-result--collect-all-export-rows)))
+    (clutch--export-insert-rows-to-clipboard rows)))
 
 ;;;; Column page navigation and width adjustment
 
