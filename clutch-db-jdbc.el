@@ -352,14 +352,16 @@ Signals `clutch-db-error' on agent-reported errors."
               (list (or (plist-get response :error)
                         (format "agent error on op %s" op)))))))
 
-(defun clutch-jdbc--rpc-async (op params callback &optional errback)
+(defun clutch-jdbc--rpc-async (op params callback &optional errback timeout-seconds)
   "Send OP with PARAMS to the agent asynchronously.
 CALLBACK receives the result plist on success.  ERRBACK receives a
-string error message on failure.  Return the request id."
+string error message on failure.  TIMEOUT-SECONDS defaults to
+`clutch-jdbc-rpc-timeout-seconds'.  Return the request id."
   (clutch-jdbc--ensure-agent)
   (let* ((id (clutch-jdbc--send op params))
+         (timeout (or timeout-seconds clutch-jdbc-rpc-timeout-seconds))
          (timer (run-at-time
-                 clutch-jdbc-rpc-timeout-seconds nil
+                 timeout nil
                  (lambda ()
                    (let ((entry (gethash id clutch-jdbc--async-callbacks)))
                      (when entry
@@ -695,7 +697,9 @@ returning tables from SYS/SYSTEM and other visible schemas."
   "Refresh JDBC table names for CONN asynchronously."
   (let* ((params (clutch-jdbc-conn-params conn))
          (schema (or (plist-get params :schema)
-                     (clutch-jdbc--default-schema conn))))
+                     (clutch-jdbc--default-schema conn)))
+         (rpc-timeout (or (plist-get params :rpc-timeout)
+                          clutch-jdbc-rpc-timeout-seconds)))
     (clutch-jdbc--rpc-async
      "get-tables"
      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -705,7 +709,8 @@ returning tables from SYS/SYSTEM and other visible schemas."
          (funcall callback
                   (mapcar (lambda (tbl) (plist-get tbl :name))
                           (plist-get result :tables)))))
-     errback)
+     errback
+     rpc-timeout)
     t))
 
 (cl-defmethod clutch-db-list-columns ((conn clutch-jdbc-conn) table)

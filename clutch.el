@@ -2734,6 +2734,8 @@ Each value is a plist with :state and optional :tables / :error.")
                ((derived-mode-p 'clutch-result-mode)
                 (clutch--refresh-result-status-line)
                 (clutch--update-position-indicator))
+               ((derived-mode-p 'clutch-schema-mode)
+                (clutch-schema--refresh-view))
                ((derived-mode-p 'clutch-mode)
                 (clutch--update-console-buffer-name)
                 (clutch--update-mode-line))))))))))
@@ -3645,6 +3647,12 @@ SQL keyword/function docs are shown even without a connection."
   (setq truncate-lines t)
   (setq-local revert-buffer-function #'clutch-schema--revert))
 
+(defun clutch-schema--sync-tables-from-cache ()
+  "Update `clutch-schema--tables' from the current schema cache when available."
+  (when-let* ((schema (clutch--schema-for-connection)))
+    (setq clutch-schema--tables
+          (sort (hash-table-keys schema) #'string<))))
+
 (defun clutch-schema--revert (_ignore-auto _noconfirm)
   "Revert function for schema browser."
   (clutch-schema-refresh))
@@ -3725,6 +3733,17 @@ If EXPANDED-P, also insert column detail lines using CONN."
     (dolist (tbl tables)
       (clutch-schema--insert-table
        conn tbl (member tbl expanded)))))
+
+(defun clutch-schema--refresh-view ()
+  "Refresh the schema browser display.
+Preserve the current table when possible."
+  (let ((tbl (clutch-schema--table-at-point))
+        (line (line-number-at-pos)))
+    (clutch-schema--sync-tables-from-cache)
+    (clutch-schema--render)
+    (goto-char (point-min))
+    (unless (and tbl (clutch-schema--goto-table-line tbl))
+      (forward-line (1- (min line (line-number-at-pos (point-max))))))))
 
 (defun clutch-list-tables ()
   "Show a list of tables in the current database."
@@ -3835,14 +3854,8 @@ can offer table-specific actions on the completion candidates."
 (defun clutch-schema-refresh ()
   "Refresh the schema browser and cache."
   (interactive)
-  (let ((line (line-number-at-pos)))
-    (clutch--refresh-current-schema t)
-    (when-let* ((schema (clutch--schema-for-connection)))
-      (setq clutch-schema--tables
-            (sort (hash-table-keys schema) #'string<)))
-    (clutch-schema--render)
-    (goto-char (point-min))
-    (forward-line (1- line))))
+  (clutch--refresh-current-schema t)
+  (clutch-schema--refresh-view))
 
 (defun clutch--find-console-for-conn (conn)
   "Return the clutch-mode buffer that owns CONN, or nil."

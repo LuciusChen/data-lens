@@ -178,11 +178,12 @@
   "Async JDBC schema refresh should fetch table names via get-tables."
   (let ((conn (make-clutch-jdbc-conn :conn-id 9
                                      :params '(:driver oracle :user "scott")))
-        captured-op captured-params callback-result)
+        captured-op captured-params captured-timeout callback-result)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (op params callback &optional errback)
+               (lambda (op params callback &optional errback timeout-seconds)
                  (setq captured-op op
-                       captured-params params)
+                       captured-params params
+                       captured-timeout timeout-seconds)
                  (should-not errback)
                  (funcall callback '(:tables ((:name "USERS") (:name "ORDERS"))))
                  42)))
@@ -193,7 +194,21 @@
       (should (equal captured-op "get-tables"))
       (should (= (alist-get 'conn-id captured-params) 9))
       (should (equal (alist-get 'schema captured-params) "SCOTT"))
+      (should (= captured-timeout clutch-jdbc-rpc-timeout-seconds))
       (should (equal callback-result '("USERS" "ORDERS"))))))
+
+(ert-deftest clutch-db-test-jdbc-refresh-schema-async-uses-connection-rpc-timeout ()
+  "Async JDBC schema refresh should respect per-connection rpc timeout."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                     :params '(:driver oracle :user "scott"
+                                               :rpc-timeout 7)))
+        captured-timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
+               (lambda (_op _params _callback &optional _errback timeout-seconds)
+                 (setq captured-timeout timeout-seconds)
+                 42)))
+      (should (clutch-db-refresh-schema-async conn #'ignore))
+      (should (= captured-timeout 7)))))
 
 (ert-deftest clutch-db-test-jdbc-rpc-async-times-out-and-cleans-up ()
   "Async JDBC RPC should call ERRBACK and clear state on timeout."
