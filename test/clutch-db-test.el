@@ -174,6 +174,27 @@
         (should-not (string-match-p "\"ZJ_NCBUSINESSDATA\"" ddl))
         (should-not (string-match-p "\"PK_MAIN\"" ddl))))))
 
+(ert-deftest clutch-db-test-jdbc-refresh-schema-async-uses-get-tables ()
+  "Async JDBC schema refresh should fetch table names via get-tables."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                     :params '(:driver oracle :user "scott")))
+        captured-op captured-params callback-result)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
+               (lambda (op params callback &optional errback)
+                 (setq captured-op op
+                       captured-params params)
+                 (should-not errback)
+                 (funcall callback '(:tables ((:name "USERS") (:name "ORDERS"))))
+                 42)))
+      (should (clutch-db-refresh-schema-async
+               conn
+               (lambda (tables)
+                 (setq callback-result tables))))
+      (should (equal captured-op "get-tables"))
+      (should (= (alist-get 'conn-id captured-params) 9))
+      (should (equal (alist-get 'schema captured-params) "SCOTT"))
+      (should (equal callback-result '("USERS" "ORDERS"))))))
+
 (ert-deftest clutch-db-test-jdbc-validate-agent-jar-rejects-mismatch ()
   "JDBC agent startup should reject a jar with the wrong checksum."
   (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))

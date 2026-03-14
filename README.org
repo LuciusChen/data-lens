@@ -692,6 +692,10 @@ backends.  See [[*Password Management]] for details.
   names and column names are resolved through Oracle-specific prefix lookups, so
   connect stays non-blocking and completion does not have to enumerate the whole
   schema up front.
+- After connect (and after schema-affecting DDL), Oracle/JDBC also starts a
+  background full table refresh.  Completion stays responsive because it keeps
+  using the prefix fast path, while the console's =schema~= state is eventually
+  backfilled to =schema Nt= once the cache snapshot finishes loading.
 - Pagination uses =ROWNUM= subquery, compatible with all Oracle versions (9i+).
 - CJK character sets (e.g. ZHS16GBK) require =orai18n.jar= in addition to the
   active Oracle JDBC jar (=ojdbc8.jar= or =ojdbc11.jar=).

@@ -145,7 +145,10 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
   "The running clutch-jdbc-agent process, or nil if not started.")
 
 (defvar clutch-jdbc--response-queue nil
-  "List of JSON response strings received from the agent, oldest first.")
+  "List of parsed synchronous JSON responses, oldest first.")
+
+(defvar clutch-jdbc--async-callbacks (make-hash-table :test 'eql)
+  "Map of JDBC request ids to asynchronous callbacks.")
 
 (defconst clutch-jdbc--json-false (make-symbol "clutch-jdbc-json-false")
   "Sentinel used to represent JSON false distinctly from nil.")
@@ -201,6 +204,32 @@ JAR defaults to `clutch-jdbc--agent-jar'."
   (and clutch-jdbc--agent-process
        (process-live-p clutch-jdbc--agent-process)))
 
+(defun clutch-jdbc--dispatch-async-response (response)
+  "Dispatch asynchronous RESPONSE when a callback is registered.
+Return non-nil when RESPONSE was consumed asynchronously."
+  (let* ((id (plist-get response :id))
+         (entry (and id (gethash id clutch-jdbc--async-callbacks))))
+    (when entry
+      (remhash id clutch-jdbc--async-callbacks)
+      (let ((callback (plist-get entry :callback))
+            (errback (plist-get entry :errback)))
+        (run-at-time
+         0 nil
+         (lambda ()
+           (condition-case err
+               (if (eq t (plist-get response :ok))
+                   (when callback
+                     (funcall callback (plist-get response :result)))
+                 (let ((message (or (plist-get response :error)
+                                    "Unknown JDBC agent error")))
+                   (if errback
+                       (funcall errback message)
+                     (message "clutch-jdbc async error: %s" message))))
+             (error
+              (message "clutch-jdbc async callback failed: %s"
+                       (error-message-string err)))))))
+      t)))
+
 (defun clutch-jdbc--agent-filter (proc string)
   "Process filter: collect complete JSON lines from PROC output STRING."
   (let ((buf (process-buffer proc)))
@@ -215,8 +244,16 @@ JAR defaults to `clutch-jdbc--agent-jar'."
             (delete-region (point-min) (point))
             (goto-char (point-min))
             (unless (string-empty-p line)
-              (setq clutch-jdbc--response-queue
-                    (nconc clutch-jdbc--response-queue (list line))))))))))
+              (let ((parsed (condition-case nil
+                                (json-parse-string line :object-type 'plist
+                                                   :array-type 'list
+                                                   :null-object nil
+                                                   :false-object clutch-jdbc--json-false)
+                              (error nil))))
+                (unless (and parsed
+                             (clutch-jdbc--dispatch-async-response parsed))
+                  (setq clutch-jdbc--response-queue
+                        (nconc clutch-jdbc--response-queue (list parsed))))))))))))
 
 (defun clutch-jdbc--start-agent ()
   "Start the clutch-jdbc-agent process and wait for its ready signal."
@@ -237,6 +274,7 @@ JAR defaults to `clutch-jdbc--agent-jar'."
                   :noquery t)))
       (setq clutch-jdbc--agent-process proc)
       (setq clutch-jdbc--response-queue nil)
+      (clrhash clutch-jdbc--async-callbacks)
       ;; Wait for the ready message (id=0).
       (let ((ready (clutch-jdbc--recv-response 0)))
         (unless (plist-get ready :ok)
@@ -248,7 +286,8 @@ JAR defaults to `clutch-jdbc--agent-jar'."
   (when (clutch-jdbc--agent-live-p)
     (delete-process clutch-jdbc--agent-process))
   (setq clutch-jdbc--agent-process nil
-        clutch-jdbc--response-queue nil))
+        clutch-jdbc--response-queue nil)
+  (clrhash clutch-jdbc--async-callbacks))
 
 (defun clutch-jdbc--ensure-agent ()
   "Ensure the agent process is running, starting it if necessary."
@@ -275,17 +314,16 @@ TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'."
                      (or timeout-seconds clutch-jdbc-rpc-timeout-seconds)))
         response)
     (while (and (not response) (< (float-time) deadline))
-      ;; Drain any queued lines.
-      (while (and (not response) clutch-jdbc--response-queue)
-        (let* ((line (pop clutch-jdbc--response-queue))
-               (parsed (condition-case nil
-                           (json-parse-string line :object-type 'plist
-                                              :array-type 'list
-                                              :null-object nil
-                                              :false-object clutch-jdbc--json-false)
-                         (error nil))))
-          (when (and parsed (eql (plist-get parsed :id) id))
-            (setq response parsed))))
+      ;; Drain any queued responses while preserving unmatched entries.
+      (when clutch-jdbc--response-queue
+        (let (remaining)
+          (while (and (not response) clutch-jdbc--response-queue)
+            (let ((parsed (pop clutch-jdbc--response-queue)))
+              (if (and parsed (eql (plist-get parsed :id) id))
+                  (setq response parsed)
+                (push parsed remaining))))
+          (setq clutch-jdbc--response-queue
+                (nconc (nreverse remaining) clutch-jdbc--response-queue))))
       (unless response
         (accept-process-output clutch-jdbc--agent-process 0.05)))
     (unless response
@@ -303,6 +341,16 @@ Signals `clutch-db-error' on agent-reported errors."
       (signal 'clutch-db-error
               (list (or (plist-get response :error)
                         (format "agent error on op %s" op)))))))
+
+(defun clutch-jdbc--rpc-async (op params callback &optional errback)
+  "Send OP with PARAMS to the agent asynchronously.
+CALLBACK receives the result plist on success.  ERRBACK receives a
+string error message on failure.  Return the request id."
+  (clutch-jdbc--ensure-agent)
+  (let ((id (clutch-jdbc--send op params)))
+    (puthash id (list :callback callback :errback errback)
+             clutch-jdbc--async-callbacks)
+    id))
 
 ;;;; JDBC URL builder
 
@@ -621,6 +669,24 @@ returning tables from SYS/SYSTEM and other visible schemas."
                      ,@(when schema `((schema . ,schema)))))))
     (mapcar (lambda (tbl) (plist-get tbl :name))
             (plist-get result :tables))))
+
+(cl-defmethod clutch-db-refresh-schema-async ((conn clutch-jdbc-conn) callback
+                                              &optional errback)
+  "Refresh JDBC table names for CONN asynchronously."
+  (let* ((params (clutch-jdbc-conn-params conn))
+         (schema (or (plist-get params :schema)
+                     (clutch-jdbc--default-schema conn))))
+    (clutch-jdbc--rpc-async
+     "get-tables"
+     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+       ,@(when schema `((schema . ,schema))))
+     (lambda (result)
+       (when callback
+         (funcall callback
+                  (mapcar (lambda (tbl) (plist-get tbl :name))
+                          (plist-get result :tables)))))
+     errback)
+    t))
 
 (cl-defmethod clutch-db-list-columns ((conn clutch-jdbc-conn) table)
   "Return column names for TABLE on JDBC CONN using DatabaseMetaData."

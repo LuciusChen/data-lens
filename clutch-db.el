@@ -136,6 +136,16 @@ For example, SET NAMES utf8mb4 on MySQL.")
   "Most backends can synchronously load column metadata during completion."
   t)
 
+(cl-defgeneric clutch-db-refresh-schema-async (conn callback &optional errback)
+  "Start an asynchronous schema refresh for CONN.
+CALLBACK receives the table name list on success.  ERRBACK receives
+an error message string on failure.  Return non-nil when async refresh
+was started, nil when unsupported.")
+
+(cl-defmethod clutch-db-refresh-schema-async ((_conn t) _callback &optional _errback)
+  "Backends without asynchronous schema refresh support return nil."
+  nil)
+
 ;; Query
 
 (cl-defgeneric clutch-db-query (conn sql)
