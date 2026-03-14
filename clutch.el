@@ -2688,6 +2688,12 @@ as returned by `clutch-db-column-details'.")
 Values are hash-tables mapping table-name to a plist with :state and
 optional :error.")
 
+(defvar clutch--column-details-queue-cache (make-hash-table :test 'equal)
+  "Per-connection queue of tables waiting for async column-detail fetch.")
+
+(defvar clutch--column-details-active-cache (make-hash-table :test 'equal)
+  "Per-connection table currently fetching async column details.")
+
 (defvar clutch--table-comment-cache (make-hash-table :test 'equal)
   "Cache for table comments.  Keys are connection-key strings.
 Values are hash-tables mapping table-name → comment string or nil.")
@@ -2784,6 +2790,8 @@ When TICKET is non-nil, ignore the update unless it is still current."
       (puthash key schema clutch--schema-cache)
       (remhash key clutch--column-details-cache)
       (remhash key clutch--column-details-status-cache)
+      (remhash key clutch--column-details-queue-cache)
+      (remhash key clutch--column-details-active-cache)
       (remhash key clutch--table-comment-cache)
       (remhash key clutch--help-doc-cache)
       (clutch--set-schema-status conn 'ready (hash-table-count schema))
@@ -2894,28 +2902,71 @@ or nil on error."
                       h))))
     (puthash table (list :state state :error error-message) cache)))
 
-(defun clutch--ensure-column-details-async (conn table)
-  "Start an async column-detail fetch for TABLE on CONN when possible."
-  (unless (or (clutch--cached-column-details conn table)
-              (eq (plist-get (clutch--column-details-status conn table) :state)
-                  'loading))
-    (when (clutch-db-column-details-async
-           conn table
-           (lambda (details)
-             (let* ((key (clutch--connection-key conn))
-                    (cache (or (gethash key clutch--column-details-cache)
-                               (let ((h (make-hash-table :test 'equal)))
-                                 (puthash key h clutch--column-details-cache)
-                                 h)))
-                    (status-cache (gethash key clutch--column-details-status-cache)))
-               (puthash table details cache)
-               (when status-cache
-                 (remhash table status-cache))
-               (clutch--refresh-schema-status-ui conn)))
-           (lambda (message)
-             (clutch--set-column-details-status conn table 'failed message)
-             (clutch--refresh-schema-status-ui conn)))
+(defun clutch--column-details-queue (conn)
+  "Return the async column-details queue for CONN."
+  (gethash (clutch--connection-key conn) clutch--column-details-queue-cache))
+
+(defun clutch--set-column-details-queue (conn queue)
+  "Store async column-details QUEUE for CONN."
+  (puthash (clutch--connection-key conn) queue clutch--column-details-queue-cache))
+
+(defun clutch--column-details-active (conn)
+  "Return the table currently fetching async column details for CONN."
+  (gethash (clutch--connection-key conn) clutch--column-details-active-cache))
+
+(defun clutch--set-column-details-active (conn table)
+  "Record TABLE as the active async column-details fetch for CONN."
+  (puthash (clutch--connection-key conn) table clutch--column-details-active-cache))
+
+(defun clutch--clear-column-details-active (conn)
+  "Clear the active async column-details fetch for CONN."
+  (remhash (clutch--connection-key conn) clutch--column-details-active-cache))
+
+(defun clutch--drain-column-details-async (conn)
+  "Start the next queued async column-details fetch for CONN."
+  (unless (or (clutch--column-details-active conn)
+              (not (clutch--connection-alive-p conn)))
+    (when-let* ((queue (clutch--column-details-queue conn))
+                (table (car queue)))
+      (clutch--set-column-details-queue conn (cdr queue))
+      (clutch--set-column-details-active conn table)
       (clutch--set-column-details-status conn table 'loading)
+      (unless (clutch-db-column-details-async
+               conn table
+               (lambda (details)
+                 (let* ((key (clutch--connection-key conn))
+                        (cache (or (gethash key clutch--column-details-cache)
+                                   (let ((h (make-hash-table :test 'equal)))
+                                     (puthash key h clutch--column-details-cache)
+                                     h)))
+                        (status-cache (gethash key clutch--column-details-status-cache)))
+                   (puthash table details cache)
+                   (when status-cache
+                     (remhash table status-cache))
+                   (clutch--clear-column-details-active conn)
+                   (clutch--refresh-schema-status-ui conn)
+                   (clutch--drain-column-details-async conn)))
+               (lambda (message)
+                 (clutch--set-column-details-status conn table 'failed message)
+                 (clutch--clear-column-details-active conn)
+                 (clutch--refresh-schema-status-ui conn)
+                 (clutch--drain-column-details-async conn)))
+        (clutch--set-column-details-status conn table 'failed
+                                           "Column detail fetch is unavailable")
+        (clutch--clear-column-details-active conn)
+        (clutch--refresh-schema-status-ui conn)
+        (clutch--drain-column-details-async conn)))))
+
+(defun clutch--ensure-column-details-async (conn table)
+  "Queue an async column-detail fetch for TABLE on CONN when needed."
+  (let ((state (plist-get (clutch--column-details-status conn table) :state)))
+    (unless (or (clutch--cached-column-details conn table)
+                (memq state '(queued loading)))
+      (clutch--set-column-details-status conn table 'queued)
+      (clutch--set-column-details-queue
+       conn
+       (append (clutch--column-details-queue conn) (list table)))
+      (clutch--drain-column-details-async conn)
       t)))
 
 (defun clutch--ensure-table-comment (conn table)
@@ -3769,7 +3820,8 @@ SQL keyword/function docs are shown even without a connection."
       (insert (propertize "  └── column details unavailable\n"
                           'clutch-schema-table tbl
                           'face 'font-lock-warning-face)))
-     ((not sync-p)
+     ((and (not sync-p)
+           (memq (plist-get status :state) '(queued loading)))
       (insert (propertize "  └── loading column details...\n"
                           'clutch-schema-table tbl
                           'face 'shadow))))))
