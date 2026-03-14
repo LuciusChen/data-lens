@@ -62,7 +62,7 @@
   :group 'clutch)
 
 (defface clutch-insert-field-name-face
-  '((t :inherit clutch-header-face))
+  '((t :inherit clutch-header-face :foreground "#b8d7ec"))
   "Face for insert-buffer field names."
   :group 'clutch)
 
