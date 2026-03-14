@@ -6682,14 +6682,35 @@ optionally reformat the buffer content."
             ((fboundp 'json-mode)    (json-mode))
             (t                       (special-mode))))))
 
+(defun clutch--json-false-value-p (val)
+  "Return non-nil when VAL represents a parsed JSON false sentinel."
+  (or (eq val :false)
+      ;; JDBC uses a private false sentinel so it can distinguish JSON false
+      ;; from SQL NULL when decoding metadata payloads.
+      (and (symbolp val)
+           (string= (symbol-name val) "clutch-jdbc-json-false"))))
+
 (defun clutch--json-value-to-string (val)
-  "Convert VAL to a JSON-ish string suitable for the JSON viewer."
+  "Convert VAL to valid JSON text suitable for JSON editing and viewing."
   (cond
-   ((stringp val) val)
-   ((and (fboundp 'json-serialize)
-         (or (hash-table-p val) (vectorp val) (listp val)))
+   ((null val)
+    (clutch--format-value val))
+   ((and (stringp val)
+         (fboundp 'json-serialize)
+         (fboundp 'json-parse-string))
     (condition-case nil
-        (json-serialize val)
+        (json-serialize (json-parse-string val))
+      (error (json-serialize val))))
+   ((clutch--json-false-value-p val)
+    "false")
+   ((and (fboundp 'json-serialize)
+         (or (numberp val)
+             (eq val t)
+             (hash-table-p val)
+             (vectorp val)
+             (listp val)))
+    (condition-case nil
+        (json-serialize (if (clutch--json-false-value-p val) :false val))
       (error (clutch--format-value val))))
    (t (clutch--format-value val))))
 
@@ -6862,7 +6883,7 @@ Rows/columns: region rectangle > current cell."
          (col-indices (or (cdr-safe rect)
                           (cl-loop for i below (length clutch--result-columns)
                                    collect i)))
-         (table (or (clutch-result--detect-table) "TABLE"))
+         (table (clutch--result-source-table-or-user-error "copy INSERT SQL"))
          (stmts (clutch-result--build-insert-statements indices col-indices table)))
     (kill-new (mapconcat #'identity stmts "\n"))
     (deactivate-mark)

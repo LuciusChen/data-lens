@@ -116,6 +116,14 @@
     (puthash "a" 1 obj)
     (should (equal (clutch--json-value-to-string obj) "{\"a\":1}"))))
 
+(ert-deftest clutch-test-json-value-to-string-scalars ()
+  "JSON scalar values should remain valid JSON when edited or viewed."
+  (skip-unless (fboundp 'json-serialize))
+  (should (equal (clutch--json-value-to-string "hello") "\"hello\""))
+  (should (equal (clutch--json-value-to-string t) "true"))
+  (should (equal (clutch--json-value-to-string :false) "false"))
+  (should (equal (clutch--json-value-to-string 42) "42")))
+
 (ert-deftest clutch-test-dispatch-view-json-category-serializes-non-string ()
   "JSON category should route non-string values to JSON viewer."
   (let ((called nil)
@@ -870,6 +878,34 @@
                   (should (string-match-p "\"data\": \\["
                                           (buffer-substring-no-properties
                                            (point-min) (point-max)))))))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-edit-cell-json-string-opens-sub-editor-with-json-text ()
+  "Parsed JSON string scalars should stay valid JSON in the sub-editor."
+  (skip-unless (fboundp 'json-serialize))
+  (let ((result-buf (generate-new-buffer "*clutch-result*"))
+        (payload "hello"))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("payload")
+                        clutch--result-column-defs '((:name "payload" :type-category json))
+                        clutch--result-rows (list (list payload))))
+          (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+                     (lambda () (list 0 0 payload)))
+                    ((symbol-function 'clutch-result--detect-table)
+                     (lambda () "shipping_incidents"))
+                    ((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table)
+                       (list (list :name "payload" :type "json"))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args) buf)))
+            (with-current-buffer result-buf
+              (let ((buf (clutch-result-edit-cell)))
+                (with-current-buffer buf
+                  (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                                 "\"hello\"")))))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-edit-set-current-time-replaces-existing-value ()
@@ -1670,6 +1706,21 @@
                      (concat
                       "INSERT INTO users (id, name) VALUES (1, 'a');\n"
                       "INSERT INTO users (id, name) VALUES (2, 'b');\n"))))))
+
+(ert-deftest clutch-test-copy-rows-as-insert-errors-when-source-table-is-unknown ()
+  "INSERT copy should fail clearly when the source table cannot be detected."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-columns '("id")
+                clutch--result-rows '((1)))
+    (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+               (lambda () (list 0 0 1)))
+              ((symbol-function 'clutch-result--detect-table)
+               (lambda () nil)))
+      (let ((err (should-error (clutch-result--copy-rows-as-insert) :type 'user-error)))
+        (should (string-match-p
+                 "Cannot copy INSERT SQL: source table cannot be detected"
+                 (error-message-string err)))))))
 
 (ert-deftest clutch-test-strip-leading-comments ()
   "Test stripping leading SQL comments."
