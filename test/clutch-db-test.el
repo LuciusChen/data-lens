@@ -258,6 +258,22 @@
           (should-not (file-exists-p (expand-file-name "drivers/ojdbc11.jar" tmpdir))))
       (delete-directory tmpdir t))))
 
+(ert-deftest clutch-db-test-jdbc-install-driver-uses-sqlserver-jre11-artifact ()
+  "Installing SQL Server JDBC should use the classifier-based Maven artifact."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
+         (clutch-jdbc-agent-dir tmpdir)
+         requested-coords)
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (coords dest)
+                     (setq requested-coords coords)
+                     (with-temp-file dest (insert "jar")))))
+          (clutch-jdbc-install-driver 'sqlserver)
+          (should (equal requested-coords
+                         "com.microsoft.sqlserver:mssql-jdbc:13.4.0.jre11"))
+          (should (file-exists-p (expand-file-name "drivers/mssql-jdbc.jar" tmpdir))))
+      (delete-directory tmpdir t))))
+
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()

@@ -95,7 +95,7 @@ Examples:
 ;;;; Driver sources (for automatic installation from Maven Central)
 
 (defconst clutch-jdbc--driver-sources
-  '((sqlserver . (:maven "com.microsoft.sqlserver:mssql-jdbc:12.6.0"
+  '((sqlserver . (:maven "com.microsoft.sqlserver:mssql-jdbc:13.4.0.jre11"
                   :filename "mssql-jdbc.jar"))
     (snowflake . (:maven "net.snowflake:snowflake-jdbc:3.14.4"
                   :filename "snowflake-jdbc.jar"))
