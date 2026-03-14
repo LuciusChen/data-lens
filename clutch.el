@@ -4591,6 +4591,12 @@ Scans text properties across the line."
     (or (eq (plist-get col-def :type-category) 'json)
         (string= type "json"))))
 
+(defun clutch-result--editable-field-string (value col-def detail)
+  "Return editable text for VALUE in a field described by COL-DEF/DETAIL."
+  (if (clutch-result--field-json-p col-def detail)
+      (clutch--json-value-to-string value)
+    (clutch--format-value value)))
+
 (defun clutch-result--field-temporal-p (col-def)
   "Return non-nil when COL-DEF describes a temporal field."
   (memq (plist-get col-def :type-category)
@@ -4822,7 +4828,7 @@ Scans text properties across the line."
                         (format "*clutch-edit: [%d].%s*" ridx col-name))))
         (with-current-buffer edit-buf
           (erase-buffer)
-          (insert (clutch--format-value val))
+          (insert (clutch-result--editable-field-string val col-def detail))
           (goto-char (point-min))
           (clutch-result-edit-mode 1)
           (setq-local clutch-result-edit--column-name col-name

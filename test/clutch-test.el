@@ -835,6 +835,43 @@
                                  "{\n  \"a\": 1\n}")))))))
       (kill-buffer result-buf))))
 
+(ert-deftest clutch-test-edit-cell-json-object-opens-sub-editor-with-json-text ()
+  "Parsed JSON objects should reach the JSON sub-editor as JSON text."
+  (skip-unless (fboundp 'json-serialize))
+  (let ((result-buf (generate-new-buffer "*clutch-result*"))
+        (payload (make-hash-table :test 'equal)))
+    (puthash "test" t payload)
+    (puthash "data" (vector 1 2) payload)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("payload")
+                        clutch--result-column-defs '((:name "payload" :type-category json))
+                        clutch--result-rows (list (list payload))))
+          (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+                     (lambda () (list 0 0 payload)))
+                    ((symbol-function 'clutch-result--detect-table)
+                     (lambda () "shipping_incidents"))
+                    ((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table)
+                       (list (list :name "payload" :type "json"))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args) buf)))
+            (with-current-buffer result-buf
+              (let ((buf (clutch-result-edit-cell)))
+                (with-current-buffer buf
+                  (should-not (string-match-p "#s(hash-table"
+                                              (buffer-substring-no-properties
+                                               (point-min) (point-max))))
+                  (should (string-match-p "\"test\": true"
+                                          (buffer-substring-no-properties
+                                           (point-min) (point-max))))
+                  (should (string-match-p "\"data\": \\["
+                                          (buffer-substring-no-properties
+                                           (point-min) (point-max)))))))))
+      (kill-buffer result-buf))))
+
 (ert-deftest clutch-test-edit-set-current-time-replaces-existing-value ()
   "C-c . in edit buffers should replace the current value with now."
   (with-temp-buffer
