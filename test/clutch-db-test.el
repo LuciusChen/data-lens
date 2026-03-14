@@ -872,6 +872,52 @@ Skips if `clutch-db-test-pg-password' is nil."
     (should-error (clutch-db-query conn "SELEC BAD")
                   :type 'clutch-db-error)))
 
+;;;; Unit tests — clutch--format-value and clutch--value-to-literal
+
+(ert-deftest clutch-db-test-format-value-primitives ()
+  "format-value handles nil, :false, strings, and numbers correctly."
+  (should (equal (clutch--format-value nil)    "NULL"))
+  (should (equal (clutch--format-value :false) "false"))
+  (should (equal (clutch--format-value "hi")   "hi"))
+  (should (equal (clutch--format-value 42)     "42"))
+  (should (equal (clutch--format-value 3.14)   "3.14")))
+
+(ert-deftest clutch-db-test-format-value-json-hash-table ()
+  "format-value serializes a hash-table (MySQL/PG JSON object) to a JSON string."
+  (let ((ht (make-hash-table :test 'equal)))
+    (puthash "key" "val" ht)
+    (let ((result (clutch--format-value ht)))
+      (should (stringp result))
+      (should (string-match-p "\"key\"" result))
+      (should (string-match-p "\"val\"" result)))))
+
+(ert-deftest clutch-db-test-format-value-json-vector ()
+  "format-value serializes a vector (MySQL/PG JSON array) to a JSON string."
+  (should (equal (clutch--format-value [1 2 3]) "[1,2,3]")))
+
+(ert-deftest clutch-db-test-value-to-literal-json-hash-table ()
+  "value-to-literal escapes a JSON hash-table as a quoted SQL string literal."
+  (let* ((ht (make-hash-table :test 'equal))
+         (_ (puthash "k" "v" ht))
+         (conn (make-clutch-jdbc-conn
+                :params '(:driver sqlserver :user "sa")))
+         (clutch-connection conn)
+         (result (clutch--value-to-literal ht)))
+    (should (stringp result))
+    ;; Result should be a quoted string containing the JSON
+    (should (string-match-p "\"k\"" result))
+    (should (string-match-p "\"v\"" result))))
+
+(ert-deftest clutch-db-test-value-to-literal-json-vector ()
+  "value-to-literal escapes a JSON vector as a quoted SQL string literal."
+  (let* ((conn (make-clutch-jdbc-conn
+                :params '(:driver sqlserver :user "sa")))
+         (clutch-connection conn)
+         (result (clutch--value-to-literal [1 2 3])))
+    (should (stringp result))
+    (should (string-match-p "1" result))
+    (should (string-match-p "2" result))))
+
 ;;;; Cross-backend consistency tests
 
 (ert-deftest clutch-db-test-cross-type-categories ()

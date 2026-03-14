@@ -946,13 +946,16 @@ window rather than replacing the current window."
 
 (defun clutch--format-value (val)
   "Format VAL for display in a result table.
-nil → \"NULL\", :false → \"false\", plists → formatted date/time strings."
+nil → \"NULL\", :false → \"false\", plists → formatted date/time strings,
+hash-tables and vectors (JSON from MySQL/PG) → JSON string."
   (cond
    ((null val) "NULL")
    ((eq val :false) "false")
    ((stringp val) val)
    ((numberp val) (number-to-string val))
    ((listp val) (or (clutch-db-format-temporal val) (format "%S" val)))
+   ((or (hash-table-p val) (vectorp val))
+    (condition-case nil (json-serialize val) (error (format "%S" val))))
    (t (format "%S" val))))
 
 (defun clutch--truncate-cell (str max-width)
