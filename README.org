@@ -306,9 +306,9 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
 | =C-c C-k=     | Discard pending change at point               |
 | =C-c C-p=      | Preview execution (pending batch if any; otherwise effective query) |
-| =c=            | Open copy transient menu (choose TSV / CSV / INSERT; toggle =-r= to refine) |
+| =c=            | Open copy transient menu (choose TSV / CSV / INSERT / UPDATE; toggle =-r= to refine) |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
-| =e=            | Export all rows (CSV copy/file or INSERT copy/file) |
+| =e=            | Export all rows (CSV / INSERT / UPDATE copy/file) |
 | =f=            | Toggle fullscreen                             |
 | =C-c ?=        | Transient menu                                |
 
@@ -318,6 +318,8 @@ Tip: the result-buffer status line uses compact staged-change tokens:
 =E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts.
 When a query result is not updateable because no primary key was detected,
 the same line shows =PK missing= and =E/D off=.
+Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the
+result transient as the exact staged SQL batch.
 
 *** Insert Buffer Keys
 

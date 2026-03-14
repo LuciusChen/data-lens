@@ -1624,7 +1624,11 @@
                 ((symbol-function 'clutch--export-insert-all-to-clipboard)
                  (lambda () (setq called 'insert-copy)))
                 ((symbol-function 'clutch--export-insert-all-file)
-                 (lambda () (setq called 'insert-file))))
+                 (lambda () (setq called 'insert-file)))
+                ((symbol-function 'clutch--export-update-all-to-clipboard)
+                 (lambda () (setq called 'update-copy)))
+                ((symbol-function 'clutch--export-update-all-file)
+                 (lambda () (setq called 'update-file))))
         (clutch-result-export)
         (should (eq called 'copy))))))
 
@@ -1641,7 +1645,11 @@
                 ((symbol-function 'clutch--export-insert-all-to-clipboard)
                  (lambda () (setq called 'insert-copy)))
                 ((symbol-function 'clutch--export-insert-all-file)
-                 (lambda () (setq called 'insert-file))))
+                 (lambda () (setq called 'insert-file)))
+                ((symbol-function 'clutch--export-update-all-to-clipboard)
+                 (lambda () (setq called 'update-copy)))
+                ((symbol-function 'clutch--export-update-all-file)
+                 (lambda () (setq called 'update-file))))
         (clutch-result-export)
         (should (eq called 'file))))))
 
@@ -1658,7 +1666,11 @@
                 ((symbol-function 'clutch--export-insert-all-to-clipboard)
                  (lambda () (setq called 'insert-copy)))
                 ((symbol-function 'clutch--export-insert-all-file)
-                 (lambda () (setq called 'insert-file))))
+                 (lambda () (setq called 'insert-file)))
+                ((symbol-function 'clutch--export-update-all-to-clipboard)
+                 (lambda () (setq called 'update-copy)))
+                ((symbol-function 'clutch--export-update-all-file)
+                 (lambda () (setq called 'update-file))))
         (clutch-result-export)
         (should (eq called 'insert-copy))))))
 
@@ -1675,9 +1687,55 @@
                 ((symbol-function 'clutch--export-insert-all-to-clipboard)
                  (lambda () (setq called 'insert-copy)))
                 ((symbol-function 'clutch--export-insert-all-file)
-                 (lambda () (setq called 'insert-file))))
+                 (lambda () (setq called 'insert-file)))
+                ((symbol-function 'clutch--export-update-all-to-clipboard)
+                 (lambda () (setq called 'update-copy)))
+                ((symbol-function 'clutch--export-update-all-file)
+                 (lambda () (setq called 'update-file))))
         (clutch-result-export)
         (should (eq called 'insert-file))))))
+
+(ert-deftest clutch-test-export-command-dispatches-update-copy ()
+  "Export command should dispatch to all-rows UPDATE clipboard export."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "update-copy"))
+                ((symbol-function 'clutch--export-csv-all-to-clipboard)
+                 (lambda () (setq called 'copy)))
+                ((symbol-function 'clutch--export-csv-all-file)
+                 (lambda () (setq called 'file)))
+                ((symbol-function 'clutch--export-insert-all-to-clipboard)
+                 (lambda () (setq called 'insert-copy)))
+                ((symbol-function 'clutch--export-insert-all-file)
+                 (lambda () (setq called 'insert-file)))
+                ((symbol-function 'clutch--export-update-all-to-clipboard)
+                 (lambda () (setq called 'update-copy)))
+                ((symbol-function 'clutch--export-update-all-file)
+                 (lambda () (setq called 'update-file))))
+        (clutch-result-export)
+        (should (eq called 'update-copy))))))
+
+(ert-deftest clutch-test-export-command-dispatches-update-file ()
+  "Export command should dispatch to all-rows UPDATE file export."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "update-file"))
+                ((symbol-function 'clutch--export-csv-all-to-clipboard)
+                 (lambda () (setq called 'copy)))
+                ((symbol-function 'clutch--export-csv-all-file)
+                 (lambda () (setq called 'file)))
+                ((symbol-function 'clutch--export-insert-all-to-clipboard)
+                 (lambda () (setq called 'insert-copy)))
+                ((symbol-function 'clutch--export-insert-all-file)
+                 (lambda () (setq called 'insert-file)))
+                ((symbol-function 'clutch--export-update-all-to-clipboard)
+                 (lambda () (setq called 'update-copy)))
+                ((symbol-function 'clutch--export-update-all-file)
+                 (lambda () (setq called 'update-file))))
+        (clutch-result-export)
+        (should (eq called 'update-file))))))
 
 (ert-deftest clutch-test-csv-content-escaping ()
   "CSV content should include header and escaped values."
@@ -1707,6 +1765,23 @@
                       "INSERT INTO users (id, name) VALUES (1, 'a');\n"
                       "INSERT INTO users (id, name) VALUES (2, 'b');\n"))))))
 
+(ert-deftest clutch-test-update-content-builds-full-row-sql ()
+  "UPDATE export content should reuse the shared UPDATE builder for all rows."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-columns '("id" "name"))
+    (cl-letf (((symbol-function 'clutch-result--build-update-statements-for-rows)
+               (lambda (rows col-indices op)
+                 (should (equal rows '((1 "a") (2 "b"))))
+                 (should (equal col-indices '(0 1)))
+                 (should (equal op "export UPDATE SQL"))
+                 '("UPDATE users SET name = 'a' WHERE id = 1"
+                   "UPDATE users SET name = 'b' WHERE id = 2"))))
+      (should (equal (clutch--update-content '((1 "a") (2 "b")))
+                     (concat
+                      "UPDATE users SET name = 'a' WHERE id = 1\n"
+                      "UPDATE users SET name = 'b' WHERE id = 2\n"))))))
+
 (ert-deftest clutch-test-copy-rows-as-insert-errors-when-source-table-is-unknown ()
   "INSERT copy should fail clearly when the source table cannot be detected."
   (with-temp-buffer
@@ -1721,6 +1796,112 @@
         (should (string-match-p
                  "Cannot copy INSERT SQL: source table cannot be detected"
                  (error-message-string err)))))))
+
+(ert-deftest clutch-test-copy-update-with-region-uses-region-rectangle ()
+  "UPDATE copy should use rectangle row/column selection when a region is active."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name" "status")
+                clutch--result-rows '((1 "a" "new")
+                                      (2 "b" "done")))
+    (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+              ((symbol-function 'clutch-result--region-rectangle-indices)
+               (lambda () '((0 1) . (1 2))))
+              ((symbol-function 'clutch-result--build-update-statements-for-rows)
+               (lambda (rows col-indices op)
+                 (should (equal rows '((1 "a" "new") (2 "b" "done"))))
+                 (should (equal col-indices '(1 2)))
+                 (should (equal op "copy UPDATE SQL"))
+                 '("UPDATE users SET name='a' WHERE id=1"
+                   "UPDATE users SET name='b' WHERE id=2"))))
+      (clutch-result--copy-rows-as-update))))
+
+(ert-deftest clutch-test-copy-update-without-region-copies-current-cell ()
+  "UPDATE copy without region should target the current cell."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name")
+                clutch--result-rows '((1 "a")))
+    (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+               (lambda () (list 0 1 "a")))
+              ((symbol-function 'clutch-result--build-update-statements-for-rows)
+               (lambda (rows col-indices op)
+                 (should (equal rows '((1 "a"))))
+                 (should (equal col-indices '(1)))
+                 (should (equal op "copy UPDATE SQL"))
+                 '("UPDATE users SET name = 'a' WHERE id = 1"))))
+      (clutch-result--copy-rows-as-update))))
+
+(ert-deftest clutch-test-copy-update-errors-when-only-pk-column-is-selected ()
+  "UPDATE copy should reject selections that contain only primary key columns."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name"))
+    (cl-letf (((symbol-function 'clutch--result-source-table-or-user-error)
+               (lambda (_op) "users"))
+              ((symbol-function 'clutch--result-pk-indices-or-user-error)
+               (lambda (_table _op) '(0))))
+      (let ((err (should-error
+                  (clutch-result--build-update-statements-for-rows
+                   '((1 "a")) '(0) "copy UPDATE SQL")
+                  :type 'user-error)))
+        (should (string-match-p
+                 "Cannot copy UPDATE SQL: no non-primary-key columns selected"
+                 (error-message-string err)))))))
+
+(ert-deftest clutch-test-copy-update-errors-on-non-source-columns ()
+  "UPDATE copy should reject alias or computed columns."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-columns '("id" "name" "computed_total"))
+    (cl-letf (((symbol-function 'clutch--result-source-table-or-user-error)
+               (lambda (_op) "users"))
+              ((symbol-function 'clutch--result-pk-indices-or-user-error)
+               (lambda (_table _op) '(0)))
+              ((symbol-function 'clutch--ensure-column-details)
+               (lambda (_conn _table)
+                 (list (list :name "id")
+                       (list :name "name")))))
+      (let ((err (should-error
+                  (clutch-result--build-update-statements-for-rows
+                   '((1 "alice" 42)) '(0 1 2) "copy UPDATE SQL")
+                  :type 'user-error)))
+        (should (string-match-p
+                 "Cannot copy UPDATE SQL: selected columns are not source columns: computed_total"
+                 (error-message-string err)))))))
+
+(ert-deftest clutch-test-copy-pending-sql-copies-current-batch ()
+  "Pending SQL copy should mirror the staged commit batch."
+  (with-temp-buffer
+    (let (copied)
+      (setq-local clutch--pending-inserts '(a)
+                  clutch--pending-edits '(b)
+                  clutch--pending-deletes '(c))
+      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+                 (lambda () '("INSERT INTO t VALUES (1)")))
+                ((symbol-function 'clutch-result--build-update-statements)
+                 (lambda () '("UPDATE t SET name='' WHERE id=1")))
+                ((symbol-function 'clutch-result--build-pending-delete-statements)
+                 (lambda () '("DELETE FROM t WHERE id=1")))
+                ((symbol-function 'kill-new)
+                 (lambda (text) (setq copied text))))
+        (clutch-result-copy-pending-sql)
+        (should (equal copied
+                       "INSERT INTO t VALUES (1);\nUPDATE t SET name='' WHERE id=1;\nDELETE FROM t WHERE id=1;\n"))))))
+
+(ert-deftest clutch-test-save-pending-sql-writes-current-batch ()
+  "Pending SQL save should write the staged commit batch to disk."
+  (let ((path (make-temp-file "clutch-pending-" nil ".sql")))
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local clutch--pending-edits '(b))
+          (cl-letf (((symbol-function 'clutch-result--build-update-statements)
+                     (lambda () '("UPDATE t SET name='' WHERE id=1")))
+                    ((symbol-function 'read-file-name)
+                     (lambda (&rest _args) path)))
+            (clutch-result-save-pending-sql)
+            (should (equal (with-temp-buffer
+                             (insert-file-contents path)
+                             (buffer-string))
+                           "UPDATE t SET name='' WHERE id=1;\n"))))
+      (delete-file path))))
 
 (ert-deftest clutch-test-strip-leading-comments ()
   "Test stripping leading SQL comments."

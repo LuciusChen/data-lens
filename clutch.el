@@ -6386,7 +6386,7 @@ RECT is (ROW-INDICES . COL-INDICES)."
 
 (defun clutch-result-copy (format &optional rect)
   "Unified copy entry point for result buffer.
-FORMAT is one of symbols: `tsv', `csv', `insert'.
+FORMAT is one of symbols: `tsv', `csv', `insert', `update'.
 If region is active, copy rectangle bounds from region endpoints.
 Otherwise, copy the current cell."
   (pcase format
@@ -6402,6 +6402,8 @@ Otherwise, copy the current cell."
      (clutch-result--copy-rows-as-csv rect))
     ('insert
      (clutch-result--copy-rows-as-insert rect))
+    ('update
+     (clutch-result--copy-rows-as-update rect))
     (_
      (user-error "Unsupported copy format: %s" format))))
 
@@ -6431,6 +6433,11 @@ Otherwise, copy the current cell."
   (interactive)
   (clutch-result--copy-fmt 'insert))
 
+(defun clutch-result-copy-update ()
+  "Copy as UPDATE statements."
+  (interactive)
+  (clutch-result--copy-fmt 'update))
+
 (transient-define-prefix clutch-result-copy-dispatch ()
   "Copy result buffer data.
 Enable --refine to exclude rows/columns interactively before copying
@@ -6440,7 +6447,8 @@ Enable --refine to exclude rows/columns interactively before copying
   ["Copy as"
    ("t" "TSV"             clutch-result-copy-tsv)
    ("c" "CSV with header" clutch-result-copy-csv)
-   ("i" "INSERT"          clutch-result-copy-insert)])
+   ("i" "INSERT"          clutch-result-copy-insert)
+   ("u" "UPDATE"          clutch-result-copy-update)])
 
 
 (defun clutch-result--yank-cell-value (val)
@@ -6867,6 +6875,48 @@ Selects JSON, XML, or binary string view based on column type and content."
                              cols
                              (mapconcat #'clutch--value-to-literal vals ", ")))))
 
+(defun clutch-result--selected-update-col-indices (pk-indices col-indices op)
+  "Return non-PK update column indices from COL-INDICES for OP."
+  (let ((set-col-indices
+         (cl-loop for cidx in col-indices
+                  unless (memq cidx pk-indices)
+                  collect cidx)))
+    (unless set-col-indices
+      (user-error "Cannot %s: no non-primary-key columns selected" op))
+    set-col-indices))
+
+(defun clutch-result--ensure-update-source-columns (table col-indices op)
+  "Ensure COL-INDICES map to real source columns for TABLE during OP."
+  (let* ((details (or (clutch--ensure-column-details clutch-connection table)
+                      (user-error "Cannot %s: source column metadata is unavailable"
+                                  op)))
+         (detail-names (mapcar (lambda (detail) (plist-get detail :name)) details))
+         (invalid (cl-loop for cidx in col-indices
+                           for col-name = (nth cidx clutch--result-columns)
+                           unless (member col-name detail-names)
+                           collect col-name)))
+    (when invalid
+      (user-error "Cannot %s: selected columns are not source columns: %s"
+                  op
+                  (string-join invalid ", ")))))
+
+(defun clutch-result--build-update-statements-for-rows (rows col-indices op)
+  "Return UPDATE statements for ROWS using COL-INDICES.
+OP is a short operation description used in user-facing error messages."
+  (let* ((table (clutch--result-source-table-or-user-error op))
+         (pk-indices (clutch--result-pk-indices-or-user-error table op))
+         (set-col-indices (clutch-result--selected-update-col-indices
+                           pk-indices col-indices op))
+         (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
+         (col-names clutch--result-columns))
+    (clutch-result--ensure-update-source-columns table set-col-indices op)
+    (cl-loop for row in rows
+             for pk-vec = (clutch-result--extract-pk-vec row pk-indices)
+             for edits = (cl-loop for cidx in set-col-indices
+                                  collect (cons cidx (nth cidx row)))
+             collect (clutch-result--build-update-stmt
+                      table pk-vec edits col-names pk-names))))
+
 (defun clutch-result--copy-rows-as-insert (&optional rect)
   "Copy row(s) as INSERT statement(s) to the kill ring.
 Rows/columns: region rectangle > current cell."
@@ -6888,6 +6938,31 @@ Rows/columns: region rectangle > current cell."
     (kill-new (mapconcat #'identity stmts "\n"))
     (deactivate-mark)
     (message "Copied %d INSERT statement%s (%d col%s)"
+             (length stmts) (if (= (length stmts) 1) "" "s")
+             (length col-indices) (if (= (length col-indices) 1) "" "s"))))
+
+(defun clutch-result--copy-rows-as-update (&optional rect)
+  "Copy row(s) as UPDATE statement(s) to the kill ring.
+Rows/columns: region rectangle > current cell."
+  (let* ((rect (or rect
+                   (if (use-region-p)
+                       (clutch-result--region-rectangle-indices)
+                     (pcase-let ((`(,ridx ,cidx ,_v)
+                                  (or (clutch-result--cell-at-point)
+                                      (user-error "No cell at point"))))
+                       (cons (list ridx) (list cidx))))))
+         (indices (or (car-safe rect)
+                      (clutch-result--selected-row-indices)
+                      (user-error "No row at point")))
+         (col-indices (or (cdr-safe rect)
+                          (cl-loop for i below (length clutch--result-columns)
+                                   collect i)))
+         (rows (mapcar (lambda (ridx) (nth ridx clutch--result-rows)) indices))
+         (stmts (clutch-result--build-update-statements-for-rows
+                 rows col-indices "copy UPDATE SQL")))
+    (kill-new (mapconcat #'identity stmts "\n"))
+    (deactivate-mark)
+    (message "Copied %d UPDATE statement%s (%d col%s)"
              (length stmts) (if (= (length stmts) 1) "" "s")
              (length col-indices) (if (= (length col-indices) 1) "" "s"))))
 
@@ -6964,16 +7039,22 @@ Prompts for format:
 - csv-copy: all rows to clipboard as CSV text
 - csv-file: all rows to CSV file
 - insert-copy: all rows to clipboard as INSERT statements
-- insert-file: all rows to a .sql file as INSERT statements."
+- insert-file: all rows to a .sql file as INSERT statements
+- update-copy: all rows to clipboard as UPDATE statements
+- update-file: all rows to a .sql file as UPDATE statements."
   (interactive)
   (let ((fmt (completing-read "Export format: "
-                              '("csv-copy" "csv-file" "insert-copy" "insert-file")
+                              '("csv-copy" "csv-file"
+                                "insert-copy" "insert-file"
+                                "update-copy" "update-file")
                               nil t)))
     (pcase fmt
       ("csv-copy" (clutch--export-csv-all-to-clipboard))
       ("csv-file" (clutch--export-csv-all-file))
       ("insert-copy" (clutch--export-insert-all-to-clipboard))
-      ("insert-file" (clutch--export-insert-all-file)))))
+      ("insert-file" (clutch--export-insert-all-file))
+      ("update-copy" (clutch--export-update-all-to-clipboard))
+      ("update-file" (clutch--export-update-all-file)))))
 
 (defun clutch--csv-escape (val)
   "Return CSV-escaped string for VAL."
@@ -7084,6 +7165,15 @@ Prompts for format:
         (concat (mapconcat #'identity stmts "\n") "\n")
       "")))
 
+(defun clutch--update-content (rows)
+  "Return UPDATE statement text for ROWS using current result metadata."
+  (let* ((col-indices (cl-loop for i below (length clutch--result-columns) collect i))
+         (stmts (clutch-result--build-update-statements-for-rows
+                 rows col-indices "export UPDATE SQL")))
+    (if stmts
+        (concat (mapconcat #'identity stmts "\n") "\n")
+      "")))
+
 (defun clutch--export-insert-rows-to-file (rows)
   "Export ROWS as INSERT statements to a SQL file."
   (let ((path (read-file-name "Export SQL to file: " nil nil nil "export.sql")))
@@ -7109,6 +7199,73 @@ Prompts for format:
   "Copy all query rows as INSERT statements to the kill ring."
   (let ((rows (clutch-result--collect-all-export-rows)))
     (clutch--export-insert-rows-to-clipboard rows)))
+
+(defun clutch--export-update-rows-to-file (rows)
+  "Export ROWS as UPDATE statements to a SQL file."
+  (let ((path (read-file-name "Export SQL to file: " nil nil nil "export.sql")))
+    (with-temp-buffer
+      (insert (clutch--update-content rows))
+      (write-region (point-min) (point-max) path nil 'silent))
+    (message "Exported %d row%s as UPDATE SQL to %s"
+             (length rows) (if (= (length rows) 1) "" "s")
+             path)))
+
+(defun clutch--export-update-rows-to-clipboard (rows)
+  "Copy ROWS as UPDATE statements to the kill ring."
+  (kill-new (clutch--update-content rows))
+  (message "Copied %d row%s as UPDATE SQL"
+           (length rows) (if (= (length rows) 1) "" "s")))
+
+(defun clutch--export-update-all-file ()
+  "Export all query rows as UPDATE statements to a SQL file."
+  (let ((rows (clutch-result--collect-all-export-rows)))
+    (clutch--export-update-rows-to-file rows)))
+
+(defun clutch--export-update-all-to-clipboard ()
+  "Copy all query rows as UPDATE statements to the kill ring."
+  (let ((rows (clutch-result--collect-all-export-rows)))
+    (clutch--export-update-rows-to-clipboard rows)))
+
+(defun clutch-result--pending-sql-statements ()
+  "Return the staged SQL statements that would run on commit."
+  (unless (or clutch--pending-inserts clutch--pending-edits clutch--pending-deletes)
+    (user-error "No pending SQL"))
+  (append
+   (when clutch--pending-inserts
+     (clutch-result--build-pending-insert-statements))
+   (when clutch--pending-edits
+     (clutch-result--build-update-statements))
+   (when clutch--pending-deletes
+     (clutch-result--build-pending-delete-statements))))
+
+(defun clutch-result--pending-sql-content (&optional stmts)
+  "Return STMTS as a trailing-newline-terminated staged SQL batch string.
+When STMTS is nil, build statements from the current pending state."
+  (let ((stmts (or stmts (clutch-result--pending-sql-statements))))
+    (if stmts
+        (concat (mapconcat (lambda (s) (concat s ";")) stmts "\n") "\n")
+      "")))
+
+(defun clutch-result-copy-pending-sql ()
+  "Copy the staged SQL batch to the kill ring."
+  (interactive)
+  (let ((stmts (clutch-result--pending-sql-statements)))
+    (kill-new (clutch-result--pending-sql-content stmts))
+    (message "Copied %d pending SQL statement%s"
+             (length stmts) (if (= (length stmts) 1) "" "s"))))
+
+(defun clutch-result-save-pending-sql ()
+  "Save the staged SQL batch to a file."
+  (interactive)
+  (let* ((stmts (clutch-result--pending-sql-statements))
+         (sql (clutch-result--pending-sql-content stmts))
+         (path (read-file-name "Save pending SQL to file: " nil nil nil "pending.sql")))
+    (with-temp-buffer
+      (insert sql)
+      (write-region (point-min) (point-max) path nil 'silent))
+    (message "Saved %d pending SQL statement%s to %s"
+             (length stmts) (if (= (length stmts) 1) "" "s")
+             path)))
 
 ;;;; Column page navigation and width adjustment
 
@@ -7510,6 +7667,9 @@ Accumulates input until a semicolon is found, then executes."
     ("x" "Preview execution" clutch-preview-execution-sql)
     ("#" "Count total"       clutch-result-count-total)
     ("A" "Aggregate"         clutch-result-aggregate)]
+   ["Pending"
+    ("y" "Copy pending SQL"  clutch-result-copy-pending-sql)
+    ("Y" "Save pending SQL"  clutch-result-save-pending-sql)]
    ["Filter / Sort"
     ("/" "Filter rows"       clutch-result-filter)
     ("W" "WHERE filter"      clutch-result-apply-filter)
