@@ -2115,11 +2115,14 @@ Leading SQL comments are stripped before checking."
         (user-error "Query cancelled")))))
 
 (defun clutch--select-query-p (sql)
-  "Return non-nil if SQL is a SELECT query.
+  "Return non-nil if SQL returns a result set.
+Matches SELECT, WITH, and introspection keywords (DESCRIBE, DESC,
+SHOW, EXPLAIN) that also return tabular results.
 Leading SQL comments are stripped before checking."
   (let ((trimmed (clutch--strip-leading-comments sql)))
-    (string-match-p "\\`\\(?:SELECT\\|WITH\\)\\b"
-                    (upcase trimmed))))
+    (string-match-p
+     "\\`\\(?:SELECT\\|WITH\\|DESCRIBE\\|DESC\\|SHOW\\|EXPLAIN\\)\\b"
+     (upcase trimmed))))
 
 (defun clutch--init-result-state (conn sql columns rows elapsed)
   "Initialize buffer-local state for a fresh query result.
@@ -3612,7 +3615,9 @@ Works without a database connection."
 (defun clutch-completion-at-point ()
   "Completion-at-point function for SQL identifiers.
 Skips column loading if the connection is busy (prevents re-entrancy
-when completion triggers during an in-flight query)."
+when completion triggers during an in-flight query).
+Shows a minibuffer message when schema is still loading so the user
+knows why completions are unavailable."
   (when-let* ((conn clutch-connection)
               (bounds (bounds-of-thing-at-point 'symbol)))
     (let* ((beg (car bounds))
@@ -3620,6 +3625,10 @@ when completion triggers during an in-flight query)."
            (prefix (buffer-substring-no-properties beg end))
            (prefix-len (- end beg))
            (schema (clutch--schema-for-connection))
+           (_ (when (and (null schema)
+                         (eq (plist-get (clutch--schema-status-entry conn) :state)
+                             'refreshing))
+                (message "Schema loading, please wait…")))
            (line-before (buffer-substring-no-properties
                          (line-beginning-position) beg))
            (table-context-p
@@ -4288,6 +4297,14 @@ Rebuilds `header-line-format' with the active column highlighted."
                          visible-cols widths nw
                          has-prev has-next cidx))))))))
 
+(defun clutch--reset-vscroll (win _start)
+  "Snap WIN vscroll to zero so rows align with the fixed header.
+`pixel-scroll-precision-mode' applies sub-pixel vscroll that shifts
+buffer content behind the header-line.  Resetting to 0 after every
+scroll event keeps whole-line alignment without breaking smooth scroll."
+  (when (> (window-vscroll win t) 0)
+    (set-window-vscroll win 0 t)))
+
 (define-derived-mode clutch-result-mode special-mode "Clutch-Result"
   "Mode for displaying database query results with SQL pagination.
 
@@ -4333,6 +4350,7 @@ Edit:
   (setq-local revert-buffer-function #'clutch-result--revert)
   (add-hook 'post-command-hook
             #'clutch--update-header-highlight nil t)
+  (add-hook 'window-scroll-functions #'clutch--reset-vscroll nil t)
   (add-hook 'kill-buffer-hook #'clutch--result-buffer-cleanup nil t)
   (add-hook 'change-major-mode-hook #'clutch--result-buffer-cleanup nil t)
   (clutch--enable-window-size-hook))
@@ -4718,15 +4736,14 @@ Scans text properties across the line."
       (clutch-result-edit--validate-live))))
 
 (defun clutch-result-edit--schedule-validation ()
-  "Validate the current edit buffer immediately or after a short idle delay."
+  "Validate the current edit buffer after a short idle delay.
+All field types use the same delay so feedback timing is consistent."
   (clutch-result-edit--cancel-validation-timer)
-  (if (clutch-result-edit--json-p)
-      (setq-local clutch-result-edit--validation-timer
-                  (run-with-idle-timer
-                   clutch-insert-validation-idle-delay nil
-                   #'clutch-result-edit--run-idle-validation
-                   (current-buffer)))
-    (clutch-result-edit--validate-live)))
+  (setq-local clutch-result-edit--validation-timer
+              (run-with-idle-timer
+               clutch-insert-validation-idle-delay nil
+               #'clutch-result-edit--run-idle-validation
+               (current-buffer))))
 
 (defun clutch-result-edit--after-change (_beg _end _len)
   "Schedule local validation after any edit-buffer change."
@@ -5472,16 +5489,15 @@ Use \\[clutch-result-commit] in the result buffer to commit."
         (clutch-result-insert--validate-field-live field)))))
 
 (defun clutch-result-insert--schedule-field-validation (field)
-  "Validate structured FIELD immediately or after idle delay."
+  "Validate structured FIELD after a short idle delay.
+All field types use the same delay so feedback timing is consistent."
   (clutch-result-insert--cancel-validation-timer)
-  (if (clutch-result-insert--json-field-p field)
-      (setq-local clutch-result-insert--validation-timer
-                  (run-with-idle-timer
-                   clutch-insert-validation-idle-delay nil
-                   #'clutch-result-insert--run-idle-validation
-                   (current-buffer)
-                   (plist-get field :name)))
-    (clutch-result-insert--validate-field-live field)))
+  (setq-local clutch-result-insert--validation-timer
+              (run-with-idle-timer
+               clutch-insert-validation-idle-delay nil
+               #'clutch-result-insert--run-idle-validation
+               (current-buffer)
+               (plist-get field :name))))
 
 (defun clutch-result-insert--after-change (beg end _len)
   "Locally validate the changed insert field spanning BEG..END."
