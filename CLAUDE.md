@@ -108,6 +108,50 @@ Before committing significant changes, step back and review the whole diff:
 - **Docs in sync**: Any change to key bindings, defaults, workflow, or data structures must update `README.org` and, where applicable, add or update a postmortem.
 - **Byte-compile clean**: `(byte-compile-file "clutch.el")` must produce zero warnings.
 
+## Pre-Commit Checklist (Mandatory)
+
+Every commit must pass all of these steps. Do not skip any.
+
+### 1. Read the full diff
+
+```bash
+git diff HEAD
+```
+
+Read every changed line. Do not commit changes that haven't been reviewed.
+
+### 2. Run ALL test files
+
+Both test suites must pass. Running only one is not enough.
+
+```bash
+# Main UI/logic tests
+emacs -batch -L . -l ert -l clutch \
+  -l test/clutch-test.el \
+  --eval '(ert-run-tests-batch-and-exit)'
+
+# JDBC backend tests
+emacs -batch -L . -l ert -l clutch-db-jdbc \
+  -l test/clutch-db-test.el \
+  --eval '(ert-run-tests-batch-and-exit "clutch-db-test-jdbc")'
+```
+
+### 3. Byte-compile with zero warnings
+
+```bash
+emacs -batch -L . -f batch-byte-compile clutch.el
+```
+
+### 4. Update tests when behavior changes
+
+When a function's behavior is intentionally changed, **search all test files** for existing tests of that function and update them before committing:
+
+```bash
+grep -n "function-name" test/clutch-test.el test/clutch-db-test.el
+```
+
+Failing to do this leaves stale tests that assert the old (now wrong) behavior, or worse, pass for the wrong reasons.
+
 ## Quality Checks
 
 Before releasing, ensure:
