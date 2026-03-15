@@ -1379,23 +1379,21 @@ rendering large result pages."
           :insert-placeholders (clutch--pending-insert-placeholders)
           :pk-indices clutch--cached-pk-indices)))
 
-(defun clutch--render-edit-entry (row ridx cidx render-state)
-  "Return pending edit entry for ROW/RIDX/CIDX from RENDER-STATE, or nil."
+(defun clutch--render-edit-entry (row _ridx cidx render-state)
+  "Return pending edit entry for ROW/CIDX from RENDER-STATE, or nil."
   (let* ((edits (plist-get render-state :edits))
          (pk-indices (plist-get render-state :pk-indices)))
-    (or (and pk-indices
-             (gethash (cons (clutch-result--extract-pk-vec row pk-indices) cidx)
-                      edits))
-        (gethash (cons ridx cidx) edits))))
+    (and pk-indices
+         (gethash (cons (clutch-result--extract-pk-vec row pk-indices) cidx)
+                  edits))))
 
-(defun clutch--row-pending-edit-p (row ridx render-state)
-  "Return non-nil when ROW/RIDX has any pending edit in RENDER-STATE."
+(defun clutch--row-pending-edit-p (row _ridx render-state)
+  "Return non-nil when ROW has any pending edit in RENDER-STATE."
   (let* ((edit-rows (plist-get render-state :edit-rows))
          (pk-indices (plist-get render-state :pk-indices)))
-    (or (gethash ridx edit-rows)
-        (and pk-indices
-             (gethash (clutch-result--extract-pk-vec row pk-indices)
-                      edit-rows)))))
+    (and pk-indices
+         (gethash (clutch-result--extract-pk-vec row pk-indices)
+                  edit-rows))))
 
 (defun clutch--render-cell (row ridx cidx widths render-state)
   "Render cell at column CIDX of ROW at row index RIDX.
@@ -7416,8 +7414,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
   (let* ((pk-indices pk-indices)
          (pk-vec (and pk-indices row
                       (clutch-result--extract-pk-vec row pk-indices)))
-         (edited (or (and pk-vec (assoc (cons pk-vec cidx) edits))
-                     (assoc (cons ridx cidx) edits)))
+         (edited (and pk-vec (assoc (cons pk-vec cidx) edits)))
          (display-val (if edited (cdr edited) val))
          (long-p (clutch--long-field-type-p col-def))
          (expanded-p (memq cidx expanded-fields))
