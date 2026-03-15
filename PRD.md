@@ -141,7 +141,7 @@ SQL query editing and execution mode. The primary entry point for interacting wi
 | `clutch--last-query` | Last executed SQL string |
 | `clutch--schema-cache` | Table/column names for completion |
 | `clutch--column-details-cache` | PK/FK/default/nullable metadata |
-| `clutch--schema-status` | `ready` / `loading` / `stale` / `failed` |
+| `clutch--schema-status` | `ready` / `refreshing` / `stale` / `failed` |
 | `clutch--console-name` | Name for persisting console to disk |
 | `clutch--tables-in-buffer-cache` | Cached `(tick . tables)` for completion |
 | `clutch--tables-in-query-cache` | Cached `(tick beg end . tables)` |
@@ -152,8 +152,7 @@ SQL query editing and execution mode. The primary entry point for interacting wi
 |-----|---------|-------------|
 | `C-c C-e` | `clutch-connect` | Connect to database |
 | `C-c C-x` | `clutch-execute` | Execute SQL at point or region |
-| `C-c C-s` | `clutch--refresh-current-schema` | Refresh schema cache |
-| `C-c C-r` | `clutch-refresh-schema` | Manual schema refresh with message |
+| `C-c C-s` | `clutch-refresh-schema` | Refresh schema cache |
 | `C-c ?` | Transient dispatch | Main command menu |
 | `TAB` | Completion at point | Table/column name CAPF |
 
@@ -200,32 +199,38 @@ Interactive result browsing with column paging, sorting, filtering, mutations.
 
 | Key | Command | Description |
 |-----|---------|-------------|
-| `RET` | `clutch-result-goto-cell` | Expand cell or follow FK link |
-| `n` | `clutch-result-next-row` | Move to next row |
-| `p` | `clutch-result-prev-row` | Move to previous row |
-| `f` | `clutch-result-next-column` | Move to next column |
-| `b` | `clutch-result-prev-column` | Move to previous column |
-| `]` | `clutch-result-next-column-page` | Next column page |
-| `[` | `clutch-result-prev-column-page` | Previous column page |
-| `\|` | `clutch-result-pin-column` | Toggle column pinning |
-| `+` | `clutch-result-widen-column` | Increase active column width |
-| `-` | `clutch-result-narrow-column` | Decrease active column width |
-| `s` | `clutch-result-sort` | Set ORDER BY column/direction |
-| `W` | `clutch-result-where-filter` | Apply SQL WHERE clause filter |
-| `/` | `clutch-result-filter` | Client-side regex row filter |
-| `e` | `clutch-result-edit-cell` | Stage cell edit |
-| `d` | `clutch-result-delete-row` | Stage row for deletion |
+| `RET` | `clutch-result-open-record` | Open record view |
+| `TAB` / `S-TAB` | `clutch-result-next-cell` / `clutch-result-prev-cell` | Move between cells |
+| `n` / `p` | `clutch-result-down-cell` / `clutch-result-up-cell` | Move to next/previous row in same column |
+| `N` / `P` | `clutch-result-next-page` / `clutch-result-prev-page` | Next / previous SQL page |
+| `M-<` / `M->` | `clutch-result-first-page` / `clutch-result-last-page` | First / last SQL page |
+| `]` / `[` | `clutch-result-next-col-page` / `clutch-result-prev-col-page` | Next / previous column page |
+| `C-c p` / `C-c P` | `clutch-result-pin-column` / `clutch-result-unpin-column` | Pin / unpin current column |
+| `=` / `-` | `clutch-result-widen-column` / `clutch-result-narrow-column` | Adjust column width |
+| `C` | `clutch-result-goto-column` | Jump to a column by name |
+| `s` / `S` | `clutch-result-sort-by-column` / `clutch-result-sort-by-column-desc` | Sort by current column |
+| `W` | `clutch-result-apply-filter` | Apply SQL WHERE clause filter |
+| `/` | `clutch-result-filter` | Client-side fuzzy filter |
+| `C-c '` | `clutch-result-edit-cell` | Edit / re-edit current cell |
 | `i` | `clutch-result-insert-row` | Open insert buffer |
-| `*` | `clutch-result-mark-row` | Mark/unmark row (dired-style) |
-| `c` | `clutch-result-copy-cell` | Copy cell value |
-| `C-c C-c` | `clutch-result-commit-mutations` | Preview and commit staged changes |
-| `C-c C-k` | `clutch-result-discard-mutations` | Discard all pending changes |
-| `r` | `clutch-result-refresh` | Refresh current page |
-| `g` | `clutch-result-reload` | Re-execute original query |
-| `SPC` | `clutch-result-page-down` | Next row page |
-| `S-SPC` | `clutch-result-page-up` | Previous row page |
-| `E` | Export transient | CSV/TSV/JSON/Org export menu |
+| `d` | `clutch-result-delete-rows` | Stage row(s) for deletion |
+| `C-c C-c` | `clutch-result-commit` | Commit staged INSERT/UPDATE/DELETE changes |
+| `C-c C-k` | `clutch-result-discard-pending-at-point` | Discard pending change at point |
+| `C-c C-p` | `clutch-preview-execution-sql` | Preview pending batch or effective query |
+| `c` | `clutch-result-copy-dispatch` | Copy transient (TSV / CSV / INSERT / UPDATE) |
+| `e` | `clutch-result-export` | Export all rows (CSV / INSERT / UPDATE copy/file) |
+| `v` | `clutch-result-view-value` | View current cell value |
+| `g` | `clutch-result-rerun` | Re-execute original query |
+| `#` | `clutch-result-count-total` | Count total rows |
+| `A` | `clutch-result-aggregate` | Aggregate numeric values |
+| `f` | `clutch-result-fullscreen-toggle` | Toggle fullscreen |
 | `q` | `quit-window` | Close result buffer |
+
+**Pending SQL workflow**:
+- Result transient includes a dedicated *Pending* group:
+  - `y` → `clutch-result-copy-pending-sql`
+  - `Y` → `clutch-result-save-pending-sql`
+- This exports the exact staged SQL batch that `C-c C-c` would execute, rather than re-exporting the full result set.
 
 ---
 
@@ -543,12 +548,12 @@ Connection profile plist keys:
 ### Eager vs. Async Refresh
 
 - **Eager (synchronous)**: MySQL, PostgreSQL, SQLite — blocks until schema loaded on connect
-- **Async (background)**: JDBC — background refresh with ticket-based stale-response guard
-  - Buffer status line shows: `[schema...]` (loading), `[schema~]` (stale), `[schema!]` (failed)
+- **Async (background)**: JDBC — background refresh with ticket-based stale-response guard and timeout/failure exit
+  - Buffer status line shows: `[schema...]` (refreshing), `[schema~]` (stale), `[schema!]` (failed), `[schema Nt]` (ready)
 
 ### Cache Invalidation
 
-- Manual: `clutch-refresh-schema` (`C-c C-r`) or `clutch--refresh-current-schema` (`C-c C-s`)
+- Manual: `clutch-refresh-schema` (`C-c C-s`)
 - Auto: after successful DDL execution (CREATE/ALTER/DROP)
 - Stale detection: JDBC only (schema status flag in async response)
 
@@ -857,10 +862,6 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 
 | Issue | Severity | Description |
 |-------|----------|-------------|
-| Schema browser async backfill | Medium | `clutch--refresh-schema-status-ui` doesn't handle `clutch-schema-mode`; status not updated in schema browser |
-| Per-connection RPC timeout | Medium | `clutch-jdbc--rpc-async` uses global `clutch-jdbc-rpc-timeout-seconds` instead of `:rpc-timeout` from connection params |
-| Schema browser first-open sync | Low | First open walks `clutch-db-list-tables` synchronously; should use cached schema if available |
-| Expand-all concurrent requests | Low | Schema browser expand-all triggers many concurrent async fetches; no batching or debounce |
 | SQL Server/DB2/Snowflake/Redshift coverage | Low | No live integration tests; behavior gaps may exist |
 
 ### Design Constraints
