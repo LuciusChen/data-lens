@@ -385,7 +385,9 @@ Dynamically bound by `clutch--execute-and-mark'.")
   "Warn once that Oracle completion needs orai18n.jar for this session."
   (unless clutch--oracle-i18n-warning-shown
     (setq clutch--oracle-i18n-warning-shown t)
-    (message "Oracle completion needs orai18n.jar for this character set. Run M-x clutch-jdbc-install-driver RET oracle-i18n")))
+    (message (concat "Oracle completion needs orai18n.jar for this character set. "
+                     "Run M-x clutch-jdbc-install-driver RET oracle "
+                     "(or oracle-i18n if you already manage ojdbc manually)."))))
 
 (defun clutch--safe-completion-call (thunk)
   "Call THUNK for completion and swallow recoverable metadata errors."
