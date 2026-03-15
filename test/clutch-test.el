@@ -120,6 +120,7 @@
   "JSON scalar values should remain valid JSON when edited or viewed."
   (skip-unless (fboundp 'json-serialize))
   (should (equal (clutch--json-value-to-string "hello") "\"hello\""))
+  (should (equal (clutch--json-value-to-string nil) "null"))
   (should (equal (clutch--json-value-to-string t) "true"))
   (should (equal (clutch--json-value-to-string :false) "false"))
   (should (equal (clutch--json-value-to-string 42) "42")))
@@ -1864,7 +1865,28 @@
                    '((1 "alice" 42)) '(0 1 2) "copy UPDATE SQL")
                   :type 'user-error)))
         (should (string-match-p
-                 "Cannot copy UPDATE SQL: selected columns are not source columns: computed_total"
+                 "Cannot copy UPDATE SQL: selected columns are not writable source columns: computed_total"
+                 (error-message-string err)))))))
+
+(ert-deftest clutch-test-copy-update-errors-on-generated-source-columns ()
+  "UPDATE copy should reject generated source columns."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-columns '("id" "generated_name"))
+    (cl-letf (((symbol-function 'clutch--result-source-table-or-user-error)
+               (lambda (_op) "users"))
+              ((symbol-function 'clutch--result-pk-indices-or-user-error)
+               (lambda (_table _op) '(0)))
+              ((symbol-function 'clutch--ensure-column-details)
+               (lambda (_conn _table)
+                 (list (list :name "id")
+                       (list :name "generated_name" :generated t)))))
+      (let ((err (should-error
+                  (clutch-result--build-update-statements-for-rows
+                   '((1 "alice")) '(0 1) "copy UPDATE SQL")
+                  :type 'user-error)))
+        (should (string-match-p
+                 "Cannot copy UPDATE SQL: selected columns are not writable source columns: generated_name"
                  (error-message-string err)))))))
 
 (ert-deftest clutch-test-copy-pending-sql-copies-current-batch ()
@@ -2369,10 +2391,10 @@
   (should (clutch--select-query-p "-- get users\nSELECT * FROM users"))
   (should (clutch--select-query-p "/* all */\nSELECT * FROM users"))
   (should (clutch--select-query-p "-- a\n-- b\nSELECT 1"))
-  ;; Note: SHOW/DESCRIBE/EXPLAIN are not recognized as SELECT
-  (should-not (clutch--select-query-p "SHOW TABLES"))
-  (should-not (clutch--select-query-p "DESCRIBE users"))
-  (should-not (clutch--select-query-p "EXPLAIN SELECT * FROM t"))
+  ;; Result-set introspection commands also route through the SELECT/result path.
+  (should (clutch--select-query-p "SHOW TABLES"))
+  (should (clutch--select-query-p "DESCRIBE users"))
+  (should (clutch--select-query-p "EXPLAIN SELECT * FROM t"))
   (should-not (clutch--select-query-p "INSERT INTO users VALUES (1)"))
   (should-not (clutch--select-query-p "UPDATE users SET name='x'")))
 

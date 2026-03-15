@@ -3618,9 +3618,7 @@ Works without a database connection."
 (defun clutch-completion-at-point ()
   "Completion-at-point function for SQL identifiers.
 Skips column loading if the connection is busy (prevents re-entrancy
-when completion triggers during an in-flight query).
-Shows a minibuffer message when schema is still loading so the user
-knows why completions are unavailable."
+when completion triggers during an in-flight query)."
   (when-let* ((conn clutch-connection)
               (bounds (bounds-of-thing-at-point 'symbol)))
     (let* ((beg (car bounds))
@@ -3628,10 +3626,6 @@ knows why completions are unavailable."
            (prefix (buffer-substring-no-properties beg end))
            (prefix-len (- end beg))
            (schema (clutch--schema-for-connection))
-           (_ (when (and (null schema)
-                         (eq (plist-get (clutch--schema-status-entry conn) :state)
-                             'refreshing))
-                (message "Schema loading, please wait…")))
            (line-before (buffer-substring-no-properties
                          (line-beginning-position) beg))
            (table-context-p
@@ -5508,6 +5502,7 @@ All field types use the same delay so feedback timing is consistent."
                          (and (> beg (point-min))
                               (clutch-result-insert--field-state-at-position (1- beg)))
                          (clutch-result-insert--field-state-at-position end))))
+    (clutch-result-insert--validate-field-live field)
     (clutch-result-insert--schedule-field-validation field)))
 
 (defun clutch-result-insert--field-name-at-line ()
@@ -6721,7 +6716,7 @@ optionally reformat the buffer content."
   "Convert VAL to valid JSON text suitable for JSON editing and viewing."
   (cond
    ((null val)
-    (clutch--format-value val))
+    "null")
    ((and (stringp val)
          (fboundp 'json-serialize)
          (fboundp 'json-parse-string))
@@ -6905,17 +6900,20 @@ Selects JSON, XML, or binary string view based on column type and content."
     set-col-indices))
 
 (defun clutch-result--ensure-update-source-columns (table col-indices op)
-  "Ensure COL-INDICES map to real source columns for TABLE during OP."
+  "Ensure COL-INDICES map to writable source columns for TABLE during OP."
   (let* ((details (or (clutch--ensure-column-details clutch-connection table)
                       (user-error "Cannot %s: source column metadata is unavailable"
                                   op)))
-         (detail-names (mapcar (lambda (detail) (plist-get detail :name)) details))
+         (detail-map
+          (cl-loop for detail in details
+                   collect (cons (plist-get detail :name) detail)))
          (invalid (cl-loop for cidx in col-indices
                            for col-name = (nth cidx clutch--result-columns)
-                           unless (member col-name detail-names)
+                           for detail = (cdr (assoc col-name detail-map))
+                           unless (and detail (not (plist-get detail :generated)))
                            collect col-name)))
     (when invalid
-      (user-error "Cannot %s: selected columns are not source columns: %s"
+      (user-error "Cannot %s: selected columns are not writable source columns: %s"
                   op
                   (string-join invalid ", ")))))
 
