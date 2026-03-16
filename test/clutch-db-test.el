@@ -185,7 +185,11 @@
                        captured-params params
                        captured-timeout timeout-seconds)
                  (should-not errback)
-                 (funcall callback '(:tables ((:name "USERS") (:name "ORDERS"))))
+                 (funcall callback '(:cursor-id nil
+                                    :columns ("name" "type" "schema")
+                                    :rows (("USERS" "TABLE" "SCOTT")
+                                           ("ORDERS" "TABLE" "SCOTT"))
+                                    :done t))
                  42)))
       (should (clutch-db-refresh-schema-async
                conn

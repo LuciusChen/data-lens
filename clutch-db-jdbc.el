@@ -698,19 +698,24 @@ Oracle uses the username as schema (uppercased).  Other backends return nil."
   "Return table names for JDBC CONN using DatabaseMetaData.
 For Oracle, defaults the schema filter to the connected username to avoid
 returning tables from SYS/SYSTEM and other visible schemas."
-  (let* ((schema  (clutch-jdbc--conn-schema conn))
-         (result  (clutch-jdbc--rpc
-                   "get-tables"
-                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                     ,@(when schema `((schema . ,schema)))))))
-    (mapcar (lambda (tbl) (plist-get tbl :name))
-            (plist-get result :tables))))
+  (let* ((schema     (clutch-jdbc--conn-schema conn))
+         (result     (clutch-jdbc--rpc
+                      "get-tables"
+                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                        ,@(when schema `((schema . ,schema))))))
+         (first-rows (plist-get result :rows))
+         (cursor-id  (plist-get result :cursor-id))
+         (done       (eq t (plist-get result :done)))
+         (all-rows   (if done first-rows
+                       (nconc first-rows
+                              (clutch-jdbc--fetch-all conn cursor-id)))))
+    (mapcar #'car all-rows)))
 
 (cl-defmethod clutch-db-refresh-schema-async ((conn clutch-jdbc-conn) callback
                                               &optional errback)
   "Refresh JDBC table names for CONN asynchronously."
-  (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (clutch-jdbc--conn-schema conn))
+  (let* ((params      (clutch-jdbc-conn-params conn))
+         (schema      (clutch-jdbc--conn-schema conn))
          (rpc-timeout (or (plist-get params :rpc-timeout)
                           clutch-jdbc-rpc-timeout-seconds)))
     (clutch-jdbc--rpc-async
@@ -718,10 +723,14 @@ returning tables from SYS/SYSTEM and other visible schemas."
      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
        ,@(when schema `((schema . ,schema))))
      (lambda (result)
-       (when callback
-         (funcall callback
-                  (mapcar (lambda (tbl) (plist-get tbl :name))
-                          (plist-get result :tables)))))
+       (let* ((first-rows (plist-get result :rows))
+              (cursor-id  (plist-get result :cursor-id))
+              (done       (eq t (plist-get result :done)))
+              (all-rows   (if done first-rows
+                            (nconc first-rows
+                                   (clutch-jdbc--fetch-all conn cursor-id)))))
+         (when callback
+           (funcall callback (mapcar #'car all-rows)))))
      errback
      rpc-timeout)
     t))
