@@ -58,13 +58,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.1.7"
+(defcustom clutch-jdbc-agent-version "0.1.9"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "189ff1113739c5903fd1ca1b33236ecb40496d900824b15b2831036d6b3829a0"
+  "ba384b758d4929f5b728994de5e9dca18f8c6a4bf57eb0266308d342d952ee93"
   "Expected SHA-256 for the bundled clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -354,7 +354,15 @@ TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'."
       (unless response
         (accept-process-output clutch-jdbc--agent-process 0.05)))
     (unless response
-      (error "clutch-jdbc-agent: timeout waiting for response to request %d" id))
+      ;; The agent is likely blocked on a dead JDBC call.  Kill the process so
+      ;; it does not remain wedged — subsequent requests would otherwise pile up
+      ;; behind the stuck op and all fail with "Closed Connection".
+      (when (process-live-p clutch-jdbc--agent-process)
+        (delete-process clutch-jdbc--agent-process))
+      (setq clutch-jdbc--agent-process nil
+            clutch-jdbc--response-queue nil)
+      (signal 'clutch-db-error
+              (list "Connection lost — reconnect with C-c C-e")))
     response))
 
 (defun clutch-jdbc--rpc (op params &optional timeout-seconds)
@@ -507,8 +515,14 @@ Returns a `clutch-jdbc-conn'."
     (clutch-db-error nil)))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-jdbc-conn))
-  "Return non-nil if the agent process is running and conn-id is valid."
+  "Return non-nil if the agent process is running and conn belongs to it.
+Checks both that the stored process is live AND that it is still the
+current agent process.  After a timeout kill, `clutch-jdbc--agent-process'
+is set to nil before the old JVM fully exits, so the old process may still
+pass `process-live-p' briefly; the identity check closes that window."
   (and (clutch-jdbc-conn-p conn)
+       clutch-jdbc--agent-process
+       (eq (clutch-jdbc-conn-process conn) clutch-jdbc--agent-process)
        (process-live-p (clutch-jdbc-conn-process conn))))
 
 (cl-defmethod clutch-db-init-connection ((_conn clutch-jdbc-conn))
@@ -638,14 +652,17 @@ Clob plists become their :preview string."
   (unwind-protect
       (condition-case err
           (let* ((query-timeout (plist-get (clutch-jdbc-conn-params conn) :query-timeout))
-                 (rpc-timeout (clutch-jdbc--conn-rpc-timeout conn))
+                 (rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn))
+                 ;; Clamp: ensure Oracle fires before Emacs RPC timeout
+                 (effective-qt  (when (and query-timeout (> query-timeout 0))
+                                  (min query-timeout (max 1 (- rpc-timeout 5)))))
                  (result (clutch-jdbc--rpc
                           "execute"
                           `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
                             (sql        . ,sql)
                             (fetch-size . ,clutch-jdbc-fetch-size)
-                            ,@(when query-timeout
-                                `((query-timeout-seconds . ,query-timeout))))
+                            ,@(when effective-qt
+                                `((query-timeout-seconds . ,effective-qt))))
                           rpc-timeout))
                  (type   (plist-get result :type)))
             (if (equal type "dml")
@@ -785,8 +802,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
 (cl-defmethod clutch-db-refresh-schema-async ((conn clutch-jdbc-conn) callback
                                               &optional errback)
   "Refresh JDBC table names for CONN asynchronously."
-  (let* ((params      (clutch-jdbc-conn-params conn))
-         (schema      (clutch-jdbc--conn-schema conn))
+  (let* ((schema      (clutch-jdbc--conn-schema conn))
          (rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-tables"
@@ -803,8 +819,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
 (cl-defmethod clutch-db-column-details-async ((conn clutch-jdbc-conn) table callback
                                               &optional errback)
   "Fetch JDBC column details for TABLE on CONN asynchronously."
-  (let* ((params (clutch-jdbc-conn-params conn))
-         (schema (clutch-jdbc--conn-schema conn))
+  (let* ((schema (clutch-jdbc--conn-schema conn))
          (rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-columns"

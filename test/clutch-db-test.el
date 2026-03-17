@@ -173,7 +173,7 @@
       (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 30)))))
 
 (ert-deftest clutch-db-test-jdbc-query-maps-query-and-rpc-timeouts ()
-  "JDBC query should send query timeout separately from RPC timeout."
+  "JDBC query clamps query-timeout to rpc-timeout - 5 when it exceeds the margin."
   (let ((conn (make-clutch-jdbc-conn :conn-id 4
                                      :params '(:rpc-timeout 15
                                                :query-timeout 16)))
@@ -187,8 +187,37 @@
       (let ((result (clutch-db-query conn "delete from t")))
         (should (equal captured-op "execute"))
         (should (= captured-timeout 15))
-        (should (= (alist-get 'query-timeout-seconds captured-params) 16))
+        ;; min(16, max(1, 15-5)) = min(16, 10) = 10
+        (should (= (alist-get 'query-timeout-seconds captured-params) 10))
         (should (= (clutch-db-result-affected-rows result) 1))))))
+
+(ert-deftest clutch-db-test-jdbc-query-does-not-clamp-when-within-margin ()
+  "JDBC query should not clamp query-timeout when it fits within rpc-timeout - 5."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:rpc-timeout 15
+                                               :query-timeout 8)))
+        captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op params &optional _timeout)
+                 (setq captured-params params)
+                 '(:type "dml" :affected-rows 0))))
+      (clutch-db-query conn "delete from t where 1=0")
+      ;; min(8, max(1, 10)) = min(8, 10) = 8 — no clamping
+      (should (= (alist-get 'query-timeout-seconds captured-params) 8)))))
+
+(ert-deftest clutch-db-test-jdbc-query-clamps-query-timeout-to-rpc-minus-five ()
+  "JDBC query should clamp query-timeout to rpc-timeout - 5 in the default case."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 6
+                                     :params '(:rpc-timeout 30
+                                               :query-timeout 30)))
+        captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op params &optional _timeout)
+                 (setq captured-params params)
+                 '(:type "dml" :affected-rows 1))))
+      (clutch-db-query conn "update t set x = 1")
+      ;; min(30, max(1, 25)) = min(30, 25) = 25
+      (should (= (alist-get 'query-timeout-seconds captured-params) 25)))))
 
 (ert-deftest clutch-db-test-jdbc-manual-commit-p-oracle ()
   "Oracle JDBC connections should default to manual-commit mode."
@@ -1344,6 +1373,100 @@ Skips if `clutch-db-test-jdbc-oracle-password' is nil."
                    (row (car (clutch-db-result-rows result))))
               (should (null (car row))))
           (clutch-db-disconnect conn))))))
+
+;;;; Unit tests — clutch-db-live-p (JDBC identity check)
+
+(ert-deftest clutch-db-test-jdbc-live-p-matching-live-process ()
+  "conn whose process is the current agent and alive → live."
+  (let ((proc 'fake-proc))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
+      (let ((clutch-jdbc--agent-process proc))
+        (should (clutch-db-live-p
+                 (make-clutch-jdbc-conn :process proc :conn-id 1
+                                        :params nil :busy nil)))))))
+
+(ert-deftest clutch-db-test-jdbc-live-p-dead-process ()
+  "conn whose process has died → not live."
+  (let ((proc 'dead-proc))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) nil)))
+      (let ((clutch-jdbc--agent-process proc))
+        (should-not (clutch-db-live-p
+                     (make-clutch-jdbc-conn :process proc :conn-id 1
+                                            :params nil :busy nil)))))))
+
+(ert-deftest clutch-db-test-jdbc-live-p-nil-agent-process ()
+  "When clutch-jdbc--agent-process is nil (agent was killed), conn is not live.
+This is the key guard: after a timeout kill the JVM may still be in its
+shutdown sequence, so process-live-p on the old process object can return t
+briefly.  The nil check on the current-agent variable closes that window."
+  (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
+    (let ((clutch-jdbc--agent-process nil))
+      (should-not (clutch-db-live-p
+                   (make-clutch-jdbc-conn :process 'old-proc :conn-id 1
+                                          :params nil :busy nil))))))
+
+(ert-deftest clutch-db-test-jdbc-live-p-mismatched-process ()
+  "conn whose stored process is NOT the current agent (e.g. after kill+restart) → not live.
+This catches the race where agent-process was set to nil, a new agent was
+started (new process object), but the old conn's :process field still holds
+the old process which may still pass process-live-p during JVM shutdown."
+  (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
+    (let ((clutch-jdbc--agent-process 'new-proc))
+      (should-not (clutch-db-live-p
+                   (make-clutch-jdbc-conn :process 'old-proc :conn-id 1
+                                          :params nil :busy nil))))))
+
+;;;; Unit tests — clutch-jdbc--recv-response timeout behaviour
+
+(ert-deftest clutch-db-test-jdbc-recv-response-returns-matching ()
+  "When a matching response is already queued, recv-response returns it
+immediately without touching the agent process."
+  (let ((clutch-jdbc--agent-process 'live-proc)
+        (clutch-jdbc--response-queue
+         (list '(:id 42 :ok t :result (:conn-id 1)))))
+    (let ((result (clutch-jdbc--recv-response 42 10.0)))
+      ;; Agent must NOT be killed.
+      (should (eq clutch-jdbc--agent-process 'live-proc))
+      (should (equal (plist-get result :id) 42)))))
+
+(ert-deftest clutch-db-test-jdbc-recv-response-timeout-kills-agent ()
+  "When the RPC timeout fires, the agent process is killed and state is reset."
+  (let (deleted-proc)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
+              ((symbol-function 'delete-process)  (lambda (p) (setq deleted-proc p)))
+              ((symbol-function 'accept-process-output) (lambda (_p _s) nil)))
+      (let ((clutch-jdbc--agent-process 'fake-proc)
+            (clutch-jdbc--response-queue '(stale)))
+        ;; Timeout of 0.0 expires immediately.
+        (should-error (clutch-jdbc--recv-response 9999 0.0) :type 'clutch-db-error)
+        (should (eq deleted-proc 'fake-proc))
+        (should (null clutch-jdbc--agent-process))
+        (should (null clutch-jdbc--response-queue))))))
+
+(ert-deftest clutch-db-test-jdbc-recv-response-timeout-agent-already-dead ()
+  "When the RPC timeout fires and the agent is already dead, no crash.
+delete-process is not called, but state is still reset and error is signaled."
+  (let (deleted-proc)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) nil))
+              ((symbol-function 'delete-process)  (lambda (p) (setq deleted-proc p)))
+              ((symbol-function 'accept-process-output) (lambda (_p _s) nil)))
+      (let ((clutch-jdbc--agent-process 'dead-proc)
+            (clutch-jdbc--response-queue nil))
+        (should-error (clutch-jdbc--recv-response 9999 0.0) :type 'clutch-db-error)
+        (should (null deleted-proc))
+        (should (null clutch-jdbc--agent-process))))))
+
+(ert-deftest clutch-db-test-jdbc-recv-response-timeout-error-contains-connection-lost ()
+  "The timeout error message mentions 'Connection lost' so the user knows to reconnect."
+  (cl-letf (((symbol-function 'process-live-p) (lambda (_p) nil))
+            ((symbol-function 'delete-process)  #'ignore)
+            ((symbol-function 'accept-process-output) (lambda (_p _s) nil)))
+    (let ((clutch-jdbc--agent-process 'fake-proc)
+          (clutch-jdbc--response-queue nil))
+      (condition-case err
+          (progn (clutch-jdbc--recv-response 9999 0.0) (should nil))
+        (clutch-db-error
+         (should (string-match-p "Connection lost" (cadr err))))))))
 
 (provide 'clutch-db-test)
 ;;; clutch-db-test.el ends here
