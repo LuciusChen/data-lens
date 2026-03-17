@@ -160,6 +160,19 @@
       (should called)
       (should (equal seen "{\"ok\":true}")))))
 
+(ert-deftest clutch-test-dispatch-view-json-string-bypasses-serialize ()
+  "String vals should be passed directly to the JSON viewer without re-serialization.
+This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
+  (let ((seen nil)
+        (serialize-called nil))
+    (cl-letf (((symbol-function 'clutch--view-json-value)
+               (lambda (s) (setq seen s)))
+              ((symbol-function 'clutch--json-value-to-string)
+               (lambda (_v) (setq serialize-called t) "{}")))
+      (clutch--dispatch-view "{\"name\":\"张三\"}" '(:type-category json))
+      (should (equal seen "{\"name\":\"张三\"}"))
+      (should-not serialize-called))))
+
 (ert-deftest clutch-test-dispatch-view-fallback-to-plain ()
   "Unknown values should open plain viewer rather than JSON viewer."
   (let ((plain-called nil)

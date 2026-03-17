@@ -6994,7 +6994,12 @@ blob type with non-text value → binary string; otherwise plain text."
     (cond
      ((or (eq cat 'json)
           (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
-      (clutch--view-json-value (clutch--json-value-to-string val)))
+      ;; Pass raw string directly when available — avoids json-serialize
+      ;; escaping non-ASCII characters (e.g. CJK) as \uXXXX.
+      ;; clutch--decode-json-unicode-escapes in the viewer handles any
+      ;; residual escapes from non-string vals (hash-tables, vectors).
+      (clutch--view-json-value (if (stringp val) val
+                                 (clutch--json-value-to-string val))))
      ((clutch--xml-like-string-p val)
       (clutch--view-xml-value val))
      ((eq cat 'blob)
