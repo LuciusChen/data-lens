@@ -1010,39 +1010,40 @@ To trust private/internal CAs, configure:
 
 * Testing
 
-** MySQL tests (require a running MySQL)
+** Unit tests (no server required)
 
-Start a MySQL instance:
+#+begin_src sh
+# UI and mutation workflow tests
+emacs -batch -L . -l ert -l clutch \
+  -l test/clutch-test.el \
+  --eval '(ert-run-tests-batch-and-exit)'
+
+# JDBC backend tests
+emacs -batch -L . -l ert -l clutch-db-jdbc \
+  -l test/clutch-db-test.el \
+  --eval '(ert-run-tests-batch-and-exit "clutch-db-test-jdbc")'
+#+end_src
+
+** MySQL live tests (require a running MySQL)
 
 #+begin_src sh
 docker run --rm -e MYSQL_ROOT_PASSWORD=testpass -e MYSQL_USER=testuser \
   -e MYSQL_PASSWORD=testpass -e MYSQL_DATABASE=testdb -p 3307:3306 mysql:8
+
+mysql -h 127.0.0.1 -P 3307 -u testuser -ptestpass testdb < test/test-wide-table.sql
+emacs -batch -L . -l ert -l clutch -l test/mysql-test.el \
+  --eval '(ert-run-tests-batch-and-exit)'
 #+end_src
 
-Load test data and run tests:
-
-#+begin_src sh
-mysql -h 127.0.0.1 -P 3307 -u testuser -ptestpass testdb < test-wide-table.sql
-emacs --batch -L . -l test/test-run.el
-#+end_src
-
-** PostgreSQL tests (require a running PostgreSQL)
-
-Start a PostgreSQL instance:
+** PostgreSQL live tests (require a running PostgreSQL)
 
 #+begin_src sh
 docker run --rm -e POSTGRES_USER=testuser -e POSTGRES_PASSWORD=testpass \
   -e POSTGRES_DB=testdb -p 5433:5432 postgres:16-alpine
+
+emacs -batch -L . -l ert -l test/pg-test.el \
+  --eval '(ert-run-tests-batch-and-exit)'
 #+end_src
-
-Run tests:
-
-#+begin_src sh
-emacs --batch -L . -l test/pg-test.el
-#+end_src
-
-Unit tests (message encoding, type parsing, auth) run without a server.
-Live tests require the Docker instance above.
 
 * Roadmap
 
