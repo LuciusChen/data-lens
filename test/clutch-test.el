@@ -125,6 +125,7 @@
   (should (equal (clutch--json-value-to-string :false) "false"))
   (should (equal (clutch--json-value-to-string 42) "42")))
 
+
 (ert-deftest clutch-test-dispatch-view-json-category-serializes-non-string ()
   "JSON category should route non-string values to JSON viewer."
   (let ((called nil)
@@ -137,6 +138,19 @@
       (clutch--dispatch-view (vector 1 2) '(:type-category json))
       (should called)
       (should (equal seen "{\"ok\":true}")))))
+
+(ert-deftest clutch-test-dispatch-view-json-string-bypasses-serialize ()
+  "String vals should be passed directly to the JSON viewer without re-serialization.
+This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
+  (let ((seen nil)
+        (serialize-called nil))
+    (cl-letf (((symbol-function 'clutch--view-json-value)
+               (lambda (s) (setq seen s)))
+              ((symbol-function 'clutch--json-value-to-string)
+               (lambda (_v) (setq serialize-called t) "{}")))
+      (clutch--dispatch-view "{\"name\":\"张三\"}" '(:type-category json))
+      (should (equal seen "{\"name\":\"张三\"}"))
+      (should-not serialize-called))))
 
 (ert-deftest clutch-test-dispatch-view-fallback-to-plain ()
   "Unknown values should open plain viewer rather than JSON viewer."
@@ -1524,6 +1538,66 @@
       (puthash "dev-key" '(:state refreshing) clutch--schema-status-cache)
       (should (equal (clutch--schema-status-mode-line-suffix 'fake-conn)
                      " · schema…")))))
+
+(ert-deftest clutch-test-tx-mode-line-suffix-and-update ()
+  "Manual-commit dirty state should surface as [TX*] in the mode line."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq)))
+    (with-temp-buffer
+      (clutch-mode)
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch-db-display-name)
+                 (lambda (_conn) "Oracle"))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "scott@db:1521/ORCL"))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch-db-manual-commit-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--schema-status-mode-line-suffix)
+                 (lambda (_conn) nil)))
+        (puthash clutch-connection t clutch--tx-dirty-cache)
+        (clutch--update-mode-line)
+        (should (equal mode-name "Oracle[scott@db:1521/ORCL][TX*]"))))))
+
+(ert-deftest clutch-test-run-db-query-marks-manual-commit-dirty ()
+  "Successful DML should mark manual-commit connections dirty."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (conn 'fake-conn))
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn _sql) '(:ok t)))
+              ((symbol-function 'clutch-db-manual-commit-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (clutch--run-db-query conn "UPDATE demo SET x = 1")
+      (should (clutch--tx-dirty-p conn)))))
+
+(ert-deftest clutch-test-run-db-query-clears-dirty-on-commit ()
+  "Successful COMMIT should clear dirty manual-commit state."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (conn 'fake-conn))
+    (puthash conn t clutch--tx-dirty-cache)
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn _sql) '(:ok t)))
+              ((symbol-function 'clutch-db-manual-commit-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (clutch--run-db-query conn "COMMIT")
+      (should-not (clutch--tx-dirty-p conn)))))
+
+(ert-deftest clutch-test-run-db-query-clears-dirty-on-oracle-ddl ()
+  "Oracle schema-affecting DDL should clear [TX*] after auto-commit."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (conn 'fake-conn))
+    (puthash conn t clutch--tx-dirty-cache)
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn _sql) '(:ok t)))
+              ((symbol-function 'clutch-db-manual-commit-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--connection-oracle-jdbc-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (clutch--run-db-query conn "ALTER TABLE demo ADD x NUMBER")
+      (should-not (clutch--tx-dirty-p conn)))))
 
 (ert-deftest clutch-test-schema-cache-guidance-reflects-recovery-state ()
   "Schema cache guidance should explain how to recover from non-ready states."
@@ -2920,8 +2994,10 @@
 (ert-deftest clutch-test-execute-quit-disconnects-and-clears-connection ()
   "Test `clutch--execute' converts quit into recoverable interruption."
   (let ((disconnected nil)
+        (clutch--tx-dirty-cache (make-hash-table :test 'eq))
         (clutch-connection 'fake-conn)
         (clutch--executing-p nil))
+    (puthash clutch-connection t clutch--tx-dirty-cache)
     (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
               ((symbol-function 'clutch--check-pending-changes) #'ignore)
               ((symbol-function 'clutch--clear-error-position-overlay) #'ignore)
@@ -2936,7 +3012,68 @@
                     :type 'user-error)
       (should disconnected)
       (should-not clutch-connection)
+      (should-not (gethash 'fake-conn clutch--tx-dirty-cache))
       (should-not clutch--executing-p))))
+
+(ert-deftest clutch-test-disconnect-blocks-dirty-manual-commit-connection ()
+  "Disconnect should warn before dropping uncommitted manual-commit work."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        disconnected)
+    (puthash clutch-connection t clutch--tx-dirty-cache)
+    (cl-letf (((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'yes-or-no-p) (lambda (_prompt) nil))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (_conn) (setq disconnected t))))
+      (should-error (clutch-disconnect) :type 'user-error)
+      (should-not disconnected)
+      (should clutch-connection)
+      (should (clutch--tx-dirty-p clutch-connection)))))
+
+(ert-deftest clutch-test-commit-errors-in-autocommit-mode ()
+  "clutch-commit should signal user-error when connection is not in manual-commit mode."
+  (let ((clutch-connection 'fake-conn))
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) nil)))
+      (should-error (clutch-commit) :type 'user-error))))
+
+(ert-deftest clutch-test-commit-calls-rpc-and-clears-dirty ()
+  "clutch-commit should fire RPC and clear dirty cache."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        committed)
+    (puthash clutch-connection t clutch--tx-dirty-cache)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
+              ((symbol-function 'clutch-db-commit)
+               (lambda (_conn) (setq committed t)))
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (clutch-commit)
+      (should committed)
+      (should-not (clutch--tx-dirty-p clutch-connection)))))
+
+(ert-deftest clutch-test-rollback-errors-in-autocommit-mode ()
+  "clutch-rollback should signal user-error when connection is not in manual-commit mode."
+  (let ((clutch-connection 'fake-conn))
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) nil)))
+      (should-error (clutch-rollback) :type 'user-error))))
+
+(ert-deftest clutch-test-rollback-calls-rpc-and-clears-dirty ()
+  "clutch-rollback should fire RPC and clear dirty cache."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        rolled-back)
+    (puthash clutch-connection t clutch--tx-dirty-cache)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
+              ((symbol-function 'clutch-db-rollback)
+               (lambda (_conn) (setq rolled-back t)))
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (clutch-rollback)
+      (should rolled-back)
+      (should-not (clutch--tx-dirty-p clutch-connection)))))
 
 (ert-deftest clutch-test-execute-runs-risky-dml-confirmation ()
   "Execute should run risky DML confirmation before dispatch."

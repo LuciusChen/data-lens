@@ -408,6 +408,7 @@ Connection profile plist keys:
 | `:pass-entry` | string | Pass store suffix for password lookup |
 | `:url` | string | Full JDBC URL (JDBC backends; overrides host/port/database) |
 | `:props` | alist | Extra JDBC connection properties |
+| `:manual-commit` | boolean | JDBC only: disable auto-commit for this connection |
 | `:tls` | boolean | Enable TLS/SSL |
 | `:connect-timeout` | natnum | Connection timeout (seconds) |
 | `:read-idle-timeout` | natnum | Read idle timeout (seconds) |
@@ -462,6 +463,7 @@ Connection profile plist keys:
 | `clutch-jdbc-agent-java-executable` | `"java"` | string | Java executable path |
 | `clutch-jdbc-agent-jvm-args` | `'("-Xss512k")` | list of strings | Extra JVM arguments |
 | `clutch-jdbc-fetch-size` | `500` | natnum | Rows per fetch batch from JDBC cursor |
+| `clutch-jdbc-oracle-manual-commit` | `t` | boolean | Oracle JDBC default: manual-commit instead of auto-commit |
 
 ---
 
@@ -818,8 +820,10 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | Op | Description |
 |----|-------------|
 | `ping` | Health check (responds `{"pong": true}`) |
-| `connect` | Open JDBC connection, returns `connId` |
+| `connect` | Open JDBC connection (`auto-commit` optional), returns `connId` |
 | `disconnect` | Close a connection |
+| `commit` | Commit the current transaction on a connection |
+| `rollback` | Roll back the current transaction on a connection |
 | `execute` | Execute SQL, returns `cursorId` for SELECT |
 | `fetch` | Fetch next batch from cursor, returns `rows`, `columns`, `done` |
 | `close-cursor` | Explicitly close a cursor |
@@ -871,7 +875,7 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | **SQL rewriting** | ORDER BY/LIMIT/OFFSET injection uses top-level clause detection (regex); complex CTEs/UNIONs may rewrite incorrectly |
 | **Mutations without PK** | Edit and delete are disabled when the result table has no primary key |
 | **MySQL query timeout** | `clutch-query-timeout-seconds` is not enforced for MySQL (applied for PostgreSQL and JDBC only) |
-| **Transaction control** | No UI for explicit `BEGIN`/`COMMIT`/`ROLLBACK`; everything runs in auto-commit mode |
+| **Transaction control** | JDBC supports `commit`/`rollback`; Oracle defaults to manual-commit but can be flipped globally via `clutch-jdbc-oracle-manual-commit` or per connection via `:manual-commit` |
 | **Prepared statements** | No parameterized query support; all SQL is executed as raw strings |
 | **CLOB/BLOB full content** | CLOBs show first 256 chars; BLOBs show length only; full streaming deferred |
 | **Multiple result sets** | Stored procedures returning multiple result sets not supported |
@@ -884,7 +888,7 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 - Full JSON-RPC framing (batch requests, notifications)
 - SQL parsing or query analysis in the agent
 - Schema caching inside the agent
-- Transaction management UI
+- Advanced transaction management beyond commit/rollback
 - Multiple result sets
 - Separate configuration file for the agent
 

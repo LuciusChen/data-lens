@@ -48,6 +48,7 @@
 (declare-function nerd-icons-mdicon "nerd-icons")
 (declare-function nerd-icons-codicon "nerd-icons")
 (declare-function nerd-icons-octicon "nerd-icons")
+(declare-function clutch-jdbc-conn-params "clutch-db-jdbc" (conn))
 
 ;;;; Customization
 
@@ -651,6 +652,90 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
           (or (clutch-db-port conn) "?")
           (or (clutch-db-database conn) "")))
 
+(defun clutch--connection-oracle-jdbc-p (conn)
+  "Return non-nil when CONN is a JDBC Oracle connection."
+  (and conn
+       (fboundp 'clutch-jdbc-conn-params)
+       (ignore-errors
+         (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle))))
+
+(defun clutch--sql-leading-keyword (sql)
+  "Return the leading SQL keyword for SQL, or nil."
+  (let ((trimmed (clutch--strip-leading-comments sql)))
+    (when (string-match "\\`\\([[:alpha:]]+\\)" trimmed)
+      (upcase (match-string 1 trimmed)))))
+
+(defun clutch--manual-commit-dirtying-query-p (sql)
+  "Return non-nil when SQL should mark a manual-commit transaction dirty."
+  (member (clutch--sql-main-op-keyword sql)
+          '("INSERT" "UPDATE" "DELETE" "MERGE" "REPLACE")))
+
+(defun clutch--transaction-control-query-p (sql)
+  "Return non-nil when SQL is explicit transaction control."
+  (member (clutch--sql-leading-keyword sql)
+          '("COMMIT" "ROLLBACK" "END" "ABORT")))
+
+(defvar clutch--tx-dirty-cache (make-hash-table :test 'eq :weakness 'key)
+  "Connections with uncommitted DML.")
+
+(defun clutch--tx-dirty-p (conn)
+  "Return non-nil when CONN has uncommitted DML."
+  (and conn (gethash conn clutch--tx-dirty-cache)))
+
+(defun clutch--refresh-transaction-ui (conn)
+  "Refresh transaction indicators for buffers attached to CONN."
+  (when conn
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and clutch-connection
+                     (eq clutch-connection conn)
+                     (derived-mode-p 'clutch-mode 'clutch-repl-mode))
+            (clutch--update-mode-line)))))))
+
+(defun clutch--set-tx-dirty (conn)
+  "Mark CONN as having uncommitted DML."
+  (when conn
+    (puthash conn t clutch--tx-dirty-cache)
+    (clutch--refresh-transaction-ui conn)))
+
+(defun clutch--clear-tx-dirty (conn)
+  "Forget any pending transaction state for CONN."
+  (when conn
+    (remhash conn clutch--tx-dirty-cache)
+    (clutch--refresh-transaction-ui conn)))
+
+(defun clutch--tx-mode-line-suffix (conn)
+  "Return \"[TX*]\" when CONN has uncommitted changes, else nil."
+  (when (and (clutch-db-manual-commit-p conn)
+             (clutch--tx-dirty-p conn))
+    "[TX*]"))
+
+(defun clutch--record-tx-state-after-query (conn sql)
+  "Update transaction dirty state for successful SQL on CONN."
+  (when (clutch-db-manual-commit-p conn)
+    (cond
+     ((clutch--transaction-control-query-p sql)
+      (clutch--clear-tx-dirty conn))
+     ((and (clutch--connection-oracle-jdbc-p conn)
+           (clutch--schema-affecting-query-p sql))
+      (clutch--clear-tx-dirty conn))
+     ((clutch--manual-commit-dirtying-query-p sql)
+      (clutch--set-tx-dirty conn)))))
+
+(defun clutch--run-db-query (conn sql)
+  "Execute SQL on CONN and keep transaction UI state in sync."
+  (let ((result (clutch-db-query conn sql)))
+    (clutch--record-tx-state-after-query conn sql)
+    result))
+
+(defun clutch--confirm-disconnect-transaction-loss (conn prompt)
+  "Require confirmation with PROMPT before dropping dirty manual-commit CONN."
+  (when (and (clutch-db-manual-commit-p conn)
+             (clutch--tx-dirty-p conn)
+             (not (yes-or-no-p prompt)))
+    (user-error "Disconnect cancelled")))
+
 (defun clutch--connection-alive-p (conn)
   "Return non-nil if CONN is live."
   (and conn (clutch-db-live-p conn)))
@@ -674,7 +759,9 @@ Any result buffers with uncommitted pending state are cleared.
 Returns non-nil on success, nil on failure."
   (when clutch--connection-params
     (condition-case err
-        (let ((conn (clutch--build-conn clutch--connection-params)))
+        (let ((old-conn clutch-connection)
+              (conn (clutch--build-conn clutch--connection-params)))
+          (clutch--clear-tx-dirty old-conn)
           (setq clutch-connection conn)
           (clutch--prime-schema-cache conn)
           (clutch--update-mode-line)
@@ -706,14 +793,16 @@ using the stored params.  Signals a user-error if not recoverable."
   (setq mode-name
         (cond
          ((and clutch--executing-p (clutch--connection-alive-p clutch-connection))
-          (format "%s[%s …]"
-                  (clutch-db-display-name clutch-connection)
-                  (clutch--connection-key clutch-connection)))
-         ((clutch--connection-alive-p clutch-connection)
-          (format "%s[%s%s]"
+          (format "%s[%s …]%s"
                   (clutch-db-display-name clutch-connection)
                   (clutch--connection-key clutch-connection)
-                  (or (clutch--schema-status-mode-line-suffix clutch-connection) "")))
+                  (or (clutch--tx-mode-line-suffix clutch-connection) "")))
+         ((clutch--connection-alive-p clutch-connection)
+          (format "%s[%s%s]%s"
+                  (clutch-db-display-name clutch-connection)
+                  (clutch--connection-key clutch-connection)
+                  (or (clutch--schema-status-mode-line-suffix clutch-connection) "")
+                  (or (clutch--tx-mode-line-suffix clutch-connection) "")))
          (t "DB[disconnected]")))
   (force-mode-line-update))
 
@@ -859,8 +948,12 @@ The password is resolved via `auth-source' when not in the connection
 params; see `clutch-connection-alist' for details."
   (interactive)
   (when (clutch--connection-alive-p clutch-connection)
-    (clutch-db-disconnect clutch-connection)
-    (setq clutch-connection nil))
+    (clutch--confirm-disconnect-transaction-loss
+     clutch-connection
+     "Uncommitted changes will be lost.  Disconnect? ")
+    (clutch--clear-tx-dirty clutch-connection)
+    (clutch-db-disconnect clutch-connection))
+  (setq clutch-connection nil)
   (let* ((params  (clutch--read-connection-params))
          (product (clutch--effective-sql-product params))
          (conn    (clutch--build-conn params)))
@@ -875,12 +968,36 @@ params; see `clutch-connection-alist' for details."
   "Disconnect from the current database server."
   (interactive)
   (when (clutch--connection-alive-p clutch-connection)
+    (clutch--confirm-disconnect-transaction-loss
+     clutch-connection
+     "Uncommitted changes will be lost.  Disconnect? ")
+    (clutch--clear-tx-dirty clutch-connection)
     (clutch-db-disconnect clutch-connection)
     (message "Disconnected"))
   (setq clutch-connection nil)
   (when clutch--console-name
     (clutch--update-console-buffer-name))
   (clutch--update-mode-line))
+
+(defun clutch-commit ()
+  "Commit the current transaction."
+  (interactive)
+  (clutch--ensure-connection)
+  (unless (clutch-db-manual-commit-p clutch-connection)
+    (user-error "Connection is in autocommit mode"))
+  (clutch-db-commit clutch-connection)
+  (clutch--clear-tx-dirty clutch-connection)
+  (message "Transaction committed"))
+
+(defun clutch-rollback ()
+  "Roll back the current transaction."
+  (interactive)
+  (clutch--ensure-connection)
+  (unless (clutch-db-manual-commit-p clutch-connection)
+    (user-error "Connection is in autocommit mode"))
+  (clutch-db-rollback clutch-connection)
+  (clutch--clear-tx-dirty clutch-connection)
+  (message "Transaction rolled back"))
 
 ;;;; Query console
 
@@ -2045,7 +2162,7 @@ Signals an error if pagination is not available."
                        clutch-result-max-rows clutch--order-by))
            (start (float-time))
            (result (condition-case err
-                       (clutch-db-query clutch-connection paged-sql)
+                       (clutch--run-db-query clutch-connection paged-sql)
                      (clutch-db-error
                       (user-error "Query error: %s"
                                   (error-message-string err)))))
@@ -2162,7 +2279,7 @@ Returns the query result."
          (paged-sql (clutch-db-build-paged-sql connection sql 0 page-size))
          (start (float-time))
          (result (condition-case err
-                     (clutch-db-query connection paged-sql)
+                     (clutch--run-db-query connection paged-sql)
                    (clutch-db-error
                     (let ((msg (error-message-string err)))
                       (clutch--mark-sql-error (window-buffer clutch--source-window)
@@ -2190,7 +2307,7 @@ Returns the query result."
   (setq clutch--last-query sql)
   (let* ((start (float-time))
          (result (condition-case err
-                     (clutch-db-query connection sql)
+                     (clutch--run-db-query connection sql)
                    (clutch-db-error
                     (let ((msg (error-message-string err)))
                       (clutch--mark-sql-error (window-buffer clutch--source-window)
@@ -2246,6 +2363,7 @@ Prompts for confirmation on destructive operations."
            ;; Drop the connection so the next command reconnects cleanly.
            (when (clutch--connection-alive-p connection)
              (clutch-db-disconnect connection))
+           (clutch--clear-tx-dirty connection)
            (when (eq connection clutch-connection)
              (setq clutch-connection nil))
            (user-error "Query interrupted")))
@@ -2498,10 +2616,11 @@ result buffer.  Stops and reports on the first error."
          (done 0))
     (dolist (stmt before-last)
       (condition-case err
-          (progn (clutch-db-query clutch-connection stmt) (cl-incf done))
+          (progn (clutch--run-db-query clutch-connection stmt) (cl-incf done))
         (quit
          (when (clutch--connection-alive-p clutch-connection)
            (clutch-db-disconnect clutch-connection))
+         (clutch--clear-tx-dirty clutch-connection)
          (setq clutch-connection nil)
          (user-error "Query interrupted"))
         (clutch-db-error
@@ -2513,12 +2632,13 @@ result buffer.  Stops and reports on the first error."
             (message "%d statement%s executed" done (if (= done 1) "" "s")))
           (clutch--execute last))
       (condition-case err
-          (progn (clutch-db-query clutch-connection last) (cl-incf done)
+          (progn (clutch--run-db-query clutch-connection last) (cl-incf done)
                  (message "%d statement%s executed"
                           done (if (= done 1) "" "s")))
         (quit
          (when (clutch--connection-alive-p clutch-connection)
            (clutch-db-disconnect clutch-connection))
+         (clutch--clear-tx-dirty clutch-connection)
          (setq clutch-connection nil)
          (user-error "Query interrupted"))
         (clutch-db-error
@@ -3551,7 +3671,7 @@ Returns nil if TEXT cannot be parsed (no Syntax: section)."
   "Query MySQL HELP for SYM on CONN and return a doc plist or nil.
 Returns nil when the symbol is unrecognised or the query fails."
   (condition-case nil
-      (let* ((result  (clutch-db-query conn (format "HELP '%s'" (upcase sym))))
+      (let* ((result  (clutch--run-db-query conn (format "HELP '%s'" (upcase sym))))
              (columns (clutch-db-result-columns result))
              (rows    (clutch-db-result-rows result)))
         ;; A single-topic HELP result has 3 columns: name, description, example.
@@ -4039,6 +4159,8 @@ Prompts for TABLE via `completing-read' using schema cache table names."
     (define-key map (kbd "C-c C-r") #'clutch-execute-region)
     (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
     (define-key map (kbd "C-c C-e") #'clutch-connect)
+    (define-key map (kbd "C-c C-m") #'clutch-commit)
+    (define-key map (kbd "C-c C-u") #'clutch-rollback)
     (define-key map (kbd "C-c C-t") #'clutch-list-tables)
     (define-key map (kbd "C-c C-j") #'clutch-browse-table)
     (define-key map (kbd "C-c C-d") #'clutch-describe-table-at-point)
@@ -4462,7 +4584,7 @@ Includes the active WHERE filter when one is applied."
       (user-error "Not connected"))
     (let* ((count-sql (clutch--build-count-sql base))
            (result (condition-case err
-                       (clutch-db-query conn count-sql)
+                       (clutch--run-db-query conn count-sql)
                      (clutch-db-error
                       (user-error "COUNT query error: %s"
                                   (error-message-string err)))))
@@ -5045,7 +5167,7 @@ Clear pending edits and re-run the last query if confirmed."
                    sql-text))
       (dolist (stmt statements)
         (condition-case err
-            (clutch-db-query clutch-connection stmt)
+            (clutch--run-db-query clutch-connection stmt)
           (clutch-db-error
            (user-error "UPDATE failed: %s" (error-message-string err)))))
       (setq clutch--pending-edits nil)
@@ -5122,7 +5244,7 @@ Executes in order: INSERTs first, then UPDATEs, then DELETEs."
                                sql-text))
       (dolist (stmt all-stmts)
         (condition-case err
-            (clutch-db-query clutch-connection stmt)
+            (clutch--run-db-query clutch-connection stmt)
           (clutch-db-error
            (user-error "Statement failed: %s" (error-message-string err)))))
       (setq clutch--pending-edits nil
@@ -5166,7 +5288,7 @@ PK-INDICES are primary key column indices."
                    sql-text))
       (dolist (stmt statements)
         (condition-case err
-            (clutch-db-query clutch-connection stmt)
+            (clutch--run-db-query clutch-connection stmt)
           (clutch-db-error
            (user-error "DELETE failed: %s" (error-message-string err)))))
       (setq clutch--marked-rows nil)
@@ -6858,7 +6980,10 @@ blob type with non-text value → binary string; otherwise plain text."
     (cond
      ((or (eq cat 'json)
           (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
-      (clutch--view-json-value (clutch--json-value-to-string val)))
+      ;; Pass raw string directly when available — avoids json-serialize
+      ;; escaping non-ASCII characters (e.g. CJK) as \uXXXX.
+      (clutch--view-json-value (if (stringp val) val
+                                 (clutch--json-value-to-string val))))
      ((clutch--xml-like-string-p val)
       (clutch--view-xml-value val))
      ((eq cat 'blob)
@@ -7142,7 +7267,7 @@ Prompts for format:
      ((or (null clutch--base-query)
           (clutch--sql-has-limit-p effective-sql))
       (clutch-db-result-rows
-       (clutch-db-query clutch-connection effective-sql)))
+       (clutch--run-db-query clutch-connection effective-sql)))
      (t
       (let ((page-num 0)
             (page-size clutch-result-max-rows)
@@ -7151,7 +7276,7 @@ Prompts for format:
         (while (not done)
           (let* ((paged-sql (clutch--build-paged-sql
                              effective-sql page-num page-size clutch--order-by))
-                 (result (clutch-db-query clutch-connection paged-sql))
+                 (result (clutch--run-db-query clutch-connection paged-sql))
                  (batch (clutch-db-result-rows result)))
             (setq rows (nconc rows (copy-sequence batch)))
             (if (< (length batch) page-size)
@@ -7550,6 +7675,8 @@ Selects JSON, XML, or binary string view based on column type and content."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map comint-mode-map)
     (define-key map (kbd "C-c C-e") #'clutch-connect)
+    (define-key map (kbd "C-c C-m") #'clutch-commit)
+    (define-key map (kbd "C-c C-u") #'clutch-rollback)
     (define-key map (kbd "C-c C-t") #'clutch-list-tables)
     (define-key map (kbd "C-c C-d") #'clutch-describe-table-at-point)
     map)
@@ -7614,7 +7741,7 @@ Accumulates input until a semicolon is found, then executes."
     (setq clutch--last-query sql)
     (condition-case err
         (let* ((start (float-time))
-               (result (clutch-db-query clutch-connection sql))
+               (result (clutch--run-db-query clutch-connection sql))
                (elapsed (- (float-time) start))
                (columns (clutch-db-result-columns result))
                (rows (clutch-db-result-rows result)))
@@ -7655,6 +7782,8 @@ Accumulates input until a semicolon is found, then executes."
   [["Connection"
     ("c" "Connect"    clutch-connect)
     ("d" "Disconnect" clutch-disconnect)
+    ("m" "Commit"     clutch-commit)
+    ("u" "Rollback"   clutch-rollback)
     ("R" "REPL"       clutch-repl)]
    ["Execute"
     ("x" "Query at point" clutch-execute-query-at-point)
