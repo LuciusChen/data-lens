@@ -720,8 +720,12 @@ backends.  See [[*Password Management]] for details.
   behavior); commit or roll back first, then switch.
 - The console header-line always shows the current commit mode: =Tx: Auto=,
   =Tx: Manual=, or =Tx: Manual*= (uncommitted changes present).
-- After a rollback, any open DML result buffers for the connection show a
-  warning banner: =⚠ Transaction rolled back — changes not persisted=.
+- Open DML result buffers show a status banner in their header-line after each
+  transaction event:
+  - Commit: =✓ Transaction committed= (green)
+  - Rollback: =⚠ Transaction rolled back — changes not persisted= (orange)
+  - Disconnect: =✕ Connection closed= (grey)
+  The banner clears automatically when the buffer is reused for a new query.
 - Other JDBC backends stay in auto-commit mode by default; add
   =:manual-commit t= to a connection plist to opt in.
 - Oracle DDL (=CREATE=/=ALTER=/=DROP=/=TRUNCATE=/=RENAME=) auto-commits even
