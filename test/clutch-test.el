@@ -3092,24 +3092,66 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should rolled-back)
       (should-not (clutch--tx-dirty-p clutch-connection)))))
 
-(ert-deftest clutch-test-rollback-marks-dml-result-buffers ()
-  "clutch-rollback should add a rollback banner to open DML result buffers."
-  (let* ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
-         (clutch-connection 'fake-conn)
-         (buf (get-buffer-create " *clutch-rollback-test*")))
-    (puthash clutch-connection t clutch--tx-dirty-cache)
+(defun clutch-test--make-dml-result-buf (conn)
+  "Create a temporary DML result buffer associated with CONN for testing."
+  (let ((buf (generate-new-buffer " *clutch-dml-test*")))
     (with-current-buffer buf
       (clutch-result-mode)
-      (setq-local clutch-connection 'fake-conn)
+      (setq-local clutch-connection conn)
       (setq-local clutch--dml-result t)
       (setq-local header-line-format nil))
+    buf))
+
+(ert-deftest clutch-test-rollback-marks-dml-result-buffers ()
+  "clutch-rollback should add a warning banner to open DML result buffers."
+  (let* ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+         (clutch-connection 'fake-conn)
+         (buf (clutch-test--make-dml-result-buf 'fake-conn)))
+    (puthash clutch-connection t clutch--tx-dirty-cache)
     (unwind-protect
         (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                   ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
                   ((symbol-function 'clutch-db-rollback) #'ignore)
                   ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
           (clutch-rollback)
-          (should (with-current-buffer buf header-line-format)))
+          (should (with-current-buffer buf header-line-format))
+          (should (string-match-p "rolled back"
+                                  (with-current-buffer buf
+                                    (substring-no-properties header-line-format)))))
+      (kill-buffer buf))))
+
+(ert-deftest clutch-test-commit-marks-dml-result-buffers ()
+  "clutch-commit should add a committed banner to open DML result buffers."
+  (let* ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+         (clutch-connection 'fake-conn)
+         (buf (clutch-test--make-dml-result-buf 'fake-conn)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                  ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
+                  ((symbol-function 'clutch-db-commit) #'ignore)
+                  ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+          (clutch-commit)
+          (should (string-match-p "committed"
+                                  (with-current-buffer buf
+                                    (substring-no-properties header-line-format)))))
+      (kill-buffer buf))))
+
+(ert-deftest clutch-test-disconnect-marks-dml-result-buffers ()
+  "clutch-disconnect should add a connection-closed notice to open DML result buffers."
+  (let* ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+         (clutch-connection 'fake-conn)
+         (buf (clutch-test--make-dml-result-buf 'fake-conn)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_c) t))
+                  ((symbol-function 'clutch--confirm-disconnect-transaction-loss) #'ignore)
+                  ((symbol-function 'clutch-db-disconnect) #'ignore)
+                  ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
+                  ((symbol-function 'clutch--update-console-buffer-name) #'ignore)
+                  ((symbol-function 'clutch--update-mode-line) #'ignore))
+          (clutch-disconnect)
+          (should (string-match-p "closed"
+                                  (with-current-buffer buf
+                                    (substring-no-properties header-line-format)))))
       (kill-buffer buf))))
 
 (ert-deftest clutch-test-toggle-auto-commit-manual-to-auto ()

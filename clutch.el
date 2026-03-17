@@ -706,16 +706,35 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
     (remhash conn clutch--tx-dirty-cache)
     (clutch--refresh-transaction-ui conn)))
 
+(defun clutch--annotate-dml-result-buffers (conn banner)
+  "Set BANNER as header-line on all open DML result buffers for CONN."
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when (and (derived-mode-p 'clutch-result-mode)
+                 (eq clutch-connection conn)
+                 (bound-and-true-p clutch--dml-result))
+        (setq-local header-line-format banner)))))
+
 (defun clutch--mark-dml-results-rolled-back (conn)
   "Add a rollback warning banner to open DML result buffers for CONN."
-  (let ((banner (propertize "  ⚠  Transaction rolled back — changes not persisted"
-                            'face '(:inherit warning :weight bold))))
-    (dolist (buf (buffer-list))
-      (with-current-buffer buf
-        (when (and (derived-mode-p 'clutch-result-mode)
-                   (eq clutch-connection conn)
-                   (bound-and-true-p clutch--dml-result))
-          (setq-local header-line-format banner))))))
+  (clutch--annotate-dml-result-buffers
+   conn
+   (propertize "  ⚠  Transaction rolled back — changes not persisted"
+               'face '(:inherit warning :weight bold))))
+
+(defun clutch--mark-dml-results-committed (conn)
+  "Add a committed confirmation banner to open DML result buffers for CONN."
+  (clutch--annotate-dml-result-buffers
+   conn
+   (propertize "  ✓  Transaction committed"
+               'face '(:inherit success :weight bold))))
+
+(defun clutch--mark-dml-results-connection-closed (conn)
+  "Add a connection-closed notice to open DML result buffers for CONN."
+  (clutch--annotate-dml-result-buffers
+   conn
+   (propertize "  ✕  Connection closed"
+               'face '(:inherit shadow))))
 
 (defun clutch--tx-header-line-segment (conn)
   "Return a header-line segment for CONN transaction state, or nil.
@@ -1052,6 +1071,7 @@ params; see `clutch-connection-alist' for details."
     (clutch--confirm-disconnect-transaction-loss
      clutch-connection
      "Uncommitted changes will be lost.  Disconnect? ")
+    (clutch--mark-dml-results-connection-closed clutch-connection)
     (clutch--clear-tx-dirty clutch-connection)
     (clutch-db-disconnect clutch-connection)
     (message "Disconnected"))
@@ -1067,6 +1087,7 @@ params; see `clutch-connection-alist' for details."
   (unless (clutch-db-manual-commit-p clutch-connection)
     (user-error "Connection is in autocommit mode"))
   (clutch-db-commit clutch-connection)
+  (clutch--mark-dml-results-committed clutch-connection)
   (clutch--clear-tx-dirty clutch-connection)
   (message "Transaction committed"))
 
