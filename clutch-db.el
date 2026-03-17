@@ -264,8 +264,7 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 (defvar clutch-db--backend-features
   '((mysql  . (:require clutch-db-mysql  :connect-fn clutch-db-mysql-connect))
     (pg     . (:require clutch-db-pg     :connect-fn clutch-db-pg-connect))
-    (sqlite . (:require clutch-db-sqlite :connect-fn clutch-db-sqlite-connect))
-)
+    (sqlite . (:require clutch-db-sqlite :connect-fn clutch-db-sqlite-connect)))
   "Alist mapping backend symbols to their feature plists.
 Each plist has :require (the feature to load) and :connect-fn
 \(a function taking a plist of connection params and returning a conn).")
