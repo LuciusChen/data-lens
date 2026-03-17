@@ -7855,6 +7855,16 @@ Accumulates input until a semicolon is found, then executes."
 
 ;;;; Transient dispatch menus
 
+(transient-define-suffix clutch--dispatch-toggle-auto-commit ()
+  "Transient suffix for `clutch-toggle-auto-commit' with a dynamic label."
+  :description (lambda ()
+                 (if (and clutch-connection
+                          (clutch-db-manual-commit-p clutch-connection))
+                     "Enable auto-commit"
+                   "Disable auto-commit"))
+  (interactive)
+  (call-interactively #'clutch-toggle-auto-commit))
+
 ;;;###autoload
 (transient-define-prefix clutch-dispatch ()
   "Main dispatch menu for clutch."
@@ -7863,12 +7873,7 @@ Accumulates input until a semicolon is found, then executes."
     ("d" "Disconnect" clutch-disconnect)
     ("m" "Commit"            clutch-commit)
     ("u" "Rollback"          clutch-rollback)
-    ("a" (:description (lambda ()
-                         (if (and clutch-connection
-                                  (clutch-db-manual-commit-p clutch-connection))
-                             "Enable auto-commit"
-                           "Disable auto-commit")))
-     clutch-toggle-auto-commit)
+    ("a" clutch--dispatch-toggle-auto-commit)
     ("R" "REPL"              clutch-repl)]
    ["Execute"
     ("x" "Query at point" clutch-execute-query-at-point)
