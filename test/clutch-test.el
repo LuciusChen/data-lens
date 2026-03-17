@@ -125,27 +125,6 @@
   (should (equal (clutch--json-value-to-string :false) "false"))
   (should (equal (clutch--json-value-to-string 42) "42")))
 
-(ert-deftest clutch-test-decode-json-unicode-escapes-cjk ()
-  "\\uXXXX escapes for CJK characters should be decoded to actual characters."
-  (with-temp-buffer
-    (insert "{\"name\":\"\\u5f20\\u4e09\"}")
-    (clutch--decode-json-unicode-escapes)
-    (should (string-match-p "张三" (buffer-string)))))
-
-(ert-deftest clutch-test-decode-json-unicode-escapes-leaves-control-chars ()
-  "\\u0000-\\u007F control escapes should not be decoded."
-  (with-temp-buffer
-    (insert "\"\\u0000\\u001f\"")
-    (clutch--decode-json-unicode-escapes)
-    (should (string-match-p "\\\\u0000" (buffer-string)))
-    (should (string-match-p "\\\\u001f" (buffer-string)))))
-
-(ert-deftest clutch-test-decode-json-unicode-escapes-leaves-surrogates ()
-  "Surrogate halves (U+D800..U+DFFF) should remain escaped."
-  (with-temp-buffer
-    (insert "\"\\uD83D\\uDE00\"")
-    (clutch--decode-json-unicode-escapes)
-    (should (string-match-p "\\\\uD83D" (buffer-string)))))
 
 (ert-deftest clutch-test-dispatch-view-json-category-serializes-non-string ()
   "JSON category should route non-string values to JSON viewer."

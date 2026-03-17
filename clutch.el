@@ -6815,19 +6815,6 @@ optionally reformat the buffer content."
         (setq buffer-read-only t)))
     (pop-to-buffer buf)))
 
-(defun clutch--decode-json-unicode-escapes ()
-  "Replace JSON \\uXXXX escapes in the current buffer with their characters.
-Only decodes printable non-ASCII BMP code points (U+0080..U+D7FF and
-U+E000..U+FFFD).  Surrogate halves and ASCII control escapes are left
-intact so the JSON remains syntactically valid."
-  (goto-char (point-min))
-  (while (re-search-forward "\\\\u\\([[:xdigit:]]\\{4\\}\\)" nil t)
-    (let ((code (string-to-number (match-string 1) 16)))
-      (when (and (>= code #x80)
-                 (or (<= code #xD7FF)
-                     (and (>= code #xE000) (<= code #xFFFD))))
-        (replace-match (string code) t t)))))
-
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
   (unless (and (stringp val) (not (string-empty-p val)))
@@ -6835,7 +6822,6 @@ intact so the JSON remains syntactically valid."
   (clutch--view-in-buffer val "*clutch-json*"
     (lambda ()
       (condition-case nil (json-pretty-print-buffer) (error nil))
-      (clutch--decode-json-unicode-escapes)
       (cond ((fboundp 'json-ts-mode) (json-ts-mode))
             ((fboundp 'json-mode)    (json-mode))
             (t                       (special-mode))))))
