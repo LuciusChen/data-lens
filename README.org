@@ -80,7 +80,7 @@ The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
 - Schema refresh state is explicit: eager backends refresh on connect, lazy backends start stale, query console buffer names surface =schema...= / =schema~= / =schema!= / =schema 42t= style state markers; schema errors also appear in the console header-line (see below)
-- Console header-line shows live connection context: database-type icon (with brand color) + backend name + connection key, plus =schema~= / =schema!= warnings when the schema cache needs attention, and =Tx: Manual= / =Tx: Manual*= when the connection is in manual-commit mode; header text is indented to align with the buffer text area (respects =display-line-numbers-mode=)
+- Console header-line shows live connection context: database-type icon (with brand color) + backend name + connection key, plus =schema~= / =schema!= warnings when the schema cache needs attention, and =Tx: Auto= / =Tx: Manual= / =Tx: Manual*= for the current commit mode; header text is indented to align with the buffer text area (respects =display-line-numbers-mode=)
 - Cache-backed schema actions also warn when the schema cache is stale, failed, or still refreshing, so completion / table prompts do not silently pretend cached metadata is current
 - The schema browser now surfaces the same recovery state at the top of the buffer, so =stale= / =failed= / =refreshing= remain visible even after you leave the console
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
@@ -716,12 +716,12 @@ backends.  See [[*Password Management]] for details.
   override per connection with =:manual-commit t= / =:manual-commit nil=.
 - Use =C-c C-m= to commit and =C-c C-u= to roll back the current transaction.
 - Use =C-c C-a= to toggle between manual-commit and auto-commit at any time.
-  When switching from manual→auto, the database commits any pending transaction
-  per the JDBC specification; clutch prompts for confirmation when there are
-  uncommitted changes.
-- The console header-line shows =Tx: Manual= when in manual-commit mode.  Once
-  uncommitted DML is present it changes to =Tx: Manual*= (highlighted) as a
-  persistent reminder.
+  The toggle is blocked when there are uncommitted changes (matching DataGrip's
+  behavior); commit or roll back first, then switch.
+- The console header-line always shows the current commit mode: =Tx: Auto=,
+  =Tx: Manual=, or =Tx: Manual*= (uncommitted changes present).
+- After a rollback, any open DML result buffers for the connection show a
+  warning banner: =⚠ Transaction rolled back — changes not persisted=.
 - Other JDBC backends stay in auto-commit mode by default; add
   =:manual-commit t= to a connection plist to opt in.
 - Oracle DDL (=CREATE=/=ALTER=/=DROP=/=TRUNCATE=/=RENAME=) auto-commits even
