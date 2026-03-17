@@ -1524,23 +1524,23 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (clutch--update-console-buffer-name)
         (should (equal (buffer-name) "*clutch: dev* [schema 42t]"))))))
 
-(ert-deftest clutch-test-schema-status-mode-line-suffix-includes-action-hints ()
-  "Stale and failed schema states should advertise the recovery key."
+(ert-deftest clutch-test-schema-status-header-line-segment ()
+  "Schema states should produce the correct header-line segment text."
   (let ((clutch--schema-status-cache (make-hash-table :test 'equal)))
     (cl-letf (((symbol-function 'clutch--connection-key)
                (lambda (_conn) "dev-key")))
       (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
-      (should (equal (clutch--schema-status-mode-line-suffix 'fake-conn)
-                     " · schema~ refresh:C-c C-s"))
+      (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
+                     (propertize "schema~" 'face 'warning)))
       (puthash "dev-key" '(:state failed) clutch--schema-status-cache)
-      (should (equal (clutch--schema-status-mode-line-suffix 'fake-conn)
-                     " · schema! retry:C-c C-s"))
+      (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
+                     (propertize "schema!" 'face 'error)))
       (puthash "dev-key" '(:state refreshing) clutch--schema-status-cache)
-      (should (equal (clutch--schema-status-mode-line-suffix 'fake-conn)
-                     " · schema…")))))
+      (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
+                     (propertize "schema…" 'face 'shadow))))))
 
-(ert-deftest clutch-test-tx-mode-line-suffix-and-update ()
-  "Manual-commit dirty state should surface as [TX*] in the mode line."
+(ert-deftest clutch-test-tx-header-line-and-update ()
+  "Manual-commit mode surfaces Tx: Manual in header-line; dirty adds *."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq)))
     (with-temp-buffer
       (clutch-mode)
@@ -1553,11 +1553,20 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                  (lambda (_conn) t))
                 ((symbol-function 'clutch-db-manual-commit-p)
                  (lambda (_conn) t))
-                ((symbol-function 'clutch--schema-status-mode-line-suffix)
-                 (lambda (_conn) nil)))
+                ((symbol-function 'clutch--schema-status-header-line-segment)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch--icon)
+                 (lambda (_spec &rest _fb) "[lock]")))
+        ;; Mode-line is now just the mode name.
+        (clutch--update-mode-line)
+        (should (equal mode-name "Clutch"))
+        ;; Clean manual-commit: header-line shows Tx: Manual (no asterisk).
+        (should (string-match-p "Tx: Manual" header-line-format))
+        (should-not (string-match-p "Tx: Manual\\*" header-line-format))
+        ;; Dirty: header-line shows Tx: Manual*.
         (puthash clutch-connection t clutch--tx-dirty-cache)
         (clutch--update-mode-line)
-        (should (equal mode-name "Oracle[scott@db:1521/ORCL][TX*]"))))))
+        (should (string-match-p "Tx: Manual\\*" header-line-format))))))
 
 (ert-deftest clutch-test-run-db-query-marks-manual-commit-dirty ()
   "Successful DML should mark manual-commit connections dirty."

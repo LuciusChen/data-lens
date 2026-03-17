@@ -705,11 +705,15 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
     (remhash conn clutch--tx-dirty-cache)
     (clutch--refresh-transaction-ui conn)))
 
-(defun clutch--tx-mode-line-suffix (conn)
-  "Return \"[TX*]\" when CONN has uncommitted changes, else nil."
-  (when (and (clutch-db-manual-commit-p conn)
-             (clutch--tx-dirty-p conn))
-    "[TX*]"))
+(defun clutch--tx-header-line-segment (conn)
+  "Return a header-line segment for CONN transaction state, or nil.
+Returns nil when CONN is in autocommit mode."
+  (when (clutch-db-manual-commit-p conn)
+    (let ((icon  (clutch--icon '(mdicon . "nf-md-database_lock") "󰪪"))
+          (dirty (clutch--tx-dirty-p conn)))
+      (if dirty
+          (propertize (concat icon " Tx: Manual*") 'face 'warning)
+        (propertize (concat icon " Tx: Manual")  'face 'shadow)))))
 
 (defun clutch--record-tx-state-after-query (conn sql)
   "Update transaction dirty state for successful SQL on CONN."
@@ -788,22 +792,37 @@ using the stored params.  Signals a user-error if not recoverable."
     (unless (clutch--try-reconnect)
       (user-error "Not connected.  Use C-c C-e to connect"))))
 
+(defun clutch--schema-status-header-line-segment (conn)
+  "Return a header-line segment for CONN schema status, or nil.
+Returns nil when the schema is ready (no noise for the happy path)."
+  (when-let* ((entry (clutch--schema-status-entry conn))
+              (state (plist-get entry :state)))
+    (pcase state
+      ('refreshing (propertize "schema…" 'face 'shadow))
+      ('stale      (propertize "schema~" 'face 'warning))
+      ('failed     (propertize "schema!" 'face 'error))
+      (_ nil))))
+
+(defun clutch--build-connection-header-line ()
+  "Build the header-line string for the current clutch buffer."
+  (if (not (clutch--connection-alive-p clutch-connection))
+      (propertize " Not connected" 'face 'shadow)
+    (let* ((sep     (propertize "  ·  " 'face 'shadow))
+           (backend (propertize (clutch-db-display-name clutch-connection) 'face 'bold))
+           (key     (clutch--connection-key clutch-connection))
+           (schema  (clutch--schema-status-header-line-segment clutch-connection))
+           (tx      (clutch--tx-header-line-segment clutch-connection))
+           (parts   (delq nil (list backend key schema tx))))
+      (concat " " (mapconcat #'identity parts sep)))))
+
 (defun clutch--update-mode-line ()
-  "Update mode-line lighter with connection status."
+  "Update mode-line and header-line with connection status."
   (setq mode-name
-        (cond
-         ((and clutch--executing-p (clutch--connection-alive-p clutch-connection))
-          (format "%s[%s …]%s"
-                  (clutch-db-display-name clutch-connection)
-                  (clutch--connection-key clutch-connection)
-                  (or (clutch--tx-mode-line-suffix clutch-connection) "")))
-         ((clutch--connection-alive-p clutch-connection)
-          (format "%s[%s%s]%s"
-                  (clutch-db-display-name clutch-connection)
-                  (clutch--connection-key clutch-connection)
-                  (or (clutch--schema-status-mode-line-suffix clutch-connection) "")
-                  (or (clutch--tx-mode-line-suffix clutch-connection) "")))
-         (t "DB[disconnected]")))
+        (if clutch--executing-p
+            (concat (if (derived-mode-p 'clutch-repl-mode) "Clutch-REPL" "Clutch")
+                    " […]")
+          (if (derived-mode-p 'clutch-repl-mode) "Clutch-REPL" "Clutch")))
+  (setq header-line-format (clutch--build-connection-header-line))
   (force-mode-line-update))
 
 (defconst clutch--jdbc-backends
@@ -2977,16 +2996,6 @@ Fetches from the backend if not yet cached.  Returns column list."
                 (puthash table col-names schema)
                 col-names)
             (clutch-db-error nil))))))
-
-(defun clutch--schema-status-mode-line-suffix (conn)
-  "Return compact mode-line suffix for CONN schema status."
-  (when-let* ((entry (clutch--schema-status-entry conn))
-              (state (plist-get entry :state)))
-    (pcase state
-      ('refreshing " · schema…")
-      ('stale " · schema~ refresh:C-c C-s")
-      ('failed " · schema! retry:C-c C-s")
-      (_ nil))))
 
 (defun clutch--ensure-column-details (conn table)
   "Return column details for TABLE on CONN, loading lazily if needed.
