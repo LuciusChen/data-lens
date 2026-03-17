@@ -25,6 +25,12 @@
 (require 'clutch-db)
 (require 'clutch-db-jdbc)
 
+;; `clutch--schema-cache' lives in clutch.el (the UI layer), which is not
+;; loaded in this test batch.  Declare it special here so that `let' bindings
+;; in the cache-based completion tests create dynamic (not lexical) bindings
+;; that the bytecode in clutch-db-jdbc.el can see.
+(defvar clutch--schema-cache (make-hash-table :test 'equal))
+
 ;;;; Test configuration
 
 (defvar clutch-db-test-mysql-host "127.0.0.1")
@@ -87,7 +93,8 @@
 
 (ert-deftest clutch-db-test-jdbc-connect-maps-timeouts ()
   "JDBC connect should map explicit timeout phases to the agent call."
-  (let (captured-op captured-params captured-timeout)
+  (let ((clutch-jdbc-oracle-manual-commit t)
+        captured-op captured-params captured-timeout)
     (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (op params &optional timeout-seconds)
@@ -107,10 +114,38 @@
                      :rpc-timeout 13))))
         (should (equal captured-op "connect"))
         (should (= captured-timeout 11))
+        (should (eq (alist-get 'auto-commit captured-params) clutch-jdbc--json-false))
         (should (= (alist-get 'connect-timeout-seconds captured-params) 11))
         (should (= (alist-get 'network-timeout-seconds captured-params) 12))
         (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 13))
         (should (= (clutch-jdbc-conn-conn-id conn) 7))))))
+
+(ert-deftest clutch-db-test-jdbc-connect-non-oracle-sends-autocommit-true ()
+  "Non-Oracle JDBC connect should keep auto-commit enabled by default."
+  (let (captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op params &optional _timeout-seconds)
+                 (setq captured-params params)
+                 '(:conn-id 8))))
+      (clutch-db-jdbc-connect
+       'sqlserver
+       '(:host "db" :port 1433 :database "app" :user "sa" :password "secret"))
+      (should (eq (alist-get 'auto-commit captured-params) t)))))
+
+(ert-deftest clutch-db-test-jdbc-connect-oracle-global-autocommit-override ()
+  "Oracle connect should honor the global manual-commit default override."
+  (let ((clutch-jdbc-oracle-manual-commit nil)
+        captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op params &optional _timeout-seconds)
+                 (setq captured-params params)
+                 '(:conn-id 9))))
+      (clutch-db-jdbc-connect
+       'oracle
+       '(:host "db" :port 1521 :database "svc" :user "scott" :password "tiger"))
+      (should (eq (alist-get 'auto-commit captured-params) t)))))
 
 (ert-deftest clutch-db-test-jdbc-connect-defaults-connect-timeout-separately-from-rpc ()
   "Direct JDBC connect should not inherit connect timeout from rpc timeout."
@@ -154,6 +189,55 @@
         (should (= captured-timeout 15))
         (should (= (alist-get 'query-timeout-seconds captured-params) 16))
         (should (= (clutch-db-result-affected-rows result) 1))))))
+
+(ert-deftest clutch-db-test-jdbc-manual-commit-p-oracle ()
+  "Oracle JDBC connections should default to manual-commit mode."
+  (let ((clutch-jdbc-oracle-manual-commit t)
+        (conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott"))))
+    (should (clutch-db-manual-commit-p conn))))
+
+(ert-deftest clutch-db-test-jdbc-manual-commit-p-sqlserver ()
+  "Non-Oracle JDBC connections should default to auto-commit mode."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver sqlserver :user "sa"))))
+    (should-not (clutch-db-manual-commit-p conn))))
+
+(ert-deftest clutch-db-test-jdbc-manual-commit-p-oracle-global-override ()
+  "Oracle JDBC connections should respect the global default override."
+  (let ((clutch-jdbc-oracle-manual-commit nil)
+        (conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott"))))
+    (should-not (clutch-db-manual-commit-p conn))))
+
+(ert-deftest clutch-db-test-jdbc-commit-fires-rpc ()
+  "clutch-db-commit should issue a commit RPC with the connection id."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 17
+                                     :params '(:driver oracle :rpc-timeout 12)))
+        captured-op captured-params captured-timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional timeout-seconds)
+                 (setq captured-op op
+                       captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:conn-id 17))))
+      (clutch-db-commit conn)
+      (should (equal captured-op "commit"))
+      (should (= (alist-get 'conn-id captured-params) 17))
+      (should (= captured-timeout 12)))))
+
+(ert-deftest clutch-db-test-jdbc-rollback-fires-rpc ()
+  "clutch-db-rollback should issue a rollback RPC with the connection id."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 18
+                                     :params '(:driver oracle :rpc-timeout 13)))
+        captured-op captured-params captured-timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional timeout-seconds)
+                 (setq captured-op op
+                       captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:conn-id 18))))
+      (clutch-db-rollback conn)
+      (should (equal captured-op "rollback"))
+      (should (= (alist-get 'conn-id captured-params) 18))
+      (should (= captured-timeout 13)))))
 
 (ert-deftest clutch-db-test-jdbc-show-create-table-uses-oracle-style-identifiers ()
   "Oracle synthesized JDBC DDL should quote only identifiers that need it."
@@ -213,6 +297,108 @@
                  42)))
       (should (clutch-db-refresh-schema-async conn #'ignore))
       (should (= captured-timeout 7)))))
+
+;;;; Unit tests — clutch-jdbc--collect-table-rows
+
+(ert-deftest clutch-db-test-jdbc-collect-table-rows-done ()
+  "When :done is t, collect-table-rows returns :rows directly without fetching."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott")))
+        fetch-called)
+    (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
+               (lambda (_conn _cursor-id)
+                 (setq fetch-called t)
+                 '())))
+      (let ((rows (clutch-jdbc--collect-table-rows
+                   conn
+                   '(:rows (("USERS" "TABLE" "SCOTT")
+                            ("ORDERS" "TABLE" "SCOTT"))
+                     :cursor-id nil
+                     :done t))))
+        (should (equal rows '(("USERS" "TABLE" "SCOTT")
+                              ("ORDERS" "TABLE" "SCOTT"))))
+        (should-not fetch-called)))))
+
+(ert-deftest clutch-db-test-jdbc-collect-table-rows-paged ()
+  "When :done is nil, collect-table-rows fetches remaining pages."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott")))
+        fetch-cursor-id)
+    (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
+               (lambda (_conn cursor-id)
+                 (setq fetch-cursor-id cursor-id)
+                 '(("PRODUCTS" "TABLE" "SCOTT")))))
+      (let ((rows (clutch-jdbc--collect-table-rows
+                   conn
+                   '(:rows (("USERS" "TABLE" "SCOTT"))
+                     :cursor-id 42
+                     :done nil))))
+        (should (equal rows '(("USERS" "TABLE" "SCOTT")
+                              ("PRODUCTS" "TABLE" "SCOTT"))))
+        (should (= fetch-cursor-id 42))))))
+
+;;;; Unit tests — clutch-db-complete-tables (Oracle, cache-first)
+
+(ert-deftest clutch-db-test-jdbc-complete-tables-uses-cache ()
+  "When schema cache is populated, complete-tables filters locally without RPC."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 5
+                                      :params '(:driver oracle :user "scott")))
+         (clutch--schema-cache (make-hash-table :test 'equal))
+         (schema (make-hash-table :test 'equal))
+         rpc-called)
+    (puthash "USERS" nil schema)
+    (puthash "ORDERS" nil schema)
+    (puthash "USER_ROLES" nil schema)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "test-key"))
+              ((symbol-function 'clutch--schema-status-entry)
+               (lambda (_conn) '(:state ready)))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (&rest _) (setq rpc-called t) nil)))
+      (puthash "test-key" schema clutch--schema-cache)
+      (let ((result (clutch-db-complete-tables conn "US")))
+        (should-not rpc-called)
+        (should (equal (sort (copy-sequence result) #'string<)
+                       '("USERS" "USER_ROLES")))))))
+
+(ert-deftest clutch-db-test-jdbc-complete-tables-stale-cache-fallback-rpc ()
+  "Oracle completion should ignore stale cache entries and fall back to RPC."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 5
+                                      :params '(:driver oracle :user "scott")))
+         (clutch--schema-cache (make-hash-table :test 'equal))
+         (schema (make-hash-table :test 'equal))
+         captured-op)
+    (puthash "USERS" nil schema)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "test-key"))
+              ((symbol-function 'clutch--schema-status-entry)
+               (lambda (_conn) '(:state stale)))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (setq captured-op op)
+                 (should (equal (alist-get 'prefix params) "US"))
+                 '(:tables ((:name "USERS_NEW"))))))
+      (puthash "test-key" schema clutch--schema-cache)
+      (let ((result (clutch-db-complete-tables conn "US")))
+        (should (equal captured-op "search-tables"))
+        (should (equal result '("USERS_NEW")))))))
+
+(ert-deftest clutch-db-test-jdbc-complete-tables-fallback-rpc ()
+  "When schema cache is nil for this connection, complete-tables fires search-tables RPC."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 5
+                                      :params '(:driver oracle :user "scott")))
+         (clutch--schema-cache (make-hash-table :test 'equal))
+         captured-op)
+    ;; Cache is empty for this connection key
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "test-key"))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (setq captured-op op)
+                 (should (equal (alist-get 'prefix params) "US"))
+                 '(:tables ((:name "USERS") (:name "USER_ROLES"))))))
+      (let ((result (clutch-db-complete-tables conn "US")))
+        (should (equal captured-op "search-tables"))
+        (should (equal (sort (copy-sequence result) #'string<)
+                       '("USERS" "USER_ROLES")))))))
 
 (ert-deftest clutch-db-test-jdbc-rpc-async-times-out-and-cleans-up ()
   "Async JDBC RPC should call ERRBACK and clear state on timeout."

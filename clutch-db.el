@@ -122,6 +122,21 @@ Leaves nested ORDER BY clauses inside subqueries or window functions intact."
   "Perform post-connect initialization on CONN.
 For example, SET NAMES utf8mb4 on MySQL.")
 
+(cl-defgeneric clutch-db-manual-commit-p (conn)
+  "Return non-nil when CONN is in manual-commit mode.")
+
+(cl-defmethod clutch-db-manual-commit-p ((_conn t)) nil)
+
+(cl-defgeneric clutch-db-commit (conn)
+  "Commit the current transaction on CONN.")
+
+(cl-defmethod clutch-db-commit ((_conn t)) nil)
+
+(cl-defgeneric clutch-db-rollback (conn)
+  "Roll back the current transaction on CONN.")
+
+(cl-defmethod clutch-db-rollback ((_conn t)) nil)
+
 (cl-defgeneric clutch-db-eager-schema-refresh-p (conn)
   "Return non-nil when CONN should refresh schema synchronously on connect.")
 
