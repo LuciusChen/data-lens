@@ -802,20 +802,23 @@ Returns nil when the schema is ready (no noise for the happy path)."
       (_ nil))))
 
 (defconst clutch--db-icon-specs
-  ;; Each entry: (BACKEND . (ICON-SPEC FALLBACK &rest ICON-ARGS))
-  ;; ICON-ARGS are forwarded to the nerd-icons function (e.g. :height).
-  '((mysql      . ((devicon . "nf-dev-mysql")              ""))
-    (pg         . ((devicon . "nf-dev-postgresql")         ""))
-    (sqlite     . ((devicon . "nf-dev-sqlite")             ""))
-    (oracle     . ((devicon . "nf-dev-oracle")             "" :height 1.2))
-    (sqlserver  . ((devicon . "nf-dev-microsoftsqlserver") ""))
-    (snowflake  . ((mdicon  . "nf-md-snowflake")           "❄"))
-    (db2        . ((mdicon  . "nf-md-database")            ""))
-    (redshift   . ((mdicon  . "nf-md-database")            "")))
-  "Alist mapping backend symbols to (ICON-SPEC FALLBACK &rest ICON-ARGS).")
+  ;; Each entry: (BACKEND . (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS))
+  ;; :color sets the icon foreground; remaining ICON-ARGS (e.g. :height) are
+  ;; forwarded to the nerd-icons function.
+  '((mysql      . ((devicon . "nf-dev-mysql")              ""  :color "#469AD7"))
+    (pg         . ((devicon . "nf-dev-postgresql")         ""  :color "#336791"))
+    (sqlite     . ((devicon . "nf-dev-sqlite")             ""  :color "#3A7EC6"))
+    (oracle     . ((mdicon  . "nf-md-alpha_o_circle")      "O" :color "#C74634"))
+    (sqlserver  . ((devicon . "nf-dev-microsoftsqlserver") ""  :color "#CC2927"))
+    (snowflake  . ((mdicon  . "nf-md-snowflake")           "❄" :color "#29B5E8"))
+    (db2        . ((mdicon  . "nf-md-database")            ""  :color "#1F70C1"))
+    (redshift   . ((mdicon  . "nf-md-database")            ""  :color "#8C4FFF")))
+  "Alist mapping backend symbols to icon specs.
+Each value is (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS).
+ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
 
 (defun clutch--db-backend-icon (conn)
-  "Return a nerd-icons glyph for CONN's database backend, or nil.
+  "Return a colored nerd-icons glyph for CONN's database backend, or nil.
 JDBC connections expose the driver symbol via `clutch-jdbc-conn-params';
 native backends are identified by their display name string."
   (let* ((driver (and (fboundp 'clutch-jdbc-conn-params)
@@ -828,7 +831,14 @@ native backends are identified by their display name string."
                        ("SQLite"     'sqlite))))
          (spec   (alist-get key clutch--db-icon-specs)))
     (when spec
-      (apply #'clutch--icon (car spec) (cadr spec) (cddr spec)))))
+      (let* ((rest      (cddr spec))
+             (color     (plist-get rest :color))
+             (icon-args (cl-loop for (k v) on rest by #'cddr
+                                 unless (eq k :color) nconc (list k v)))
+             (icon      (apply #'clutch--icon (car spec) (cadr spec) icon-args)))
+        (if (and color (not (string-empty-p icon)))
+            (propertize icon 'face `(:foreground ,color :inherit ,(get-text-property 0 'face icon)))
+          icon)))))
 
 (defun clutch--header-line-indent ()
   "Return leading spaces to align header-line text with the buffer text area.
