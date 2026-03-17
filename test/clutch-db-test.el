@@ -1063,6 +1063,135 @@ Skips if `clutch-db-test-pg-password' is nil."
     (should-error (clutch-db-query conn "SELEC BAD")
                   :type 'clutch-db-error)))
 
+;;;; Live integration tests — JDBC / Oracle
+;;
+;; Oracle is the primary JDBC target for clutch.  These tests verify:
+;;   • agent start-up and basic query round-trip
+;;   • manual-commit mode (Oracle default, matches DataGrip behaviour)
+;;   • explicit COMMIT and ROLLBACK RPCs
+;;   • schema introspection via DatabaseMetaData
+;;
+;; To enable: set `clutch-db-test-jdbc-oracle-password' and point
+;; `clutch-jdbc-agent-dir' at a directory that contains the jar and a
+;; drivers/ subdirectory with ojdbc11.jar (or equivalent).
+;;
+;; Quick local setup (OrbStack):
+;;   docker run -d --name clutch-oracle -e ORACLE_PASSWORD=test \
+;;     -p 1521:1521 gvenzl/oracle-free:slim-faststart
+
+(defvar clutch-db-test-jdbc-oracle-host "127.0.0.1"
+  "Host for Oracle JDBC live tests.")
+(defvar clutch-db-test-jdbc-oracle-port 1521
+  "Port for Oracle JDBC live tests.")
+(defvar clutch-db-test-jdbc-oracle-user "system"
+  "User for Oracle JDBC live tests.")
+(defvar clutch-db-test-jdbc-oracle-password nil
+  "Password for Oracle JDBC live tests.  Non-nil enables the :jdbc-live suite.")
+(defvar clutch-db-test-jdbc-oracle-service "freepdb1"
+  "Service name for Oracle JDBC live tests (gvenzl/oracle-free default).")
+
+(defmacro clutch-db-test--with-oracle (var &rest body)
+  "Execute BODY with VAR bound to a live Oracle JDBC connection.
+Skips if `clutch-db-test-jdbc-oracle-password' is nil."
+  (declare (indent 1))
+  `(if (null clutch-db-test-jdbc-oracle-password)
+       (ert-skip "Set clutch-db-test-jdbc-oracle-password to enable Oracle live tests")
+     (require 'clutch-db-jdbc)
+     (let ((,var (clutch-db-connect
+                  'oracle
+                  (list :host clutch-db-test-jdbc-oracle-host
+                        :port clutch-db-test-jdbc-oracle-port
+                        :user clutch-db-test-jdbc-oracle-user
+                        :password clutch-db-test-jdbc-oracle-password
+                        :database clutch-db-test-jdbc-oracle-service))))
+       (unwind-protect
+           (progn ,@body)
+         (clutch-db-disconnect ,var)))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-connect ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Oracle JDBC connection should start the agent and return a live conn."
+  (clutch-db-test--with-oracle conn
+    (should (clutch-db-live-p conn))
+    (should (clutch-db-manual-commit-p conn))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-query ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Oracle JDBC query should return correct columns and rows."
+  (clutch-db-test--with-oracle conn
+    (let ((result (clutch-db-query conn "SELECT 1 AS n FROM DUAL")))
+      (should (clutch-db-result-p result))
+      (should (= (length (clutch-db-result-rows result)) 1)))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-manual-commit ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Oracle JDBC commit RPC should persist DML."
+  (if (null clutch-db-test-jdbc-oracle-password)
+      (ert-skip "Set clutch-db-test-jdbc-oracle-password to enable Oracle live tests")
+    (require 'clutch-db-jdbc)
+    (let ((conn (clutch-db-connect
+                 'oracle
+                 (list :host clutch-db-test-jdbc-oracle-host
+                       :port clutch-db-test-jdbc-oracle-port
+                       :user clutch-db-test-jdbc-oracle-user
+                       :password clutch-db-test-jdbc-oracle-password
+                       :database clutch-db-test-jdbc-oracle-service)))
+          (tbl (format "CC_TEST_%d" (abs (random 9999)))))
+      (unwind-protect
+          (progn
+            (should (clutch-db-manual-commit-p conn))
+            (clutch-db-query conn (format "CREATE TABLE %s (id NUMBER)" tbl))
+            ;; DDL auto-commits in Oracle; subsequent DML starts a new tx.
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (1)" tbl))
+            (clutch-db-commit conn)
+            (let ((result (clutch-db-query
+                           conn (format "SELECT COUNT(*) FROM %s" tbl))))
+              (should (equal (caar (clutch-db-result-rows result)) "1"))))
+        (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" tbl)))
+        (clutch-db-disconnect conn)))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-rollback ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Oracle JDBC rollback RPC should discard uncommitted DML."
+  (if (null clutch-db-test-jdbc-oracle-password)
+      (ert-skip "Set clutch-db-test-jdbc-oracle-password to enable Oracle live tests")
+    (require 'clutch-db-jdbc)
+    (let ((conn (clutch-db-connect
+                 'oracle
+                 (list :host clutch-db-test-jdbc-oracle-host
+                       :port clutch-db-test-jdbc-oracle-port
+                       :user clutch-db-test-jdbc-oracle-user
+                       :password clutch-db-test-jdbc-oracle-password
+                       :database clutch-db-test-jdbc-oracle-service)))
+          (tbl (format "CC_RB_%d" (abs (random 9999)))))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (format "CREATE TABLE %s (id NUMBER)" tbl))
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (1)" tbl))
+            (clutch-db-rollback conn)
+            (let ((result (clutch-db-query
+                           conn (format "SELECT COUNT(*) FROM %s" tbl))))
+              (should (equal (caar (clutch-db-result-rows result)) "0"))))
+        (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" tbl)))
+        (clutch-db-disconnect conn)))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-schema ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Oracle JDBC schema introspection should list tables and columns."
+  (clutch-db-test--with-oracle conn
+    (let ((tbl (format "CC_SCHEMA_%d" (abs (random 9999)))))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn
+             (format "CREATE TABLE %s (id NUMBER PRIMARY KEY, name VARCHAR2(64))" tbl))
+            (let ((tables (clutch-db-list-tables conn)))
+              (should (member tbl tables)))
+            (let ((cols (clutch-db-list-columns conn tbl)))
+              (should (member "ID" cols))
+              (should (member "NAME" cols))))
+        (ignore-errors
+          (clutch-db-query conn (format "DROP TABLE %s" tbl)))))))
+
 ;;;; Unit tests — clutch--format-value and clutch--value-to-literal
 
 (ert-deftest clutch-db-test-format-value-primitives ()
