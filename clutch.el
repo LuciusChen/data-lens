@@ -455,6 +455,9 @@ DIRECTION is \"ASC\" or \"DESC\".")
 (defvar-local clutch--result-column-defs nil
   "Full column definition plists from the last result.")
 
+(defvar-local clutch--dml-result nil
+  "Non-nil when this result buffer shows a DML (non-SELECT) result.")
+
 (defvar-local clutch--pending-edits nil
   "Alist of pending edits: ((PK-VEC . COL-IDX) . NEW-VALUE).")
 
@@ -702,6 +705,17 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
   (when conn
     (remhash conn clutch--tx-dirty-cache)
     (clutch--refresh-transaction-ui conn)))
+
+(defun clutch--mark-dml-results-rolled-back (conn)
+  "Add a rollback warning banner to open DML result buffers for CONN."
+  (let ((banner (propertize "  ⚠  Transaction rolled back — changes not persisted"
+                            'face '(:inherit warning :weight bold))))
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (derived-mode-p 'clutch-result-mode)
+                   (eq clutch-connection conn)
+                   (bound-and-true-p clutch--dml-result))
+          (setq-local header-line-format banner))))))
 
 (defun clutch--tx-header-line-segment (conn)
   "Return a header-line segment for CONN transaction state, or nil.
@@ -1063,6 +1077,7 @@ params; see `clutch-connection-alist' for details."
   (unless (clutch-db-manual-commit-p clutch-connection)
     (user-error "Connection is in autocommit mode"))
   (clutch-db-rollback clutch-connection)
+  (clutch--mark-dml-results-rolled-back clutch-connection)
   (clutch--clear-tx-dirty clutch-connection)
   (message "Transaction rolled back"))
 
@@ -2129,6 +2144,7 @@ IGNORE-BUFFER is excluded from liveness checks."
   "Render a DML RESULT (INSERT/UPDATE/DELETE) with SQL and ELAPSED time."
   (let ((inhibit-read-only t))
     (erase-buffer)
+    (setq-local clutch--dml-result t)
     (setq-local clutch--column-widths nil)
     (insert (propertize (format "-- %s\n" (string-trim sql))
                         'face 'font-lock-comment-face))

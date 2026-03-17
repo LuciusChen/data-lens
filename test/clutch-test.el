@@ -3092,6 +3092,26 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should rolled-back)
       (should-not (clutch--tx-dirty-p clutch-connection)))))
 
+(ert-deftest clutch-test-rollback-marks-dml-result-buffers ()
+  "clutch-rollback should add a rollback banner to open DML result buffers."
+  (let* ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+         (clutch-connection 'fake-conn)
+         (buf (get-buffer-create " *clutch-rollback-test*")))
+    (puthash clutch-connection t clutch--tx-dirty-cache)
+    (with-current-buffer buf
+      (clutch-result-mode)
+      (setq-local clutch-connection 'fake-conn)
+      (setq-local clutch--dml-result t)
+      (setq-local header-line-format nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                  ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
+                  ((symbol-function 'clutch-db-rollback) #'ignore)
+                  ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+          (clutch-rollback)
+          (should (with-current-buffer buf header-line-format)))
+      (kill-buffer buf))))
+
 (ert-deftest clutch-test-toggle-auto-commit-manual-to-auto ()
   "Toggling from manual→auto (clean) calls set-auto-commit(t) and clears dirty."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
