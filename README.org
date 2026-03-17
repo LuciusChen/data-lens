@@ -274,6 +274,8 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-d=   | DESCRIBE table at point (errors if not on a table name) |
 | =C-c C-p=   | Preview execution (dry-run) |
 | =C-c C-s=   | Refresh schema for current connection |
+| =C-c C-m=   | Commit transaction (manual-commit connections only) |
+| =C-c C-u=   | Roll back transaction (manual-commit connections only) |
 | =C-c ?=     | Transient menu             |
 | =TAB=       | Complete table/column name |
 
