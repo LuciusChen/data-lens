@@ -7863,7 +7863,12 @@ Accumulates input until a semicolon is found, then executes."
     ("d" "Disconnect" clutch-disconnect)
     ("m" "Commit"            clutch-commit)
     ("u" "Rollback"          clutch-rollback)
-    ("a" "Toggle auto-commit" clutch-toggle-auto-commit)
+    ("a" (:description (lambda ()
+                         (if (and clutch-connection
+                                  (clutch-db-manual-commit-p clutch-connection))
+                             "Enable auto-commit"
+                           "Disable auto-commit")))
+     clutch-toggle-auto-commit)
     ("R" "REPL"              clutch-repl)]
    ["Execute"
     ("x" "Query at point" clutch-execute-query-at-point)
