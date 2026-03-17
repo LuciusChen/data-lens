@@ -802,15 +802,17 @@ Returns nil when the schema is ready (no noise for the happy path)."
       (_ nil))))
 
 (defconst clutch--db-icon-specs
+  ;; Each entry: (BACKEND . (ICON-SPEC FALLBACK &rest ICON-ARGS))
+  ;; ICON-ARGS are forwarded to the nerd-icons function (e.g. :height).
   '((mysql      . ((devicon . "nf-dev-mysql")              ""))
     (pg         . ((devicon . "nf-dev-postgresql")         ""))
     (sqlite     . ((devicon . "nf-dev-sqlite")             ""))
-    (oracle     . ((devicon . "nf-dev-oracle")             ""))
+    (oracle     . ((devicon . "nf-dev-oracle")             "" :height 1.2))
     (sqlserver  . ((devicon . "nf-dev-microsoftsqlserver") ""))
     (snowflake  . ((mdicon  . "nf-md-snowflake")           "❄"))
     (db2        . ((mdicon  . "nf-md-database")            ""))
     (redshift   . ((mdicon  . "nf-md-database")            "")))
-  "Alist mapping backend symbols to (ICON-SPEC FALLBACK) for the header-line.")
+  "Alist mapping backend symbols to (ICON-SPEC FALLBACK &rest ICON-ARGS).")
 
 (defun clutch--db-backend-icon (conn)
   "Return a nerd-icons glyph for CONN's database backend, or nil.
@@ -826,23 +828,27 @@ native backends are identified by their display name string."
                        ("SQLite"     'sqlite))))
          (spec   (alist-get key clutch--db-icon-specs)))
     (when spec
-      (clutch--icon (car spec) (cadr spec)))))
+      (apply #'clutch--icon (car spec) (cadr spec) (cddr spec)))))
+
+(defun clutch--header-line-indent ()
+  "Return leading spaces to align header-line text with the buffer text area.
+Accounts for the line-number gutter when `display-line-numbers-mode' is on."
+  (make-string (max 1 (line-number-display-width)) ?\s))
 
 (defun clutch--build-connection-header-line ()
   "Build the header-line string for the current clutch buffer."
-  (if (not (clutch--connection-alive-p clutch-connection))
-      (propertize " Not connected" 'face 'shadow)
-    (let* ((sep     (propertize "  ·  " 'face 'shadow))
-           (icon    (clutch--db-backend-icon clutch-connection))
-           (backend (propertize (clutch-db-display-name clutch-connection) 'face 'bold))
-           (key     (clutch--connection-key clutch-connection))
-           (schema  (clutch--schema-status-header-line-segment clutch-connection))
-           (tx      (clutch--tx-header-line-segment clutch-connection))
-           (parts   (delq nil (list (if icon
-                                        (concat icon " " backend)
-                                      backend)
-                                    key schema tx))))
-      (concat " " (mapconcat #'identity parts sep)))))
+  (let ((indent (clutch--header-line-indent)))
+    (if (not (clutch--connection-alive-p clutch-connection))
+        (concat indent (propertize "Not connected" 'face 'shadow))
+      (let* ((sep     (propertize "  ·  " 'face 'shadow))
+             (icon    (clutch--db-backend-icon clutch-connection))
+             (backend (propertize (clutch-db-display-name clutch-connection) 'face 'bold))
+             (key     (clutch--connection-key clutch-connection))
+             (schema  (clutch--schema-status-header-line-segment clutch-connection))
+             (tx      (clutch--tx-header-line-segment clutch-connection))
+             (parts   (delq nil (list (if icon (concat icon " " backend) backend)
+                                      key schema tx))))
+        (concat indent (mapconcat #'identity parts sep))))))
 
 (defun clutch--update-mode-line ()
   "Update mode-line and header-line with connection status."
@@ -851,7 +857,9 @@ native backends are identified by their display name string."
             (concat (if (derived-mode-p 'clutch-repl-mode) "Clutch-REPL" "Clutch")
                     " […]")
           (if (derived-mode-p 'clutch-repl-mode) "Clutch-REPL" "Clutch")))
-  (setq header-line-format (clutch--build-connection-header-line))
+  ;; Use :eval so line-number-display-width is recomputed on each redraw,
+  ;; keeping alignment correct when display-line-numbers-mode is toggled.
+  (setq header-line-format '((:eval (clutch--build-connection-header-line))))
   (force-mode-line-update))
 
 (defconst clutch--jdbc-backends
@@ -1384,20 +1392,21 @@ POSITION is `top', `middle', or `bottom' (default `middle')."
     (let ((line (concat (mapconcat #'identity (nreverse parts) "") right)))
       (concat left (substring line 1)))))
 
-(defun clutch--icon (name &rest fallback)
+(defun clutch--icon (name &optional fallback &rest icon-args)
   "Return a nerd-icons icon for NAME, or FALLBACK string.
 NAME is a cons (FAMILY . ICON-NAME) where FAMILY is any nerd-icons
 glyph-set symbol (e.g. `mdicon', `devicon', `codicon', `octicon').
-The icon function is resolved dynamically via `nerd-icons--function-name',
-so new families require no changes here.  Falls back gracefully when
-nerd-icons is not installed or the family is unknown."
+ICON-ARGS are keyword arguments forwarded to the nerd-icons function
+\(e.g. :height 1.2).  The icon function is resolved dynamically via
+`nerd-icons--function-name', so new families require no changes here.
+Falls back gracefully when nerd-icons is not installed or unknown."
   (pcase-let ((`(,family . ,icon-name) name))
     (or (and (require 'nerd-icons nil t)
              (fboundp 'nerd-icons--function-name)
              (let ((fn (nerd-icons--function-name family)))
                (and (fboundp fn)
-                    (funcall fn icon-name))))
-        (car fallback)
+                    (apply fn icon-name icon-args))))
+        fallback
         "")))
 
 (defun clutch--fixed-width-icon (spec fallback &optional face)

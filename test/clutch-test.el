@@ -1560,13 +1560,15 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         ;; Mode-line is now just the mode name.
         (clutch--update-mode-line)
         (should (equal mode-name "Clutch"))
-        ;; Clean manual-commit: header-line shows Tx: Manual (no asterisk).
-        (should (string-match-p "Tx: Manual" header-line-format))
-        (should-not (string-match-p "Tx: Manual\\*" header-line-format))
+        ;; header-line-format is an (:eval ...) form; evaluate it to get content.
+        (let ((hl (clutch--build-connection-header-line)))
+          ;; Clean manual-commit: shows Tx: Manual (no asterisk).
+          (should (string-match-p "Tx: Manual" hl))
+          (should-not (string-match-p "Tx: Manual\\*" hl)))
         ;; Dirty: header-line shows Tx: Manual*.
         (puthash clutch-connection t clutch--tx-dirty-cache)
-        (clutch--update-mode-line)
-        (should (string-match-p "Tx: Manual\\*" header-line-format))))))
+        (let ((hl (clutch--build-connection-header-line)))
+          (should (string-match-p "Tx: Manual\\*" hl)))))))
 
 (ert-deftest clutch-test-run-db-query-marks-manual-commit-dirty ()
   "Successful DML should mark manual-commit connections dirty."
