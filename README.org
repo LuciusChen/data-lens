@@ -277,6 +277,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-s=   | Refresh schema for current connection |
 | =C-c C-m=   | Commit transaction (manual-commit connections only) |
 | =C-c C-u=   | Roll back transaction (manual-commit connections only) |
+| =C-c C-a=   | Toggle auto-commit on/off for the current connection |
 | =C-c ?=     | Transient menu             |
 | =TAB=       | Complete table/column name |
 
@@ -714,6 +715,10 @@ backends.  See [[*Password Management]] for details.
 - Customize that default globally with =clutch-jdbc-oracle-manual-commit=, or
   override per connection with =:manual-commit t= / =:manual-commit nil=.
 - Use =C-c C-m= to commit and =C-c C-u= to roll back the current transaction.
+- Use =C-c C-a= to toggle between manual-commit and auto-commit at any time.
+  When switching from manual→auto, the database commits any pending transaction
+  per the JDBC specification; clutch prompts for confirmation when there are
+  uncommitted changes.
 - The console header-line shows =Tx: Manual= when in manual-commit mode.  Once
   uncommitted DML is present it changes to =Tx: Manual*= (highlighted) as a
   persistent reminder.

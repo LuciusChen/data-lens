@@ -137,6 +137,13 @@ For example, SET NAMES utf8mb4 on MySQL.")
 
 (cl-defmethod clutch-db-rollback ((_conn t)) nil)
 
+(cl-defgeneric clutch-db-set-auto-commit (conn auto-commit)
+  "Set CONN's auto-commit mode.
+AUTO-COMMIT non-nil enables auto-commit; nil enables manual-commit.")
+
+(cl-defmethod clutch-db-set-auto-commit ((_conn t) _auto-commit)
+  (user-error "This backend does not support runtime auto-commit toggle"))
+
 (cl-defgeneric clutch-db-eager-schema-refresh-p (conn)
   "Return non-nil when CONN should refresh schema synchronously on connect.")
 

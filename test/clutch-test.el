@@ -3092,6 +3092,53 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should rolled-back)
       (should-not (clutch--tx-dirty-p clutch-connection)))))
 
+(ert-deftest clutch-test-toggle-auto-commit-manual-to-auto ()
+  "Toggling from manual→auto calls set-auto-commit(t) and clears dirty."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        captured-auto-commit
+        mode-line-updated)
+    (puthash clutch-connection t clutch--tx-dirty-cache)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
+              ((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
+              ((symbol-function 'clutch-db-set-auto-commit)
+               (lambda (_conn v) (setq captured-auto-commit v)))
+              ((symbol-function 'clutch--update-mode-line)
+               (lambda () (setq mode-line-updated t))))
+      (clutch-toggle-auto-commit)
+      (should (eq t captured-auto-commit))
+      (should-not (clutch--tx-dirty-p clutch-connection))
+      (should mode-line-updated))))
+
+(ert-deftest clutch-test-toggle-auto-commit-auto-to-manual ()
+  "Toggling from auto→manual calls set-auto-commit(nil), does not clear dirty."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        captured-auto-commit)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-set-auto-commit)
+               (lambda (_conn v) (setq captured-auto-commit v)))
+              ((symbol-function 'clutch--update-mode-line) #'ignore))
+      (clutch-toggle-auto-commit)
+      (should (eq nil captured-auto-commit)))))
+
+(ert-deftest clutch-test-toggle-auto-commit-dirty-aborts-when-declined ()
+  "When dirty and user declines the confirmation, the toggle must not proceed."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        toggle-called)
+    (puthash clutch-connection t clutch--tx-dirty-cache)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
+              ((symbol-function 'yes-or-no-p) (lambda (_prompt) nil))
+              ((symbol-function 'clutch-db-set-auto-commit)
+               (lambda (_conn _v) (setq toggle-called t))))
+      (should-error (clutch-toggle-auto-commit) :type 'user-error)
+      (should-not toggle-called)
+      (should (clutch--tx-dirty-p clutch-connection)))))
+
 (ert-deftest clutch-test-execute-runs-risky-dml-confirmation ()
   "Execute should run risky DML confirmation before dispatch."
   (let ((called nil)

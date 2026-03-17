@@ -58,13 +58,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.1.6"
+(defcustom clutch-jdbc-agent-version "0.1.7"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "2f74cbeea0cc39adc41de97ced5f0b909622fbce5e25237e70f777e4330d12ef"
+  "189ff1113739c5903fd1ca1b33236ecb40496d900824b15b2831036d6b3829a0"
   "Expected SHA-256 for the bundled clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -540,6 +540,18 @@ stored in params at connect time."
   (clutch-jdbc--rpc "rollback"
                     `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
                     (clutch-jdbc--conn-rpc-timeout conn)))
+
+(cl-defmethod clutch-db-set-auto-commit ((conn clutch-jdbc-conn) auto-commit)
+  "Set auto-commit mode on JDBC CONN.
+AUTO-COMMIT non-nil enables auto-commit (disables manual-commit); nil
+enables manual-commit.  When switching to auto-commit, the JDBC driver
+commits any pending transaction per the JDBC specification."
+  (clutch-jdbc--rpc "set-auto-commit"
+                    `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
+                      (auto-commit . ,(if auto-commit t clutch-jdbc--json-false)))
+                    (clutch-jdbc--conn-rpc-timeout conn))
+  (setf (clutch-jdbc-conn-params conn)
+        (plist-put (clutch-jdbc-conn-params conn) :manual-commit (not auto-commit))))
 
 (cl-defmethod clutch-db-eager-schema-refresh-p ((conn clutch-jdbc-conn))
   "Oracle JDBC schema enumeration is too slow to block connect."

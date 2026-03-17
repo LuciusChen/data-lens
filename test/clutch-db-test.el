@@ -239,6 +239,35 @@
       (should (= (alist-get 'conn-id captured-params) 18))
       (should (= captured-timeout 13)))))
 
+(ert-deftest clutch-db-test-jdbc-set-auto-commit-fires-rpc ()
+  "clutch-db-set-auto-commit should issue set-auto-commit RPC with auto-commit value."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 19
+                                     :params '(:driver oracle :rpc-timeout 12 :manual-commit t)))
+        captured-op captured-params captured-timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional timeout-seconds)
+                 (setq captured-op op
+                       captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:conn-id 19 :auto-commit t))))
+      (clutch-db-set-auto-commit conn t)
+      (should (equal captured-op "set-auto-commit"))
+      (should (= (alist-get 'conn-id captured-params) 19))
+      (should (eq (alist-get 'auto-commit captured-params) t))
+      (should (= captured-timeout 12)))))
+
+(ert-deftest clutch-db-test-jdbc-set-auto-commit-updates-params ()
+  "clutch-db-set-auto-commit should update :manual-commit in conn params."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 20
+                                     :params '(:driver oracle :rpc-timeout 12 :manual-commit t))))
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc) (lambda (_op _params &optional _to) nil)))
+      ;; Switch to auto-commit: manual-commit should become nil
+      (clutch-db-set-auto-commit conn t)
+      (should-not (plist-get (clutch-jdbc-conn-params conn) :manual-commit))
+      ;; Switch back to manual-commit: manual-commit should become t
+      (clutch-db-set-auto-commit conn nil)
+      (should (plist-get (clutch-jdbc-conn-params conn) :manual-commit)))))
+
 (ert-deftest clutch-db-test-jdbc-show-create-table-uses-oracle-style-identifiers ()
   "Oracle synthesized JDBC DDL should quote only identifiers that need it."
   (let ((conn (make-clutch-jdbc-conn :conn-id 4
@@ -1174,6 +1203,19 @@ Skips if `clutch-db-test-jdbc-oracle-password' is nil."
               (should (equal (caar (clutch-db-result-rows result)) "0"))))
         (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" tbl)))
         (clutch-db-disconnect conn)))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-toggle-auto-commit ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Oracle JDBC set-auto-commit RPC should toggle between manual and auto modes."
+  (clutch-db-test--with-oracle conn
+    ;; Oracle starts in manual-commit mode
+    (should (clutch-db-manual-commit-p conn))
+    ;; Toggle to auto-commit
+    (clutch-db-set-auto-commit conn t)
+    (should-not (clutch-db-manual-commit-p conn))
+    ;; Toggle back to manual-commit
+    (clutch-db-set-auto-commit conn nil)
+    (should (clutch-db-manual-commit-p conn))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-schema ()
   :tags '(:db-live :jdbc-live :oracle-live)

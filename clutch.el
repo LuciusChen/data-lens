@@ -1065,6 +1065,24 @@ params; see `clutch-connection-alist' for details."
   (clutch--clear-tx-dirty clutch-connection)
   (message "Transaction rolled back"))
 
+(defun clutch-toggle-auto-commit ()
+  "Toggle auto-commit mode for the current connection.
+When switching from manual-commit to auto-commit, the database commits
+any pending transaction per JDBC specification."
+  (interactive)
+  (clutch--ensure-connection)
+  (let ((manual-now (clutch-db-manual-commit-p clutch-connection)))
+    (when (and manual-now
+               (clutch--tx-dirty-p clutch-connection)
+               (not (yes-or-no-p
+                     "Switching to auto-commit will commit the pending transaction.  Continue? ")))
+      (user-error "Toggle cancelled"))
+    (clutch-db-set-auto-commit clutch-connection manual-now)
+    (when manual-now
+      (clutch--clear-tx-dirty clutch-connection))
+    (clutch--update-mode-line)
+    (message "Auto-commit %s" (if manual-now "enabled" "disabled"))))
+
 ;;;; Query console
 
 (defun clutch--console-window-for (buf)
@@ -4220,6 +4238,7 @@ Prompts for TABLE via `completing-read' using schema cache table names."
     (define-key map (kbd "C-c C-e") #'clutch-connect)
     (define-key map (kbd "C-c C-m") #'clutch-commit)
     (define-key map (kbd "C-c C-u") #'clutch-rollback)
+    (define-key map (kbd "C-c C-a") #'clutch-toggle-auto-commit)
     (define-key map (kbd "C-c C-t") #'clutch-list-tables)
     (define-key map (kbd "C-c C-j") #'clutch-browse-table)
     (define-key map (kbd "C-c C-d") #'clutch-describe-table-at-point)
@@ -7736,6 +7755,7 @@ Selects JSON, XML, or binary string view based on column type and content."
     (define-key map (kbd "C-c C-e") #'clutch-connect)
     (define-key map (kbd "C-c C-m") #'clutch-commit)
     (define-key map (kbd "C-c C-u") #'clutch-rollback)
+    (define-key map (kbd "C-c C-a") #'clutch-toggle-auto-commit)
     (define-key map (kbd "C-c C-t") #'clutch-list-tables)
     (define-key map (kbd "C-c C-d") #'clutch-describe-table-at-point)
     map)
@@ -7841,9 +7861,10 @@ Accumulates input until a semicolon is found, then executes."
   [["Connection"
     ("c" "Connect"    clutch-connect)
     ("d" "Disconnect" clutch-disconnect)
-    ("m" "Commit"     clutch-commit)
-    ("u" "Rollback"   clutch-rollback)
-    ("R" "REPL"       clutch-repl)]
+    ("m" "Commit"            clutch-commit)
+    ("u" "Rollback"          clutch-rollback)
+    ("a" "Toggle auto-commit" clutch-toggle-auto-commit)
+    ("R" "REPL"              clutch-repl)]
    ["Execute"
     ("x" "Query at point" clutch-execute-query-at-point)
     ("r" "Region"         clutch-execute-region)
