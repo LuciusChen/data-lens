@@ -1012,13 +1012,26 @@ To trust private/internal CAs, configure:
 
 ** Unit tests (no server required)
 
+=test/clutch-test.el= — UI layer, ~276 tests covering: value formatting and
+cell rendering, column width/page computation, insert and edit buffer workflow
+(TAB navigation, local validation, JSON sub-editor, enum/temporal completion),
+staged-commit lifecycle (PK-vec based edit/insert/delete, discard, commit
+ordering), schema browsing (lazy async expand), SQL keyword completion (CAPF),
+REPL, MySQL/PG protocol correctness (IEEE 754 float decoding, PG type dispatch,
+PBKDF2-SHA256, buffer read-offset tracking).
+
+=test/clutch-db-test.el= — database backend layer, ~59 tests covering: JDBC
+connection and timeout mapping, query-timeout clamping, transaction
+(commit/rollback/autocommit toggle), schema refresh, cursor pagination, driver
+installation (Oracle, SQL Server, Redshift), agent JAR validation and lifecycle,
+=clutch-db-live-p= identity check, RPC timeout kill, cross-backend value
+formatting and null handling.
+
 #+begin_src sh
-# UI and mutation workflow tests
 emacs -batch -L . -l ert -l clutch \
   -l test/clutch-test.el \
   --eval '(ert-run-tests-batch-and-exit)'
 
-# JDBC backend tests
 emacs -batch -L . -l ert -l clutch-db-jdbc \
   -l test/clutch-db-test.el \
   --eval '(ert-run-tests-batch-and-exit "clutch-db-test-jdbc")'
