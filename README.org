@@ -79,7 +79,8 @@ The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 - Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
-- Schema refresh state is explicit: eager backends refresh on connect, lazy backends start stale, query console buffer names surface =schema...= / =schema~= / =schema!= / =schema 42t= style state markers, and the mode-line now turns =schema~= / =schema!= into direct =C-c C-s= refresh/retry hints
+- Schema refresh state is explicit: eager backends refresh on connect, lazy backends start stale, query console buffer names surface =schema...= / =schema~= / =schema!= / =schema 42t= style state markers; schema errors also appear in the console header-line (see below)
+- Console header-line shows live connection context: database-type icon + backend name + connection key, plus =schema~= / =schema!= warnings when the schema cache needs attention, and =Tx: Manual= / =Tx: Manual*= when the connection is in manual-commit mode
 - Cache-backed schema actions also warn when the schema cache is stale, failed, or still refreshing, so completion / table prompts do not silently pretend cached metadata is current
 - The schema browser now surfaces the same recovery state at the top of the buffer, so =stale= / =failed= / =refreshing= remain visible even after you leave the console
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
@@ -713,12 +714,14 @@ backends.  See [[*Password Management]] for details.
 - Customize that default globally with =clutch-jdbc-oracle-manual-commit=, or
   override per connection with =:manual-commit t= / =:manual-commit nil=.
 - Use =C-c C-m= to commit and =C-c C-u= to roll back the current transaction.
-- =[TX*]= in the mode line means the current connection has uncommitted DML.
+- The console header-line shows =Tx: Manual= when in manual-commit mode.  Once
+  uncommitted DML is present it changes to =Tx: Manual*= (highlighted) as a
+  persistent reminder.
 - Other JDBC backends stay in auto-commit mode by default; add
   =:manual-commit t= to a connection plist to opt in.
 - Oracle DDL (=CREATE=/=ALTER=/=DROP=/=TRUNCATE=/=RENAME=) auto-commits even
-  in manual-commit mode, so =[TX*]= may clear after DDL without an explicit
-  =COMMIT=.
+  in manual-commit mode, so =Tx: Manual*= may clear after DDL without an
+  explicit =COMMIT=.
 
 *** Additional JDBC Connection Properties
 
