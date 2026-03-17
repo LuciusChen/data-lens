@@ -80,7 +80,7 @@ The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
 - Schema refresh state is explicit: eager backends refresh on connect, lazy backends start stale, query console buffer names surface =schema...= / =schema~= / =schema!= / =schema 42t= style state markers; schema errors also appear in the console header-line (see below)
-- Console header-line shows live connection context: database-type icon + backend name + connection key, plus =schema~= / =schema!= warnings when the schema cache needs attention, and =Tx: Manual= / =Tx: Manual*= when the connection is in manual-commit mode
+- Console header-line shows live connection context: database-type icon (with brand color) + backend name + connection key, plus =schema~= / =schema!= warnings when the schema cache needs attention, and =Tx: Manual= / =Tx: Manual*= when the connection is in manual-commit mode; header text is indented to align with the buffer text area (respects =display-line-numbers-mode=)
 - Cache-backed schema actions also warn when the schema cache is stale, failed, or still refreshing, so completion / table prompts do not silently pretend cached metadata is current
 - The schema browser now surfaces the same recovery state at the top of the buffer, so =stale= / =failed= / =refreshing= remain visible even after you leave the console
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
