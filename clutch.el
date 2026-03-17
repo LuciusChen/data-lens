@@ -45,9 +45,7 @@
 (require 'transient)
 (require 'auth-source)
 
-(declare-function nerd-icons-mdicon "nerd-icons")
-(declare-function nerd-icons-codicon "nerd-icons")
-(declare-function nerd-icons-octicon "nerd-icons")
+(declare-function nerd-icons--function-name "nerd-icons" (name))
 (declare-function clutch-jdbc-conn-params "clutch-db-jdbc" (conn))
 
 ;;;; Customization
@@ -803,16 +801,47 @@ Returns nil when the schema is ready (no noise for the happy path)."
       ('failed     (propertize "schema!" 'face 'error))
       (_ nil))))
 
+(defconst clutch--db-icon-specs
+  '((mysql      . ((devicon . "nf-dev-mysql")              ""))
+    (pg         . ((devicon . "nf-dev-postgresql")         ""))
+    (sqlite     . ((devicon . "nf-dev-sqlite")             ""))
+    (oracle     . ((devicon . "nf-dev-oracle")             ""))
+    (sqlserver  . ((devicon . "nf-dev-microsoftsqlserver") ""))
+    (snowflake  . ((mdicon  . "nf-md-snowflake")           "❄"))
+    (db2        . ((mdicon  . "nf-md-database")            ""))
+    (redshift   . ((mdicon  . "nf-md-database")            "")))
+  "Alist mapping backend symbols to (ICON-SPEC FALLBACK) for the header-line.")
+
+(defun clutch--db-backend-icon (conn)
+  "Return a nerd-icons glyph for CONN's database backend, or nil.
+JDBC connections expose the driver symbol via `clutch-jdbc-conn-params';
+native backends are identified by their display name string."
+  (let* ((driver (and (fboundp 'clutch-jdbc-conn-params)
+                      (ignore-errors
+                        (plist-get (clutch-jdbc-conn-params conn) :driver))))
+         (key    (or driver
+                     (pcase (clutch-db-display-name conn)
+                       ("MySQL"      'mysql)
+                       ("PostgreSQL" 'pg)
+                       ("SQLite"     'sqlite))))
+         (spec   (alist-get key clutch--db-icon-specs)))
+    (when spec
+      (clutch--icon (car spec) (cadr spec)))))
+
 (defun clutch--build-connection-header-line ()
   "Build the header-line string for the current clutch buffer."
   (if (not (clutch--connection-alive-p clutch-connection))
       (propertize " Not connected" 'face 'shadow)
     (let* ((sep     (propertize "  ·  " 'face 'shadow))
+           (icon    (clutch--db-backend-icon clutch-connection))
            (backend (propertize (clutch-db-display-name clutch-connection) 'face 'bold))
            (key     (clutch--connection-key clutch-connection))
            (schema  (clutch--schema-status-header-line-segment clutch-connection))
            (tx      (clutch--tx-header-line-segment clutch-connection))
-           (parts   (delq nil (list backend key schema tx))))
+           (parts   (delq nil (list (if icon
+                                        (concat icon " " backend)
+                                      backend)
+                                    key schema tx))))
       (concat " " (mapconcat #'identity parts sep)))))
 
 (defun clutch--update-mode-line ()
@@ -1357,15 +1386,17 @@ POSITION is `top', `middle', or `bottom' (default `middle')."
 
 (defun clutch--icon (name &rest fallback)
   "Return a nerd-icons icon for NAME, or FALLBACK string.
-NAME is a cons (FAMILY . ICON-NAME) where FAMILY is one of
-`mdicon', `codicon', etc.  Falls back gracefully when
-nerd-icons is not installed."
+NAME is a cons (FAMILY . ICON-NAME) where FAMILY is any nerd-icons
+glyph-set symbol (e.g. `mdicon', `devicon', `codicon', `octicon').
+The icon function is resolved dynamically via `nerd-icons--function-name',
+so new families require no changes here.  Falls back gracefully when
+nerd-icons is not installed or the family is unknown."
   (pcase-let ((`(,family . ,icon-name) name))
     (or (and (require 'nerd-icons nil t)
-             (pcase family
-               ('mdicon (nerd-icons-mdicon icon-name))
-               ('codicon (nerd-icons-codicon icon-name))
-               ('octicon (nerd-icons-octicon icon-name))))
+             (fboundp 'nerd-icons--function-name)
+             (let ((fn (nerd-icons--function-name family)))
+               (and (fboundp fn)
+                    (funcall fn icon-name))))
         (car fallback)
         "")))
 

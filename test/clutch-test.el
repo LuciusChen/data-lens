@@ -1687,13 +1687,19 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should-not sync-called)
         (should (string-match-p "started in background" seen-message))))))
 
-(ert-deftest clutch-test-icon-supports-octicon-family ()
-  "Icon helper should dispatch octicon names when nerd-icons is available."
+(ert-deftest clutch-test-icon-supports-any-family ()
+  "Icon helper should dispatch any nerd-icons family via nerd-icons--function-name."
   (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
-            ((symbol-function 'nerd-icons-octicon)
-             (lambda (name) (concat "oct:" name))))
+            ((symbol-function 'nerd-icons--function-name)
+             (lambda (family) (intern (concat "mock-icon-" (symbol-name family)))))
+            ((symbol-function 'mock-icon-octicon)
+             (lambda (name) (concat "oct:" name)))
+            ((symbol-function 'mock-icon-devicon)
+             (lambda (name) (concat "dev:" name))))
     (should (equal (clutch--icon '(octicon . "nf-oct-sort_desc") "fallback")
-                   "oct:nf-oct-sort_desc"))))
+                   "oct:nf-oct-sort_desc"))
+    (should (equal (clutch--icon '(devicon . "nf-dev-mysql") "fallback")
+                   "dev:nf-dev-mysql"))))
 
 (ert-deftest clutch-test-export-command-dispatches-copy ()
   "Export command should dispatch to all-rows clipboard export."
