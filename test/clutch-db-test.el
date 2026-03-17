@@ -261,7 +261,8 @@
 (ert-deftest clutch-db-test-jdbc-refresh-schema-async-uses-get-tables ()
   "Async JDBC schema refresh should fetch table names via get-tables."
   (let ((conn (make-clutch-jdbc-conn :conn-id 9
-                                     :params '(:driver oracle :user "scott")))
+                                     :params `(:driver oracle :user "scott"
+                                               :rpc-timeout ,clutch-jdbc-rpc-timeout-seconds)))
         captured-op captured-params captured-timeout callback-result)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
                (lambda (op params callback &optional errback timeout-seconds)

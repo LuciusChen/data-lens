@@ -514,6 +514,16 @@ Returns a `clutch-jdbc-conn'."
 (cl-defmethod clutch-db-init-connection ((_conn clutch-jdbc-conn))
   "No post-connect initialization needed for JDBC connections.")
 
+(defun clutch-jdbc--conn-rpc-timeout (conn)
+  "Return the RPC timeout in seconds for CONN.
+Always non-nil: `clutch-jdbc--apply-timeout-defaults' ensures the value is
+stored in params at connect time."
+  (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout))
+
+(defun clutch-jdbc--oracle-conn-p (conn)
+  "Return non-nil when CONN is an Oracle JDBC connection."
+  (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle))
+
 (cl-defmethod clutch-db-manual-commit-p ((conn clutch-jdbc-conn))
   "Return non-nil when JDBC CONN runs with auto-commit disabled."
   (let ((params (clutch-jdbc-conn-params conn)))
@@ -521,34 +531,29 @@ Returns a `clutch-jdbc-conn'."
 
 (cl-defmethod clutch-db-commit ((conn clutch-jdbc-conn))
   "Commit the current transaction on JDBC CONN."
-  (let ((rpc-timeout (or (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
-                         clutch-jdbc-rpc-timeout-seconds)))
-    (clutch-jdbc--rpc "commit"
-                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
-                      rpc-timeout)))
+  (clutch-jdbc--rpc "commit"
+                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+                    (clutch-jdbc--conn-rpc-timeout conn)))
 
 (cl-defmethod clutch-db-rollback ((conn clutch-jdbc-conn))
   "Roll back the current transaction on JDBC CONN."
-  (let ((rpc-timeout (or (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
-                         clutch-jdbc-rpc-timeout-seconds)))
-    (clutch-jdbc--rpc "rollback"
-                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
-                      rpc-timeout)))
+  (clutch-jdbc--rpc "rollback"
+                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+                    (clutch-jdbc--conn-rpc-timeout conn)))
 
 (cl-defmethod clutch-db-eager-schema-refresh-p ((conn clutch-jdbc-conn))
   "Oracle JDBC schema enumeration is too slow to block connect."
-  (not (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)))
+  (not (clutch-jdbc--oracle-conn-p conn)))
 
 (cl-defmethod clutch-db-completion-sync-columns-p ((conn clutch-jdbc-conn))
   "Oracle/JDBC completion should not synchronously load columns in the hot path."
-  (not (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)))
+  (not (clutch-jdbc--oracle-conn-p conn)))
 
 ;;;; Query methods
 
 (defun clutch-jdbc--fetch-all (conn cursor-id)
   "Fetch all remaining rows for CURSOR-ID on CONN, returning a flat list."
-  (let ((rpc-timeout (or (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
-                         clutch-jdbc-rpc-timeout-seconds))
+  (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn))
         batches done)
     (while (not done)
       (let ((result (clutch-jdbc--rpc "fetch"
@@ -621,8 +626,7 @@ Clob plists become their :preview string."
   (unwind-protect
       (condition-case err
           (let* ((query-timeout (plist-get (clutch-jdbc-conn-params conn) :query-timeout))
-                 (rpc-timeout (or (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
-                                  clutch-jdbc-rpc-timeout-seconds))
+                 (rpc-timeout (clutch-jdbc--conn-rpc-timeout conn))
                  (result (clutch-jdbc--rpc
                           "execute"
                           `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
@@ -685,7 +689,7 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server 2012+, DB2)."
                              (clutch-db-sql-strip-top-level-order-by trimmed)
                            trimmed))
            (offset  (* page-num page-size))
-           (oracle-p (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)))
+           (oracle-p (clutch-jdbc--oracle-conn-p conn)))
       (if oracle-p
           (clutch-jdbc--build-oracle-paged-sql conn sortable-sql offset page-size order-by)
         (let ((order-clause (if order-by
@@ -745,7 +749,7 @@ Such identifiers should remain quoted in reconstructed Oracle DDL."
 (defun clutch-jdbc--default-schema (conn)
   "Return a default schema filter for CONN, or nil for no filtering.
 Oracle uses the username as schema (uppercased).  Other backends return nil."
-  (when (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)
+  (when (clutch-jdbc--oracle-conn-p conn)
     (when-let* ((user (plist-get (clutch-jdbc-conn-params conn) :user)))
       (upcase user))))
 
@@ -771,8 +775,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
   "Refresh JDBC table names for CONN asynchronously."
   (let* ((params      (clutch-jdbc-conn-params conn))
          (schema      (clutch-jdbc--conn-schema conn))
-         (rpc-timeout (or (plist-get params :rpc-timeout)
-                          clutch-jdbc-rpc-timeout-seconds)))
+         (rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-tables"
      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -790,8 +793,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
   "Fetch JDBC column details for TABLE on CONN asynchronously."
   (let* ((params (clutch-jdbc-conn-params conn))
          (schema (clutch-jdbc--conn-schema conn))
-         (rpc-timeout (or (plist-get params :rpc-timeout)
-                          clutch-jdbc-rpc-timeout-seconds)))
+         (rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-columns"
      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -819,7 +821,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
   "Return table name candidates matching PREFIX for JDBC CONN.
 For Oracle: uses the schema cache when available (no RPC); falls back to a
 `search-tables' RPC when the cache is absent or marked stale."
-  (when (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)
+  (when (clutch-jdbc--oracle-conn-p conn)
     (if-let* ((schema-ready
                (and (fboundp 'clutch--schema-status-entry)
                     (eq (plist-get (clutch--schema-status-entry conn) :state) 'ready)))
