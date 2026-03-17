@@ -427,6 +427,15 @@ or :sid (Oracle SID-style connection)."
 
 ;;;; Connect function
 
+(defun clutch-jdbc--manual-commit-mode (driver params)
+  "Return non-nil when DRIVER with PARAMS should use manual-commit mode.
+Oracle defaults to manual-commit when `clutch-jdbc-oracle-manual-commit' is
+non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
+  (if (plist-member params :manual-commit)
+      (plist-get params :manual-commit)
+    (and (eq driver 'oracle)
+         clutch-jdbc-oracle-manual-commit)))
+
 (defun clutch-jdbc--apply-timeout-defaults (params)
   "Return a copy of PARAMS with absent timeout keys set to their global defaults."
   (let ((p (copy-sequence params)))
@@ -447,11 +456,7 @@ registration closure — users do not pass it directly.
 Returns a `clutch-jdbc-conn'."
   (clutch-jdbc--ensure-agent)
   (let* ((normalized-params (clutch-jdbc--apply-timeout-defaults params))
-         (manual-commit-p
-          (if (plist-member normalized-params :manual-commit)
-              (plist-get normalized-params :manual-commit)
-            (and (eq driver 'oracle)
-                 clutch-jdbc-oracle-manual-commit)))
+         (manual-commit-p (clutch-jdbc--manual-commit-mode driver normalized-params))
          (url      (clutch-jdbc--build-url driver normalized-params))
          (user     (plist-get normalized-params :user))
          (password (plist-get normalized-params :password))
@@ -512,10 +517,7 @@ Returns a `clutch-jdbc-conn'."
 (cl-defmethod clutch-db-manual-commit-p ((conn clutch-jdbc-conn))
   "Return non-nil when JDBC CONN runs with auto-commit disabled."
   (let ((params (clutch-jdbc-conn-params conn)))
-    (if (plist-member params :manual-commit)
-        (plist-get params :manual-commit)
-      (and (eq (plist-get params :driver) 'oracle)
-           clutch-jdbc-oracle-manual-commit))))
+    (clutch-jdbc--manual-commit-mode (plist-get params :driver) params)))
 
 (cl-defmethod clutch-db-commit ((conn clutch-jdbc-conn))
   "Commit the current transaction on JDBC CONN."

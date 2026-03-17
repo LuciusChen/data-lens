@@ -50,8 +50,6 @@
 (declare-function nerd-icons-octicon "nerd-icons")
 (declare-function clutch-jdbc-conn-params "clutch-db-jdbc" (conn))
 
-(defvar clutch--tx-dirty-cache)
-
 ;;;; Customization
 
 (defgroup clutch nil
@@ -677,6 +675,9 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
   (member (clutch--sql-leading-keyword sql)
           '("COMMIT" "ROLLBACK" "END" "ABORT")))
 
+(defvar clutch--tx-dirty-cache (make-hash-table :test 'eq :weakness 'key)
+  "Connections with uncommitted DML.")
+
 (defun clutch--tx-dirty-p (conn)
   "Return non-nil when CONN has uncommitted DML."
   (and conn (gethash conn clutch--tx-dirty-cache)))
@@ -950,10 +951,9 @@ params; see `clutch-connection-alist' for details."
     (clutch--confirm-disconnect-transaction-loss
      clutch-connection
      "Uncommitted changes will be lost.  Disconnect? ")
-    (clutch-db-disconnect clutch-connection))
-  (when clutch-connection
     (clutch--clear-tx-dirty clutch-connection)
-    (setq clutch-connection nil))
+    (clutch-db-disconnect clutch-connection))
+  (setq clutch-connection nil)
   (let* ((params  (clutch--read-connection-params))
          (product (clutch--effective-sql-product params))
          (conn    (clutch--build-conn params)))
@@ -971,10 +971,9 @@ params; see `clutch-connection-alist' for details."
     (clutch--confirm-disconnect-transaction-loss
      clutch-connection
      "Uncommitted changes will be lost.  Disconnect? ")
+    (clutch--clear-tx-dirty clutch-connection)
     (clutch-db-disconnect clutch-connection)
     (message "Disconnected"))
-  (when clutch-connection
-    (clutch--clear-tx-dirty clutch-connection))
   (setq clutch-connection nil)
   (when clutch--console-name
     (clutch--update-console-buffer-name))
@@ -2804,9 +2803,6 @@ to execute or \\[clutch-indirect-abort] to abort."
 (defvar clutch--schema-cache (make-hash-table :test 'equal)
   "Global schema cache.  Keys are connection-key strings.
 Values are hash-tables mapping table-name → list of column-name strings.")
-
-(defvar clutch--tx-dirty-cache (make-hash-table :test 'eq :weakness 'key)
-  "Connections with uncommitted DML.")
 
 (defvar clutch--column-details-cache (make-hash-table :test 'equal)
   "Cache for full column details.  Keys are connection-key strings.

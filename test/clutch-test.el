@@ -3017,6 +3017,50 @@
       (should clutch-connection)
       (should (clutch--tx-dirty-p clutch-connection)))))
 
+(ert-deftest clutch-test-commit-errors-in-autocommit-mode ()
+  "clutch-commit should signal user-error when connection is not in manual-commit mode."
+  (let ((clutch-connection 'fake-conn))
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) nil)))
+      (should-error (clutch-commit) :type 'user-error))))
+
+(ert-deftest clutch-test-commit-calls-rpc-and-clears-dirty ()
+  "clutch-commit should fire RPC and clear dirty cache."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        committed)
+    (puthash clutch-connection t clutch--tx-dirty-cache)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
+              ((symbol-function 'clutch-db-commit)
+               (lambda (_conn) (setq committed t)))
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (clutch-commit)
+      (should committed)
+      (should-not (clutch--tx-dirty-p clutch-connection)))))
+
+(ert-deftest clutch-test-rollback-errors-in-autocommit-mode ()
+  "clutch-rollback should signal user-error when connection is not in manual-commit mode."
+  (let ((clutch-connection 'fake-conn))
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) nil)))
+      (should-error (clutch-rollback) :type 'user-error))))
+
+(ert-deftest clutch-test-rollback-calls-rpc-and-clears-dirty ()
+  "clutch-rollback should fire RPC and clear dirty cache."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        rolled-back)
+    (puthash clutch-connection t clutch--tx-dirty-cache)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
+              ((symbol-function 'clutch-db-rollback)
+               (lambda (_conn) (setq rolled-back t)))
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (clutch-rollback)
+      (should rolled-back)
+      (should-not (clutch--tx-dirty-p clutch-connection)))))
+
 (ert-deftest clutch-test-execute-runs-risky-dml-confirmation ()
   "Execute should run risky DML confirmation before dispatch."
   (let ((called nil)
