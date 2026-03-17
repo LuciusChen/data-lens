@@ -791,7 +791,10 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
 (defun clutch--try-reconnect ()
   "Attempt to re-establish the connection using `clutch--connection-params'.
 Updates `clutch-connection' and refreshes the mode-line on success.
-Any result buffers with uncommitted pending state are cleared.
+Pending staged changes in result buffers are preserved — they are
+client-side SQL that has not been sent to the database, so they remain
+valid on the new connection.  Only a query re-execution (which changes
+the underlying result rows) should discard pending changes.
 Returns non-nil on success, nil on failure."
   (when clutch--connection-params
     (condition-case err
@@ -802,15 +805,6 @@ Returns non-nil on success, nil on failure."
           (clutch--prime-schema-cache conn)
           (clutch--update-mode-line)
           (message "Reconnected to %s" (clutch--connection-key conn))
-          (when-let* ((bufs (clutch--result-buffers-with-pending)))
-            (dolist (buf bufs)
-              (with-current-buffer buf
-                (setq clutch--pending-deletes nil
-                      clutch--pending-edits   nil
-                      clutch--pending-inserts nil)
-                (clutch--refresh-display)))
-            (message "Reconnected — discarded pending changes in %d result buffer(s)"
-                     (length bufs)))
           t)
       (error
        (message "Reconnect failed: %s" (error-message-string err))

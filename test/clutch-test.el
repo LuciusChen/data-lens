@@ -4362,10 +4362,12 @@ Use `cl-letf' to bypass `mysql--ensure-data' in tests."
   "ob-clutch--format-value returns raw number for Org column alignment."
   (should (= (ob-clutch--format-value 42) 42)))
 
-;;; Fix 2 — reconnect clears pending state
+;;; Fix 2 — reconnect preserves pending state
 
-(ert-deftest clutch-test-reconnect-clears-pending ()
-  "Reconnect discards pending state in result buffers."
+(ert-deftest clutch-test-reconnect-preserves-pending ()
+  "Reconnect preserves pending staged changes in result buffers.
+Pending changes are client-side SQL that has not been sent to the
+database.  Only a query re-execution should discard them."
   (let ((result-buf (generate-new-buffer "*clutch-test-result*"))
         (clutch-buf (generate-new-buffer "*clutch-test*")))
     (unwind-protect
@@ -4382,12 +4384,11 @@ Use `cl-letf' to bypass `mysql--ensure-data' in tests."
                        (lambda (_) t))
                       ((symbol-function 'clutch--connection-key)
                        (lambda (_) "fake"))
-                      ((symbol-function 'clutch--update-mode-line) #'ignore)
-                      ((symbol-function 'clutch--refresh-display) #'ignore))
+                      ((symbol-function 'clutch--update-mode-line) #'ignore))
               (setq-local clutch--connection-params '(:backend mysql))
               (clutch--try-reconnect)))
           (with-current-buffer result-buf
-            (should (null clutch--pending-deletes))))
+            (should (equal clutch--pending-deletes (list (vector 1))))))
       (kill-buffer result-buf)
       (kill-buffer clutch-buf))))
 
