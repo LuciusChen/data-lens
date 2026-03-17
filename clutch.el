@@ -705,13 +705,14 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
 
 (defun clutch--tx-header-line-segment (conn)
   "Return a header-line segment for CONN transaction state, or nil.
-Returns nil when CONN is in autocommit mode."
-  (when (clutch-db-manual-commit-p conn)
-    (let ((icon  (clutch--icon '(mdicon . "nf-md-database_lock") "󰪪"))
-          (dirty (clutch--tx-dirty-p conn)))
-      (if dirty
-          (propertize (concat icon " Tx: Manual*") 'face 'warning)
-        (propertize (concat icon " Tx: Manual")  'face 'shadow)))))
+Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
+  (when conn
+    (let ((icon (clutch--icon '(mdicon . "nf-md-database_lock") "󰪪")))
+      (if (clutch-db-manual-commit-p conn)
+          (if (clutch--tx-dirty-p conn)
+              (propertize (concat icon " Tx: Manual*") 'face 'warning)
+            (propertize (concat icon " Tx: Manual")   'face 'shadow))
+        (propertize (concat icon " Tx: Auto") 'face 'shadow)))))
 
 (defun clutch--record-tx-state-after-query (conn sql)
   "Update transaction dirty state for successful SQL on CONN."
@@ -1072,11 +1073,8 @@ any pending transaction per JDBC specification."
   (interactive)
   (clutch--ensure-connection)
   (let ((manual-now (clutch-db-manual-commit-p clutch-connection)))
-    (when (and manual-now
-               (clutch--tx-dirty-p clutch-connection)
-               (not (yes-or-no-p
-                     "Switching to auto-commit will commit the pending transaction.  Continue? ")))
-      (user-error "Toggle cancelled"))
+    (when (and manual-now (clutch--tx-dirty-p clutch-connection))
+      (user-error "Cannot toggle: commit or roll back pending changes first"))
     (clutch-db-set-auto-commit clutch-connection manual-now)
     (when manual-now
       (clutch--clear-tx-dirty clutch-connection))
@@ -7862,6 +7860,10 @@ Accumulates input until a semicolon is found, then executes."
                           (clutch-db-manual-commit-p clutch-connection))
                      "Enable auto-commit"
                    "Disable auto-commit"))
+  :inapt-if (lambda ()
+               (and clutch-connection
+                    (clutch-db-manual-commit-p clutch-connection)
+                    (clutch--tx-dirty-p clutch-connection)))
   (interactive)
   (call-interactively #'clutch-toggle-auto-commit))
 
