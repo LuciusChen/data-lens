@@ -439,8 +439,8 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar-local clutch--refine-callback nil
   "Callback called with final rect when refine is confirmed.")
 
-(defvar-local clutch--refine-saved-tab-line nil
-  "Saved tab-line-format to restore after refine mode exits.")
+(defvar-local clutch--refine-saved-mode-line nil
+  "Saved mode-line-format to restore after refine mode exits.")
 
 (defvar-local clutch--page-current 0
   "Current data page number (0-based).")
@@ -878,7 +878,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   (let ((indent (clutch--header-line-indent)))
     (if (not (clutch--connection-alive-p clutch-connection))
         (concat indent (propertize "Not connected" 'face 'shadow))
-      (let* ((sep     (propertize "  ·  " 'face 'shadow))
+      (let* ((sep     (propertize "  •  " 'face 'shadow))
              (icon    (clutch--db-backend-icon clutch-connection))
              (backend (propertize (clutch-db-display-name clutch-connection) 'face 'bold))
              (key     (clutch--connection-key clutch-connection))
@@ -1803,7 +1803,7 @@ Returns a list of propertized strings (may be empty)."
 
 (defun clutch--render-footer (row-count page-num page-size
                                         total-rows col-num-pages col-cur-page)
-  "Return the tab-line footer string for pagination state."
+  "Return the mode-line footer string for pagination state."
   (let ((sep (propertize "  •  " 'face 'font-lock-comment-face)))
     (mapconcat #'identity
                (append (clutch--footer-main-parts row-count page-num page-size
@@ -1980,8 +1980,8 @@ RENDER-STATE contains render lookup tables for pending UI state."
 (defun clutch--update-result-line-formats (rows col-num-pages cur-page
                                                 has-prev has-next
                                                 visible-cols widths nw)
-  "Set tab-line-format and header-line-format for the result buffer."
-  (setq tab-line-format
+  "Set mode-line-format and header-line-format for the result buffer."
+  (setq mode-line-format
         (concat (propertize " " 'display '(space :align-to 0))
                 (clutch--render-footer
                  (length rows) clutch--page-current
@@ -4447,6 +4447,9 @@ Priority: region rows > current row."
     (define-key map "d" #'clutch-result-delete-rows)
     (define-key map "i" #'clutch-result-insert-row)
     (define-key map (kbd "C-c C-k") #'clutch-result-discard-pending-at-point)
+    ;; Override pixel-scroll with line-based scrolling
+    (define-key map [wheel-up] #'scroll-down-line)
+    (define-key map [wheel-down] #'scroll-up-line)
     map)
   "Keymap for `clutch-result-mode'.")
 
@@ -4523,13 +4526,6 @@ Rebuilds `header-line-format' with the active column highlighted."
                          visible-cols widths nw
                          has-prev has-next cidx))))))))
 
-(defun clutch--reset-vscroll (win _start)
-  "Snap WIN vscroll to zero so rows align with the fixed header.
-`pixel-scroll-precision-mode' applies sub-pixel vscroll that shifts
-buffer content behind the header-line.  Resetting to 0 after every
-scroll event keeps whole-line alignment without breaking smooth scroll."
-  (when (> (window-vscroll win t) 0)
-    (set-window-vscroll win 0 t)))
 
 (define-derived-mode clutch-result-mode special-mode "Clutch-Result"
   "Mode for displaying database query results with SQL pagination.
@@ -4571,12 +4567,14 @@ Edit:
   \\[clutch-result-rerun]	Re-execute the query"
   (setq truncate-lines t)
   (hl-line-mode 1)
-  ;; Make tab-line use default background so footer renders cleanly
-  (face-remap-add-relative 'tab-line :inherit 'default)
+  ;; Disable pixel-scroll in result buffers to keep row alignment
+  (setq-local scroll-step 1)
+  ;; Make mode-line use default background so footer renders cleanly
+  (face-remap-add-relative 'mode-line :inherit 'default)
+  (face-remap-add-relative 'mode-line-inactive :inherit 'default)
   (setq-local revert-buffer-function #'clutch-result--revert)
   (add-hook 'post-command-hook
             #'clutch--update-header-highlight nil t)
-  (add-hook 'window-scroll-functions #'clutch--reset-vscroll nil t)
   (add-hook 'kill-buffer-hook #'clutch--result-buffer-cleanup nil t)
   (add-hook 'change-major-mode-hook #'clutch--result-buffer-cleanup nil t)
   (clutch--enable-window-size-hook))
@@ -6582,12 +6580,12 @@ Scans buffer once for this column — O(buffer)."
           (final-rect (cons row-indices col-indices)))
       (clutch-refine--clear-overlays)
       (clutch-refine-mode -1)
-      (setq tab-line-format clutch--refine-saved-tab-line
+      (setq mode-line-format clutch--refine-saved-mode-line
             clutch--refine-rect nil
             clutch--refine-excluded-rows nil
             clutch--refine-excluded-cols nil
             clutch--refine-callback nil
-            clutch--refine-saved-tab-line nil)
+            clutch--refine-saved-mode-line nil)
       (funcall cb final-rect))))
 
 (defun clutch-refine-cancel ()
@@ -6595,12 +6593,12 @@ Scans buffer once for this column — O(buffer)."
   (interactive)
   (clutch-refine--clear-overlays)
   (clutch-refine-mode -1)
-  (setq tab-line-format clutch--refine-saved-tab-line
+  (setq mode-line-format clutch--refine-saved-mode-line
         clutch--refine-rect nil
         clutch--refine-excluded-rows nil
         clutch--refine-excluded-cols nil
         clutch--refine-callback nil
-        clutch--refine-saved-tab-line nil)
+        clutch--refine-saved-mode-line nil)
   (message "Refine cancelled"))
 
 (defun clutch-result--start-refine (rect callback)
@@ -6611,8 +6609,8 @@ RECT is (ROW-INDICES . COL-INDICES)."
               clutch--refine-excluded-rows nil
               clutch--refine-excluded-cols nil
               clutch--refine-callback callback
-              clutch--refine-saved-tab-line tab-line-format
-              tab-line-format
+              clutch--refine-saved-mode-line mode-line-format
+              mode-line-format
               (concat
                (propertize " " 'display '(space :align-to 0))
                (propertize "REFINE  " 'face 'font-lock-warning-face)

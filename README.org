@@ -61,7 +61,7 @@ The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 
 - Column-paged result display (no horizontal scrolling)
 - SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
-  - =tab-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, no-PK guidance, and active filters (with =nerd-icons=, Unicode fallback)
+  - =mode-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, no-PK guidance, and active filters (with =nerd-icons=, Unicode fallback)
   - =header-line=: column names with =│= borders and underlined labels
 - After execution, focus stays in the SQL buffer while results refresh below
 - Last successfully executed SQL region is highlighted in the editor
@@ -355,9 +355,9 @@ remains result buffer -> insert buffer.
 
 The copy transient (=c=) offers a =-r= switch for *refine mode*.  With an
 active region, enabling =-r= before choosing a format lets you interactively
-exclude rows or columns before the copy is performed.  The tab-line at the top
-of the result buffer is replaced with a color-coded hint for the duration of
-the session.
+exclude rows or columns before the copy is performed.  The mode-line at the
+bottom of the result buffer is replaced with a color-coded hint for the
+duration of the session.
 
 #+begin_example
 Step 1 — select a region, then press c.
@@ -366,9 +366,9 @@ Step 1 — select a region, then press c.
 Step 2 — press -r to toggle refine mode (shown in the Options section).
 
 Step 3 — press t / c / i to choose the format (TSV / CSV / INSERT).
-         The rect is highlighted; tab-line shows available keys.
+         The rect is highlighted; mode-line shows available keys.
 
-  REFINE  m row   x col   RET confirm   C-g cancel     ← tab-line
+  REFINE  m row   x col   RET confirm   C-g cancel     ← mode-line
 
   id   name    email              joined
   ─────────────────────────────────────────────
@@ -418,18 +418,18 @@ Step 6 — press RET to confirm.
 #+begin_src
 1. Write SQL:  SELECT * FROM orders;
 2. C-c C-c    Execute → results displayed with pagination (default 500 rows/page)
-              → tab-line shows: Σ 500 of ? rows • 1 / 1 • ⏱ 42ms
+              → mode-line shows: Σ 500 of ? rows • 1 / 1 • ⏱ 42ms
 3. N / P      Next page / previous page
-4. #          Query total rows → tab-line shows "Σ 500 of 1234 rows"
+4. #          Query total rows → mode-line shows "Σ 500 of 1234 rows"
 5. ] / [      Move across column pages when result has many columns
               → pinned columns stay visible while column pages switch
 6. W          Enter filter: status = 'pending'
               → Appends WHERE clause, re-queries from page 1
 7. /          Client-side filter: type a pattern to narrow visible rows instantly
 8. s          Sort by current column (SQL ORDER BY), re-queries from page 1
-              → tab-line adds current ORDER BY state
+              → mode-line adds current ORDER BY state
 9. A          Aggregate selected cells/current cell
-              → tab-line adds aggregate status (sum/avg/min/max + [rows/cells/skipped])
+              → mode-line adds aggregate status (sum/avg/min/max + [rows/cells/skipped])
 10. W         Enter empty string → clears filter, restores original query
 #+end_src
 
@@ -457,7 +457,7 @@ Step 6 — press RET to confirm.
                                JSON validation follows the same model but waits for a short idle pause
                                validation shows a compact inline token instead of a long full-line message
                                C-c C-c reuses the same validation rules before staging
-                               tab-line shows staged edit/delete/insert summary
+                               mode-line shows staged edit/delete/insert summary
 6. Repeat for other cells — modified cells are highlighted
 7. C-c C-c in result buffer  → confirmation prompt showing the UPDATE statements
 #+end_src

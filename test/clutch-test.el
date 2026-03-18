@@ -3723,7 +3723,7 @@ Skips if `clutch-test-password' is nil."
         (clutch--render-result)
         ;; Verify buffer has content
         (should (> (buffer-size) 0))
-        ;; Column names are in header-line/tab-line, not buffer text.
+        ;; Column names are in header-line/mode-line, not buffer text.
         ;; Verify data values appear in the rendered table.
         (should (string-match-p "test" (buffer-string)))))))
 
