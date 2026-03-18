@@ -892,9 +892,9 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   "Update mode-line and header-line with connection status."
   (setq mode-name
         (if clutch--executing-p
-            (concat (if (derived-mode-p 'clutch-repl-mode) "Clutch-REPL" "Clutch")
+            (concat (if (derived-mode-p 'clutch-repl-mode) "clutch-repl" "clutch")
                     " […]")
-          (if (derived-mode-p 'clutch-repl-mode) "Clutch-REPL" "Clutch")))
+          (if (derived-mode-p 'clutch-repl-mode) "clutch-repl" "clutch")))
   ;; Use :eval so line-number-display-width is recomputed on each redraw,
   ;; keeping alignment correct when display-line-numbers-mode is toggled.
   (setq header-line-format '((:eval (clutch--build-connection-header-line))))
@@ -3969,7 +3969,7 @@ SQL keyword/function docs are shown even without a connection."
     map)
   "Keymap for `clutch-schema-mode'.")
 
-(define-derived-mode clutch-schema-mode special-mode "Clutch-Schema"
+(define-derived-mode clutch-schema-mode special-mode "clutch-schema"
   "Mode for browsing database schema.
 
 \\<clutch-schema-mode-map>
@@ -4278,7 +4278,7 @@ Prompts for TABLE via `completing-read' using schema cache table names."
   "Keymap for `clutch-mode'.")
 
 ;;;###autoload
-(define-derived-mode clutch-mode sql-mode "Clutch"
+(define-derived-mode clutch-mode sql-mode "clutch"
   "Major mode for editing and executing SQL queries.
 
 \\<clutch-mode-map>
@@ -4527,7 +4527,7 @@ Rebuilds `header-line-format' with the active column highlighted."
                          has-prev has-next cidx))))))))
 
 
-(define-derived-mode clutch-result-mode special-mode "Clutch-Result"
+(define-derived-mode clutch-result-mode special-mode "clutch-result"
   "Mode for displaying database query results with SQL pagination.
 
 \\<clutch-result-mode-map>
@@ -5474,7 +5474,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   :lighter " DB-Insert-JSON"
   :keymap clutch-result-insert-json-mode-map)
 
-(define-derived-mode clutch-result-insert-major-mode text-mode "Clutch-Insert"
+(define-derived-mode clutch-result-insert-major-mode text-mode "clutch-insert"
   "Major mode for editing a new row to INSERT.
 \\<clutch-result-insert-mode-map>
 \\[clutch-result-insert-commit]	stage row insertion
@@ -7610,7 +7610,7 @@ previous window layout."
     map)
   "Keymap for `clutch-record-mode'.")
 
-(define-derived-mode clutch-record-mode special-mode "Clutch-Record"
+(define-derived-mode clutch-record-mode special-mode "clutch-record"
   "Mode for displaying a single database row in detail.
 
 \\<clutch-record-mode-map>
@@ -7791,7 +7791,7 @@ Selects JSON, XML, or binary string view based on column type and content."
 (defvar-local clutch-repl--pending-input ""
   "Accumulated partial SQL input waiting for a semicolon.")
 
-(define-derived-mode clutch-repl-mode comint-mode "Clutch-REPL"
+(define-derived-mode clutch-repl-mode comint-mode "clutch-repl"
   "Major mode for database REPL.
 
 \\<clutch-repl-mode-map>

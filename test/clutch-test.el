@@ -1559,7 +1559,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                  (lambda (_spec &rest _fb) "[lock]")))
         ;; Mode-line is now just the mode name.
         (clutch--update-mode-line)
-        (should (equal mode-name "Clutch"))
+        (should (equal mode-name "clutch"))
         ;; header-line-format is an (:eval ...) form; evaluate it to get content.
         (let ((hl (clutch--build-connection-header-line)))
           ;; Clean manual-commit: shows Tx: Manual (no asterisk).
