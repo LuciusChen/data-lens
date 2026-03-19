@@ -365,6 +365,25 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should (equal (clutch-result--collect-all-export-rows) '((1) (2))))
         (should (= calls 1))))))
 
+(ert-deftest clutch-test-collect-all-export-rows-ensures-connection ()
+  "Export-all should use the shared reconnect path before querying."
+  (with-temp-buffer
+    (let (ensured captured-conn)
+      (setq-local clutch-connection 'stale-conn
+                  clutch--base-query "SELECT id FROM t LIMIT 1"
+                  clutch--last-query "SELECT id FROM t LIMIT 1")
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 (lambda ()
+                   (setq ensured t)
+                   (setq-local clutch-connection 'new-conn)))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (conn _sql)
+                   (setq captured-conn conn)
+                   (make-clutch-db-result :rows '((1))))))
+        (should (equal (clutch-result--collect-all-export-rows) '((1))))
+        (should ensured)
+        (should (eq captured-conn 'new-conn))))))
+
 (ert-deftest clutch-test-footer-filter-parts-omits-sql-preview ()
   "Footer filter parts should no longer include last SQL preview text."
   (with-temp-buffer
@@ -1074,6 +1093,40 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
             (should-not staged-value)))
       (kill-buffer edit-buf))))
 
+(ert-deftest clutch-test-edit-finish-errors-when-result-buffer-is-dead ()
+  "Finishing an edit should fail cleanly when the parent result buffer is gone."
+  (let ((result-buf (generate-new-buffer "*clutch-result-test*"))
+        edit-buf)
+    (unwind-protect
+        (with-current-buffer result-buf
+          (clutch-result-mode)
+          (setq-local clutch--result-columns '("name")
+                      clutch--result-column-defs '((:name "name" :type-category text))
+                      clutch--result-rows '(("before")))
+          (let ((inhibit-read-only t))
+            (insert "before")
+            (add-text-properties (point-min) (point-max)
+                                 '(clutch-row-idx 0 clutch-col-idx 0
+                                   clutch-full-value "before")))
+          (goto-char (point-min))
+          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq edit-buf buf)
+                       buf)))
+            (clutch-result-edit-cell))
+          (kill-buffer result-buf)
+          (with-current-buffer edit-buf
+            (erase-buffer)
+            (insert "after")
+            (cl-letf (((symbol-function 'quit-window) #'ignore))
+              (should-error (clutch-result-edit-finish) :type 'user-error))))
+      (when (buffer-live-p result-buf)
+        (kill-buffer result-buf))
+      (when (buffer-live-p edit-buf)
+        (kill-buffer edit-buf)))))
+
 (ert-deftest clutch-test-edit-json-field-roundtrip ()
   "JSON edit sub-buffer should save normalized contents back to the parent edit buffer."
   (let ((parent-buf (generate-new-buffer "*clutch-edit-parent*")))
@@ -1703,12 +1756,12 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (should (equal (clutch--icon '(devicon . "nf-dev-mysql") "fallback")
                    "dev:nf-dev-mysql"))))
 
-(ert-deftest clutch-test-export-command-dispatches-copy ()
-  "Export command should dispatch to all-rows clipboard export."
+(defun clutch-test--assert-export-dispatch (choice expected)
+  "Assert `clutch-result-export' dispatches CHOICE to EXPECTED."
   (with-temp-buffer
     (let (called)
       (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _args) "csv-copy"))
+                 (lambda (&rest _args) choice))
                 ((symbol-function 'clutch--export-csv-all-to-clipboard)
                  (lambda () (setq called 'copy)))
                 ((symbol-function 'clutch--export-csv-all-file)
@@ -1722,112 +1775,31 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                 ((symbol-function 'clutch--export-update-all-file)
                  (lambda () (setq called 'update-file))))
         (clutch-result-export)
-        (should (eq called 'copy))))))
+        (should (eq called expected))))))
+
+(ert-deftest clutch-test-export-command-dispatches-copy ()
+  "Export command should dispatch to all-rows clipboard export."
+  (clutch-test--assert-export-dispatch "csv-copy" 'copy))
 
 (ert-deftest clutch-test-export-command-dispatches-file ()
   "Export command should dispatch to all-rows file export."
-  (with-temp-buffer
-    (let (called)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _args) "csv-file"))
-                ((symbol-function 'clutch--export-csv-all-to-clipboard)
-                 (lambda () (setq called 'copy)))
-                ((symbol-function 'clutch--export-csv-all-file)
-                 (lambda () (setq called 'file)))
-                ((symbol-function 'clutch--export-insert-all-to-clipboard)
-                 (lambda () (setq called 'insert-copy)))
-                ((symbol-function 'clutch--export-insert-all-file)
-                 (lambda () (setq called 'insert-file)))
-                ((symbol-function 'clutch--export-update-all-to-clipboard)
-                 (lambda () (setq called 'update-copy)))
-                ((symbol-function 'clutch--export-update-all-file)
-                 (lambda () (setq called 'update-file))))
-        (clutch-result-export)
-        (should (eq called 'file))))))
+  (clutch-test--assert-export-dispatch "csv-file" 'file))
 
 (ert-deftest clutch-test-export-command-dispatches-insert-copy ()
   "Export command should dispatch to all-rows INSERT clipboard export."
-  (with-temp-buffer
-    (let (called)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _args) "insert-copy"))
-                ((symbol-function 'clutch--export-csv-all-to-clipboard)
-                 (lambda () (setq called 'copy)))
-                ((symbol-function 'clutch--export-csv-all-file)
-                 (lambda () (setq called 'file)))
-                ((symbol-function 'clutch--export-insert-all-to-clipboard)
-                 (lambda () (setq called 'insert-copy)))
-                ((symbol-function 'clutch--export-insert-all-file)
-                 (lambda () (setq called 'insert-file)))
-                ((symbol-function 'clutch--export-update-all-to-clipboard)
-                 (lambda () (setq called 'update-copy)))
-                ((symbol-function 'clutch--export-update-all-file)
-                 (lambda () (setq called 'update-file))))
-        (clutch-result-export)
-        (should (eq called 'insert-copy))))))
+  (clutch-test--assert-export-dispatch "insert-copy" 'insert-copy))
 
 (ert-deftest clutch-test-export-command-dispatches-insert-file ()
   "Export command should dispatch to all-rows INSERT file export."
-  (with-temp-buffer
-    (let (called)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _args) "insert-file"))
-                ((symbol-function 'clutch--export-csv-all-to-clipboard)
-                 (lambda () (setq called 'copy)))
-                ((symbol-function 'clutch--export-csv-all-file)
-                 (lambda () (setq called 'file)))
-                ((symbol-function 'clutch--export-insert-all-to-clipboard)
-                 (lambda () (setq called 'insert-copy)))
-                ((symbol-function 'clutch--export-insert-all-file)
-                 (lambda () (setq called 'insert-file)))
-                ((symbol-function 'clutch--export-update-all-to-clipboard)
-                 (lambda () (setq called 'update-copy)))
-                ((symbol-function 'clutch--export-update-all-file)
-                 (lambda () (setq called 'update-file))))
-        (clutch-result-export)
-        (should (eq called 'insert-file))))))
+  (clutch-test--assert-export-dispatch "insert-file" 'insert-file))
 
 (ert-deftest clutch-test-export-command-dispatches-update-copy ()
   "Export command should dispatch to all-rows UPDATE clipboard export."
-  (with-temp-buffer
-    (let (called)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _args) "update-copy"))
-                ((symbol-function 'clutch--export-csv-all-to-clipboard)
-                 (lambda () (setq called 'copy)))
-                ((symbol-function 'clutch--export-csv-all-file)
-                 (lambda () (setq called 'file)))
-                ((symbol-function 'clutch--export-insert-all-to-clipboard)
-                 (lambda () (setq called 'insert-copy)))
-                ((symbol-function 'clutch--export-insert-all-file)
-                 (lambda () (setq called 'insert-file)))
-                ((symbol-function 'clutch--export-update-all-to-clipboard)
-                 (lambda () (setq called 'update-copy)))
-                ((symbol-function 'clutch--export-update-all-file)
-                 (lambda () (setq called 'update-file))))
-        (clutch-result-export)
-        (should (eq called 'update-copy))))))
+  (clutch-test--assert-export-dispatch "update-copy" 'update-copy))
 
 (ert-deftest clutch-test-export-command-dispatches-update-file ()
   "Export command should dispatch to all-rows UPDATE file export."
-  (with-temp-buffer
-    (let (called)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _args) "update-file"))
-                ((symbol-function 'clutch--export-csv-all-to-clipboard)
-                 (lambda () (setq called 'copy)))
-                ((symbol-function 'clutch--export-csv-all-file)
-                 (lambda () (setq called 'file)))
-                ((symbol-function 'clutch--export-insert-all-to-clipboard)
-                 (lambda () (setq called 'insert-copy)))
-                ((symbol-function 'clutch--export-insert-all-file)
-                 (lambda () (setq called 'insert-file)))
-                ((symbol-function 'clutch--export-update-all-to-clipboard)
-                 (lambda () (setq called 'update-copy)))
-                ((symbol-function 'clutch--export-update-all-file)
-                 (lambda () (setq called 'update-file))))
-        (clutch-result-export)
-        (should (eq called 'update-file))))))
+  (clutch-test--assert-export-dispatch "update-file" 'update-file))
 
 (ert-deftest clutch-test-csv-content-escaping ()
   "CSV content should include header and escaped values."
@@ -2439,6 +2411,54 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should (equal captured-base "FILTER[id = 1]{SELECT * FROM t}"))
         (should (= clutch--page-total-rows 7))))))
 
+(ert-deftest clutch-test-execute-page-ensures-connection-before-query ()
+  "Paging should use the shared reconnect path before querying."
+  (with-temp-buffer
+    (let (ensured captured-conn)
+      (setq-local clutch-connection 'stale-conn
+                  clutch--base-query "SELECT * FROM t"
+                  clutch-result-max-rows 100)
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 (lambda ()
+                   (setq ensured t)
+                   (setq-local clutch-connection 'new-conn)))
+                ((symbol-function 'clutch--build-paged-sql)
+                 (lambda (_sql _page-num _page-size &optional _order-by)
+                   "SELECT * FROM paged"))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (conn _sql)
+                   (setq captured-conn conn)
+                   (make-clutch-db-result :columns nil :rows nil)))
+                ((symbol-function 'clutch--update-page-state) #'ignore)
+                ((symbol-function 'clutch--refresh-display) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-page 0)
+        (should ensured)
+        (should (eq captured-conn 'new-conn))))))
+
+(ert-deftest clutch-test-count-total-ensures-connection-before-query ()
+  "COUNT should use the shared reconnect path before querying."
+  (with-temp-buffer
+    (let (ensured captured-conn)
+      (setq-local clutch-connection 'stale-conn
+                  clutch--base-query "SELECT * FROM t")
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 (lambda ()
+                   (setq ensured t)
+                   (setq-local clutch-connection 'new-conn)))
+                ((symbol-function 'clutch--build-count-sql)
+                 (lambda (_sql) "SELECT COUNT(*)"))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (conn _sql)
+                   (setq captured-conn conn)
+                   (make-clutch-db-result :rows '((3)))))
+                ((symbol-function 'clutch--refresh-display) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (clutch-result-count-total)
+        (should ensured)
+        (should (eq captured-conn 'new-conn))
+        (should (= clutch--page-total-rows 3))))))
+
 (ert-deftest clutch-test-result-rerun-uses-effective-filtered-query ()
   "Rerun should preserve the current WHERE filter."
   (with-temp-buffer
@@ -2450,11 +2470,11 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                  (lambda (sql filter)
                    (format "FILTER[%s]{%s}" filter sql)))
                 ((symbol-function 'clutch--execute)
-                 (lambda (sql conn)
+                 (lambda (sql &optional conn)
                    (setq executed (list sql conn)))))
         (clutch-result-rerun)
         (should (equal executed
-                       '("FILTER[id = 1]{SELECT * FROM t}" fake-conn)))))))
+                       '("FILTER[id = 1]{SELECT * FROM t}" nil)))))))
 
 (ert-deftest clutch-test-preview-execution-sql-uses-effective-filtered-query ()
   "Preview should show the filtered SQL in result mode."
@@ -3446,12 +3466,36 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   "REPL should print not-connected message when no live connection."
   (with-temp-buffer
     (let (captured)
-      (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) nil))
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 (lambda ()
+                   (user-error "Not connected.  Use C-c C-e to connect")))
                 ((symbol-function 'clutch-repl--output)
                  (lambda (text) (setq captured text))))
         (clutch-repl--execute-and-print "SELECT 1")
         (should (string-match-p "Not connected" captured))
         (should (string-match-p "db> $" captured))))))
+
+(ert-deftest clutch-test-repl-execute-and-print-ensures-connection ()
+  "REPL should use the shared reconnect path before querying."
+  (with-temp-buffer
+    (let (ensured
+          captured-conn
+          output)
+      (setq-local clutch-connection 'stale-conn)
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 (lambda ()
+                   (setq ensured t)
+                   (setq-local clutch-connection 'new-conn)))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (conn _sql)
+                   (setq captured-conn conn)
+                   (make-clutch-db-result :rows '((1)))))
+                ((symbol-function 'clutch-repl--output)
+                 (lambda (text) (setq output text))))
+        (clutch-repl--execute-and-print "UPDATE t SET x = 1;")
+        (should ensured)
+        (should (eq captured-conn 'new-conn))
+        (should (string-match-p "Affected rows" output))))))
 
 (ert-deftest clutch-test-repl-execute-and-print-select-result ()
   "REPL should print table summary for SELECT results."
@@ -3623,6 +3667,36 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (funcall async-callback (list (list :name "c1" :type "int")))
         (goto-char (point-min))
         (should (search-forward "c1" nil t))))))
+
+(ert-deftest clutch-test-schema-toggle-expand-sync-backend-shows-detail-failure ()
+  "Sync schema browser should surface cached detail-load failures."
+  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
+        (clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--column-details-status-cache (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (clutch-schema-mode)
+      (setq-local clutch-connection 'fake-conn
+                  clutch-schema--tables '("a")
+                  clutch-schema--expanded-tables '("a"))
+      (cl-letf (((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "dev-key"))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--schema-for-connection)
+                 (lambda () nil))
+                ((symbol-function 'clutch-db-database)
+                 (lambda (_conn) "db"))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch-db-column-details)
+                 (lambda (_conn _tbl)
+                   (signal 'clutch-db-error '("detail load failed")))))
+        (clutch-schema--render)
+        (goto-char (point-min))
+        (should (search-forward "column details unavailable" nil t))
+        (should (eq (plist-get (clutch--column-details-status 'fake-conn "a")
+                               :state)
+                    'failed))))))
 
 (ert-deftest clutch-test-schema-expand-all-lazy-backend-queues-detail-fetches ()
   "Expand-all on lazy backends should serialize async detail fetches."
@@ -4488,6 +4562,223 @@ database.  Only a query re-execution should discard them."
         (setq-local clutch--conn-sql-product nil)
         (clutch-describe-table "DEMO_TASKS")))
     (should (eq captured-product 'oracle))))
+
+(ert-deftest clutch-test-result-buffer-reconnects-using-inherited-context ()
+  "Result buffers should inherit reconnect params from their source buffer."
+  (let (result-buf built)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((source-buf (current-buffer))
+                (result (make-clutch-db-result
+                         :connection 'old-conn
+                         :columns nil
+                         :rows nil)))
+            (setq-local clutch-connection 'old-conn
+                        clutch--connection-params '(:backend mysql :database "db")
+                        clutch--conn-sql-product 'mysql)
+            (cl-letf (((symbol-function 'clutch-db-live-p)
+                       (lambda (_conn) t))
+                      ((symbol-function 'clutch--connection-key)
+                       (lambda (conn) (symbol-name conn)))
+                      ((symbol-function 'clutch--display-dml-result) #'ignore)
+                      ((symbol-function 'clutch--show-result-buffer)
+                       (lambda (buf) (setq result-buf buf) buf)))
+              (clutch--display-result result "UPDATE demo SET x = 1" 0.1))
+            (with-current-buffer result-buf
+              (should (equal clutch--connection-params
+                             '(:backend mysql :database "db")))
+              (should (eq clutch--conn-sql-product 'mysql))
+              (cl-letf (((symbol-function 'clutch-db-live-p)
+                         (lambda (conn) (eq conn 'new-conn)))
+                        ((symbol-function 'clutch--build-conn)
+                         (lambda (params)
+                           (setq built params)
+                           'new-conn))
+                        ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
+                        ((symbol-function 'clutch--prime-schema-cache) #'ignore)
+                        ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
+                        ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
+                        ((symbol-function 'clutch--refresh-result-status-line) #'ignore)
+                        ((symbol-function 'clutch--update-position-indicator) #'ignore)
+                        ((symbol-function 'clutch--connection-key)
+                         (lambda (conn) (symbol-name conn)))
+                        ((symbol-function 'message) #'ignore))
+                (clutch--ensure-connection)
+                (should (eq clutch-connection 'new-conn))
+                (should (equal built '(:backend mysql :database "db")))))
+            (with-current-buffer source-buf
+              (should (eq clutch-connection 'new-conn)))))
+      (when (buffer-live-p result-buf)
+        (kill-buffer result-buf)))))
+
+(ert-deftest clutch-test-schema-buffer-reconnects-using-inherited-context ()
+  "Schema buffers should inherit reconnect params from their source buffer."
+  (let (schema-buf built)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((source-buf (current-buffer)))
+            (setq-local clutch-connection 'old-conn
+                        clutch--connection-params '(:backend mysql :database "db")
+                        clutch--conn-sql-product 'mysql)
+            (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                      ((symbol-function 'clutch--connection-key)
+                       (lambda (conn) (symbol-name conn)))
+                      ((symbol-function 'clutch-db-eager-schema-refresh-p)
+                       (lambda (_conn) nil))
+                      ((symbol-function 'clutch--schema-for-connection) (lambda () nil))
+                      ((symbol-function 'clutch--refresh-current-schema) #'ignore)
+                      ((symbol-function 'clutch-db-database) (lambda (_conn) "db"))
+                      ((symbol-function 'pop-to-buffer)
+                       (lambda (buf &rest _args)
+                         (setq schema-buf buf)
+                         buf)))
+              (clutch-list-tables))
+            (with-current-buffer schema-buf
+              (should (equal clutch--connection-params
+                             '(:backend mysql :database "db")))
+              (should (eq clutch--conn-sql-product 'mysql))
+              (cl-letf (((symbol-function 'clutch-db-live-p)
+                         (lambda (conn) (eq conn 'new-conn)))
+                        ((symbol-function 'clutch--build-conn)
+                         (lambda (params)
+                           (setq built params)
+                           'new-conn))
+                        ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
+                        ((symbol-function 'clutch--prime-schema-cache) #'ignore)
+                        ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
+                        ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
+                        ((symbol-function 'clutch-schema--refresh-view) #'ignore)
+                        ((symbol-function 'clutch--connection-key)
+                         (lambda (conn) (symbol-name conn)))
+                        ((symbol-function 'message) #'ignore))
+                (clutch--ensure-connection)
+                (should (eq clutch-connection 'new-conn))
+                (should (equal built '(:backend mysql :database "db")))))
+            (with-current-buffer source-buf
+              (should (eq clutch-connection 'new-conn)))))
+      (when (buffer-live-p schema-buf)
+        (kill-buffer schema-buf)))))
+
+(ert-deftest clutch-test-connect-failure-preserves-old-live-connection ()
+  "Interactive connect should not drop the old live session on failure."
+  (let ((clutch-connection 'old-conn)
+        disconnected)
+    (with-temp-buffer
+      (setq-local clutch-connection 'old-conn)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--confirm-disconnect-transaction-loss)
+                 #'ignore)
+                ((symbol-function 'clutch--read-connection-params)
+                 (lambda () '(:backend mysql :database "newdb")))
+                ((symbol-function 'clutch--build-conn)
+                 (lambda (_params)
+                   (signal 'clutch-db-error '("connect failed"))))
+                ((symbol-function 'clutch-db-disconnect)
+                 (lambda (_conn) (setq disconnected t))))
+        (should-error (clutch-connect) :type 'clutch-db-error)
+        (should (eq clutch-connection 'old-conn))
+        (should-not disconnected)))))
+
+(ert-deftest clutch-test-ensure-column-details-failure-is-memoized ()
+  "Repeated sync detail loads should not reissue the same failing RPC."
+  (let ((clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--column-details-status-cache (make-hash-table :test 'equal))
+        (calls 0))
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch-db-column-details)
+               (lambda (_conn _table)
+                 (cl-incf calls)
+                 (signal 'clutch-db-error '("detail load failed")))))
+      (should-not (clutch--ensure-column-details 'fake-conn "users"))
+      (should-not (clutch--ensure-column-details 'fake-conn "users"))
+      (should (= calls 1))
+      (should (eq (plist-get (clutch--column-details-status 'fake-conn "users")
+                             :state)
+                  'failed)))))
+
+(ert-deftest clutch-test-ensure-columns-failure-is-memoized ()
+  "Repeated sync column-name loads should not reissue the same failing RPC."
+  (let ((clutch--columns-status-cache (make-hash-table :test 'equal))
+        (schema (make-hash-table :test 'equal))
+        (calls 0))
+    (puthash "users" nil schema)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch-db-list-columns)
+               (lambda (_conn _table)
+                 (cl-incf calls)
+                 (signal 'clutch-db-error '("column load failed")))))
+      (should-not (clutch--ensure-columns 'fake-conn schema "users"))
+      (should-not (clutch--ensure-columns 'fake-conn schema "users"))
+      (should (= calls 1))
+      (should (eq (plist-get (clutch--columns-status 'fake-conn "users")
+                             :state)
+                  'failed)))))
+
+(ert-deftest clutch-test-column-details-async-ignores-stale-callbacks ()
+  "Old async detail callbacks should not overwrite newer table state."
+  (let ((clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--column-details-status-cache (make-hash-table :test 'equal))
+        (clutch--column-details-queue-cache (make-hash-table :test 'equal))
+        (clutch--column-details-active-cache (make-hash-table :test 'equal))
+        (clutch--column-details-ticket-counter 0)
+        callback)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-column-details-async)
+               (lambda (_conn _table cb &optional _errback)
+                 (setq callback cb)
+                 t))
+              ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore))
+      (clutch--ensure-column-details-async 'fake-conn "users")
+      (clutch--set-column-details-status
+       'fake-conn "users" 'loading nil (clutch--begin-column-details-ticket))
+      (funcall callback (list (list :name "stale_col" :type "int")))
+      (should-not (clutch--cached-column-details 'fake-conn "users")))))
+
+(ert-deftest clutch-test-column-details-async-ignores-dead-connection-callbacks ()
+  "Async detail callbacks should be ignored after the connection dies."
+  (let ((clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--column-details-status-cache (make-hash-table :test 'equal))
+        (clutch--column-details-queue-cache (make-hash-table :test 'equal))
+        (clutch--column-details-active-cache (make-hash-table :test 'equal))
+        (clutch--column-details-ticket-counter 0)
+        (alive t)
+        callback)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) alive))
+              ((symbol-function 'clutch-db-column-details-async)
+               (lambda (_conn _table cb &optional _errback)
+                 (setq callback cb)
+                 t))
+              ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore))
+      (clutch--ensure-column-details-async 'fake-conn "users")
+      (setq alive nil)
+      (funcall callback (list (list :name "dead_col" :type "int")))
+      (should-not (clutch--cached-column-details 'fake-conn "users")))))
+
+(ert-deftest clutch-test-save-console-reports-write-error ()
+  "Console persistence failures should surface a minibuffer warning."
+  (let (reported)
+    (with-temp-buffer
+      (setq-local clutch--console-name "demo")
+      (cl-letf (((symbol-function 'make-directory) #'ignore)
+                ((symbol-function 'write-region)
+                 (lambda (&rest _args)
+                   (error "disk full")))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq reported (apply #'format fmt args)))))
+        (clutch--save-console)
+        (should (string-match-p
+                 "Failed to save console demo: disk full"
+                 reported))))))
 
 ;;; Fix 5 — ob-clutch--disconnect-all
 

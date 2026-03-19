@@ -277,10 +277,11 @@ Return non-nil when RESPONSE was consumed asynchronously."
                                                    :null-object nil
                                                    :false-object clutch-jdbc--json-false)
                               (error nil))))
-                (unless (and parsed
-                             (clutch-jdbc--dispatch-async-response parsed))
-                  (setq clutch-jdbc--response-queue
-                        (nconc clutch-jdbc--response-queue (list parsed))))))))))))
+                (when parsed
+                  (unless (clutch-jdbc--dispatch-async-response parsed)
+                    (setq clutch-jdbc--response-queue
+                          (nconc clutch-jdbc--response-queue
+                                 (list parsed)))))))))))))
 
 (defun clutch-jdbc--start-agent ()
   "Start the clutch-jdbc-agent process and wait for its ready signal."
@@ -359,6 +360,7 @@ TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'."
       ;; behind the stuck op and all fail with "Closed Connection".
       (when (process-live-p clutch-jdbc--agent-process)
         (delete-process clutch-jdbc--agent-process))
+      (clutch-jdbc--clear-async-callbacks)
       (setq clutch-jdbc--agent-process nil
             clutch-jdbc--response-queue nil)
       (signal 'clutch-db-error

@@ -1443,6 +1443,24 @@ immediately without touching the agent process."
         (should (null clutch-jdbc--agent-process))
         (should (null clutch-jdbc--response-queue))))))
 
+(ert-deftest clutch-db-test-jdbc-recv-response-timeout-clears-async-callbacks ()
+  "Sync timeout should clear pending async callbacks immediately."
+  (let ((clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+        (cancelled nil))
+    (puthash 77 (list :callback #'ignore :errback #'ignore :timer 'fake-timer)
+             clutch-jdbc--async-callbacks)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
+              ((symbol-function 'delete-process) #'ignore)
+              ((symbol-function 'accept-process-output) (lambda (_p _s) nil))
+              ((symbol-function 'cancel-timer)
+               (lambda (timer)
+                 (push timer cancelled))))
+      (let ((clutch-jdbc--agent-process 'fake-proc)
+            (clutch-jdbc--response-queue nil))
+        (should-error (clutch-jdbc--recv-response 9999 0.0) :type 'clutch-db-error)
+        (should-not (gethash 77 clutch-jdbc--async-callbacks))
+        (should (equal cancelled '(fake-timer)))))))
+
 (ert-deftest clutch-db-test-jdbc-recv-response-timeout-agent-already-dead ()
   "When the RPC timeout fires and the agent is already dead, no crash.
 delete-process is not called, but state is still reset and error is signaled."
@@ -1467,6 +1485,21 @@ delete-process is not called, but state is still reset and error is signaled."
           (progn (clutch-jdbc--recv-response 9999 0.0) (should nil))
         (clutch-db-error
          (should (string-match-p "Connection lost" (cadr err))))))))
+
+(ert-deftest clutch-db-test-jdbc-agent-filter-drops-invalid-json-lines ()
+  "Malformed agent output should be ignored instead of enqueuing nil."
+  (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
+        (clutch-jdbc--response-queue nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-buffer) (lambda (_proc) buf))
+                  ((symbol-function 'clutch-jdbc--dispatch-async-response)
+                   (lambda (_parsed) nil)))
+          (clutch-jdbc--agent-filter 'fake-proc
+                                     "{\"id\":1,\"ok\":true}\nnot-json\n")
+          (should (equal clutch-jdbc--response-queue
+                         '((:id 1 :ok t)))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
 
 (provide 'clutch-db-test)
 ;;; clutch-db-test.el ends here

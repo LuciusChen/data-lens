@@ -361,6 +361,9 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar clutch--oracle-i18n-warning-shown nil
   "Non-nil after showing the Oracle orai18n completion warning once.")
 
+(defvar clutch--completion-metadata-warning-cache (make-hash-table :test 'equal)
+  "Completion metadata errors already surfaced in this session.")
+
 (defvar-local clutch--last-query nil
   "Last executed SQL query string.")
 
@@ -388,13 +391,21 @@ Dynamically bound by `clutch--execute-and-mark'.")
                      "Run M-x clutch-jdbc-install-driver RET oracle "
                      "(or oracle-i18n if you already manage ojdbc manually)."))))
 
+(defun clutch--warn-completion-metadata-error-once (message-text)
+  "Warn once that completion metadata is unavailable with MESSAGE-TEXT."
+  (unless (gethash message-text clutch--completion-metadata-warning-cache)
+    (puthash message-text t clutch--completion-metadata-warning-cache)
+    (message "Completion metadata unavailable: %s" message-text)))
+
 (defun clutch--safe-completion-call (thunk)
   "Call THUNK for completion and swallow recoverable metadata errors."
   (condition-case err
       (funcall thunk)
     (clutch-db-error
-     (when (clutch--oracle-i18n-missing-p err)
-       (clutch--warn-oracle-i18n-once))
+     (if (clutch--oracle-i18n-missing-p err)
+         (clutch--warn-oracle-i18n-once)
+       (clutch--warn-completion-metadata-error-once
+        (error-message-string err)))
      nil)))
 
 (defvar-local clutch--result-columns nil
@@ -627,14 +638,17 @@ Returns non-nil on success, nil on failure."
 (defun clutch--save-console ()
   "Save console buffer content to its persistence file."
   (when clutch--console-name
-    (condition-case nil
+    (condition-case err
         (progn
           (make-directory clutch-console-directory t)
           (let ((coding-system-for-write 'utf-8-unix))
             (write-region (point-min) (point-max)
                           (clutch--console-file clutch--console-name)
                           nil 'silent)))
-      (error nil))))
+      (error
+       (message "Failed to save console %s: %s"
+                clutch--console-name
+                (error-message-string err))))))
 
 (defun clutch--save-all-consoles ()
   "Save content of all open query console buffers.
@@ -776,6 +790,48 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
   "Return non-nil if CONN is live."
   (and conn (clutch-db-live-p conn)))
 
+(defun clutch--connection-context (conn)
+  "Return `(PARAMS PRODUCT)' for CONN from any attached buffer, or nil."
+  (when conn
+    (or (and (eq clutch-connection conn)
+             clutch--connection-params
+             (list clutch--connection-params clutch--conn-sql-product))
+        (cl-loop for buf in (buffer-list)
+                 when (and (buffer-live-p buf)
+                           (eq (buffer-local-value 'clutch-connection buf) conn)
+                           (buffer-local-value 'clutch--connection-params buf))
+                 return (list (buffer-local-value 'clutch--connection-params buf)
+                              (buffer-local-value 'clutch--conn-sql-product buf))))))
+
+(defun clutch--bind-connection-context (conn &optional params product)
+  "Bind CONN and related reconnect context in the current buffer."
+  (setq-local clutch-connection conn)
+  (when params
+    (setq-local clutch--connection-params params))
+  (when (or params product)
+    (setq-local clutch--conn-sql-product
+                (or product
+                    (and params (clutch--effective-sql-product params))
+                    clutch--conn-sql-product))))
+
+(defun clutch--rebind-connection-buffers (old-conn new-conn params product)
+  "Replace OLD-CONN with NEW-CONN across attached buffers."
+  (dolist (buf (buffer-list))
+    (when (and (buffer-live-p buf)
+               (eq (buffer-local-value 'clutch-connection buf) old-conn))
+      (with-current-buffer buf
+        (clutch--bind-connection-context new-conn params product)
+        (cond
+         ((derived-mode-p 'clutch-mode)
+          (when clutch--console-name
+            (clutch--update-console-buffer-name))
+          (clutch--update-mode-line))
+         ((derived-mode-p 'clutch-schema-mode)
+          (clutch-schema--refresh-view))
+         ((derived-mode-p 'clutch-result-mode)
+          (clutch--refresh-result-status-line)
+          (clutch--update-position-indicator)))))))
+
 (defun clutch--result-buffers-with-pending ()
   "Return list of live result buffers that have uncommitted pending state."
   (cl-remove-if-not
@@ -789,21 +845,26 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
    (buffer-list)))
 
 (defun clutch--try-reconnect ()
-  "Attempt to re-establish the connection using `clutch--connection-params'.
-Updates `clutch-connection' and refreshes the mode-line on success.
+  "Attempt to re-establish the connection for the current logical session.
+Find reconnect params from the current buffer or any attached buffer that
+still references the same dead connection, then rebind all attached buffers
+to the new connection on success.
 Pending staged changes in result buffers are preserved — they are
 client-side SQL that has not been sent to the database, so they remain
 valid on the new connection.  Only a query re-execution (which changes
 the underlying result rows) should discard pending changes.
 Returns non-nil on success, nil on failure."
-  (when clutch--connection-params
+  (when-let* ((old-conn clutch-connection)
+              (context (clutch--connection-context old-conn))
+              (params (car context))
+              (product (cadr context)))
     (condition-case err
-        (let ((old-conn clutch-connection)
-              (conn (clutch--build-conn clutch--connection-params)))
+        (let ((conn (clutch--build-conn params)))
           (clutch--clear-tx-dirty old-conn)
-          (setq clutch-connection conn)
+          (clutch--rebind-connection-buffers old-conn conn params product)
           (clutch--prime-schema-cache conn)
-          (clutch--update-mode-line)
+          (clutch--refresh-schema-status-ui conn)
+          (clutch--refresh-transaction-ui conn)
           (message "Reconnected to %s" (clutch--connection-key conn))
           t)
       (error
@@ -1037,26 +1098,26 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
 (defun clutch-connect ()
   "Connect to a database server interactively.
 If `clutch-connection-alist' is non-empty, offer saved connections via
-`completing-read'.  Otherwise prompt for each parameter.
+  `completing-read'.  Otherwise prompt for each parameter.
 The password is resolved via `auth-source' when not in the connection
 params; see `clutch-connection-alist' for details."
   (interactive)
-  (when (clutch--connection-alive-p clutch-connection)
-    (clutch--confirm-disconnect-transaction-loss
-     clutch-connection
-     "Uncommitted changes will be lost.  Disconnect? ")
-    (clutch--clear-tx-dirty clutch-connection)
-    (clutch-db-disconnect clutch-connection))
-  (setq clutch-connection nil)
-  (let* ((params  (clutch--read-connection-params))
-         (product (clutch--effective-sql-product params))
-         (conn    (clutch--build-conn params)))
-    (setq clutch-connection conn
-          clutch--connection-params params
-          clutch--conn-sql-product product)
-    (clutch--prime-schema-cache conn)
-    (clutch--update-mode-line)
-    (message "Connected to %s" (clutch--connection-key conn))))
+  (let ((old-conn clutch-connection)
+        (old-live-p (clutch--connection-alive-p clutch-connection)))
+    (when old-live-p
+      (clutch--confirm-disconnect-transaction-loss
+       old-conn
+       "Uncommitted changes will be lost.  Disconnect? "))
+    (let* ((params  (clutch--read-connection-params))
+           (product (clutch--effective-sql-product params))
+           (conn    (clutch--build-conn params)))
+      (when old-live-p
+        (clutch--clear-tx-dirty old-conn)
+        (clutch-db-disconnect old-conn))
+      (clutch--bind-connection-context conn params product)
+      (clutch--prime-schema-cache conn)
+      (clutch--update-mode-line)
+      (message "Connected to %s" (clutch--connection-key conn)))))
 
 (defun clutch-disconnect ()
   "Disconnect from the current database server."
@@ -2201,13 +2262,18 @@ SQL is the query text, ELAPSED the time in seconds.
 If the result has columns, shows a table; otherwise shows DML summary."
   (let* ((buf-name (clutch--result-buffer-name))
          (buf      (get-buffer-create buf-name))
+         (params clutch--connection-params)
+         (product clutch--conn-sql-product)
          (columns  (clutch-db-result-columns result))
          (col-names (when columns (clutch--column-names columns)))
          (rows     (clutch-db-result-rows result)))
     (with-current-buffer buf
       (clutch-result-mode)
       (setq-local clutch--last-query sql)
-      (setq-local clutch-connection (clutch-db-result-connection result))
+      (clutch--bind-connection-context
+       (clutch-db-result-connection result)
+       params
+       product)
       (if col-names
           (progn
             (clutch--init-select-result-state col-names columns rows)
@@ -2266,8 +2332,7 @@ Signals an error if pagination is not available."
   (let ((effective-sql (clutch-result--effective-query)))
     (unless effective-sql
       (user-error "Pagination not available for this query"))
-    (unless (clutch--connection-alive-p clutch-connection)
-      (user-error "Not connected"))
+    (clutch--ensure-connection)
     (when (and (or clutch--pending-edits
                    clutch--pending-deletes
                    clutch--pending-inserts)
@@ -2903,11 +2968,13 @@ to execute or \\[clutch-indirect-abort] to abort."
   (let* ((text (clutch--extract-indirect-sql-text))
          (conn (or (bound-and-true-p clutch-connection)
                    (clutch--find-connection)))
+         (params clutch--connection-params)
+         (product clutch--conn-sql-product)
          (buf  (generate-new-buffer "*clutch: indirect*")))
     (pop-to-buffer buf)
     (clutch-mode)
     (when conn
-      (setq-local clutch-connection conn)
+      (clutch--bind-connection-context conn params product)
       (clutch--update-mode-line))
     (clutch-indirect-mode 1)
     (insert text)
@@ -2926,15 +2993,23 @@ Values are hash-tables mapping table-name → list of column-detail plists
 as returned by `clutch-db-column-details'.")
 
 (defvar clutch--column-details-status-cache (make-hash-table :test 'equal)
-  "Per-connection async status for column detail fetches.
+  "Per-connection status for column detail fetches.
 Values are hash-tables mapping table-name to a plist with :state and
-optional :error.")
+optional :error / :ticket.")
 
 (defvar clutch--column-details-queue-cache (make-hash-table :test 'equal)
   "Per-connection queue of tables waiting for async column-detail fetch.")
 
 (defvar clutch--column-details-active-cache (make-hash-table :test 'equal)
-  "Per-connection table currently fetching async column details.")
+  "Per-connection active async column-detail fetch as (TABLE . TICKET).")
+
+(defvar clutch--column-details-ticket-counter 0
+  "Monotonic counter used to reject stale async column-detail callbacks.")
+
+(defvar clutch--columns-status-cache (make-hash-table :test 'equal)
+  "Per-connection status for synchronous column-name loads.
+Values are hash-tables mapping table-name to a plist with :state and
+optional :error.")
 
 (defvar clutch--table-comment-cache (make-hash-table :test 'equal)
   "Cache for table comments.  Keys are connection-key strings.
@@ -3030,6 +3105,7 @@ When TICKET is non-nil, ignore the update unless it is still current."
       (dolist (tbl table-names)
         (puthash tbl nil schema))
       (puthash key schema clutch--schema-cache)
+      (remhash key clutch--columns-status-cache)
       (remhash key clutch--column-details-cache)
       (remhash key clutch--column-details-status-cache)
       (remhash key clutch--column-details-queue-cache)
@@ -3085,14 +3161,42 @@ executed outside clutch that would otherwise leave stale completions."
 (defun clutch--ensure-columns (conn schema table)
   "Ensure column info for TABLE is loaded in SCHEMA.
 Fetches from the backend if not yet cached.  Returns column list."
-  (let ((cols (gethash table schema 'missing)))
+  (let ((cols (gethash table schema 'missing))
+        (status (clutch--columns-status conn table)))
     (unless (eq cols 'missing)
       (or cols
-          (condition-case nil
-              (let ((col-names (clutch-db-list-columns conn table)))
-                (puthash table col-names schema)
-                col-names)
-            (clutch-db-error nil))))))
+          (unless (eq (plist-get status :state) 'failed)
+            (condition-case err
+                (let ((col-names (clutch-db-list-columns conn table)))
+                  (puthash table col-names schema)
+                  (clutch--clear-columns-status conn table)
+                  col-names)
+              (clutch-db-error
+               (clutch--set-columns-status conn table 'failed
+                                           (error-message-string err))
+               nil)))))))
+
+(defun clutch--columns-status (conn table)
+  "Return column-name load status plist for TABLE on CONN, or nil."
+  (let* ((key (clutch--connection-key conn))
+         (cache (gethash key clutch--columns-status-cache)))
+    (and cache (gethash table cache))))
+
+(defun clutch--set-columns-status (conn table state &optional error-message)
+  "Record synchronous column-name load STATE for TABLE on CONN."
+  (let* ((key (clutch--connection-key conn))
+         (cache (or (gethash key clutch--columns-status-cache)
+                    (let ((h (make-hash-table :test 'equal)))
+                      (puthash key h clutch--columns-status-cache)
+                      h))))
+    (puthash table (list :state state :error error-message) cache)))
+
+(defun clutch--clear-columns-status (conn table)
+  "Clear any recorded column-name load status for TABLE on CONN."
+  (let* ((key (clutch--connection-key conn))
+         (cache (gethash key clutch--columns-status-cache)))
+    (when cache
+      (remhash table cache))))
 
 (defun clutch--ensure-column-details (conn table)
   "Return column details for TABLE on CONN, loading lazily if needed.
@@ -3103,14 +3207,20 @@ or nil on error."
                     (let ((h (make-hash-table :test 'equal)))
                       (puthash key h clutch--column-details-cache)
                       h)))
-         (cached (gethash table cache 'missing)))
+         (cached (gethash table cache 'missing))
+         (status (clutch--column-details-status conn table)))
     (if (not (eq cached 'missing))
         cached
-      (condition-case nil
-          (let ((details (clutch-db-column-details conn table)))
-            (puthash table details cache)
-            details)
-        (clutch-db-error nil)))))
+      (unless (eq (plist-get status :state) 'failed)
+        (condition-case err
+            (let ((details (clutch-db-column-details conn table)))
+              (puthash table details cache)
+              (clutch--clear-column-details-status conn table)
+              details)
+          (clutch-db-error
+           (clutch--set-column-details-status conn table 'failed
+                                              (error-message-string err))
+           nil))))))
 
 (defun clutch--column-details-status (conn table)
   "Return async column-detail status plist for TABLE on CONN, or nil."
@@ -3125,14 +3235,33 @@ or nil on error."
          (details (and cache (gethash table cache 'missing))))
     (unless (eq details 'missing) details)))
 
-(defun clutch--set-column-details-status (conn table state &optional error-message)
+(defun clutch--set-column-details-status (conn table state
+                                              &optional error-message ticket)
   "Record async column-detail STATE for TABLE on CONN."
   (let* ((key (clutch--connection-key conn))
          (cache (or (gethash key clutch--column-details-status-cache)
                     (let ((h (make-hash-table :test 'equal)))
                       (puthash key h clutch--column-details-status-cache)
                       h))))
-    (puthash table (list :state state :error error-message) cache)))
+    (puthash table (list :state state :error error-message :ticket ticket) cache)))
+
+(defun clutch--clear-column-details-status (conn table)
+  "Clear any recorded column-detail status for TABLE on CONN."
+  (let* ((key (clutch--connection-key conn))
+         (cache (gethash key clutch--column-details-status-cache)))
+    (when cache
+      (remhash table cache))))
+
+(defun clutch--begin-column-details-ticket ()
+  "Issue a new column-detail ticket."
+  (cl-incf clutch--column-details-ticket-counter))
+
+(defun clutch--column-details-ticket-current-p (conn table ticket)
+  "Return non-nil when TICKET is still current for TABLE on CONN."
+  (and conn
+       (clutch--connection-alive-p conn)
+       (eql (plist-get (clutch--column-details-status conn table) :ticket)
+            ticket)))
 
 (defun clutch--column-details-queue (conn)
   "Return the async column-details queue for CONN."
@@ -3143,12 +3272,13 @@ or nil on error."
   (puthash (clutch--connection-key conn) queue clutch--column-details-queue-cache))
 
 (defun clutch--column-details-active (conn)
-  "Return the table currently fetching async column details for CONN."
+  "Return the active async column-details fetch for CONN, or nil."
   (gethash (clutch--connection-key conn) clutch--column-details-active-cache))
 
-(defun clutch--set-column-details-active (conn table)
-  "Record TABLE as the active async column-details fetch for CONN."
-  (puthash (clutch--connection-key conn) table clutch--column-details-active-cache))
+(defun clutch--set-column-details-active (conn table ticket)
+  "Record TABLE/TICKET as the active async column-details fetch for CONN."
+  (puthash (clutch--connection-key conn) (cons table ticket)
+           clutch--column-details-active-cache))
 
 (defun clutch--clear-column-details-active (conn)
   "Clear the active async column-details fetch for CONN."
@@ -3159,42 +3289,46 @@ or nil on error."
   (unless (or (clutch--column-details-active conn)
               (not (clutch--connection-alive-p conn)))
     (when-let* ((queue (clutch--column-details-queue conn))
-                (table (car queue)))
+                (table (car queue))
+                (ticket (plist-get (clutch--column-details-status conn table) :ticket)))
       (clutch--set-column-details-queue conn (cdr queue))
-      (clutch--set-column-details-active conn table)
-      (clutch--set-column-details-status conn table 'loading)
+      (clutch--set-column-details-active conn table ticket)
+      (clutch--set-column-details-status conn table 'loading nil ticket)
       (unless (clutch-db-column-details-async
                conn table
                (lambda (details)
-                 (let* ((key (clutch--connection-key conn))
-                        (cache (or (gethash key clutch--column-details-cache)
-                                   (let ((h (make-hash-table :test 'equal)))
-                                     (puthash key h clutch--column-details-cache)
-                                     h)))
-                        (status-cache (gethash key clutch--column-details-status-cache)))
-                   (puthash table details cache)
-                   (when status-cache
-                     (remhash table status-cache))
+                 (when (clutch--column-details-ticket-current-p conn table ticket)
+                   (let* ((key (clutch--connection-key conn))
+                          (cache (or (gethash key clutch--column-details-cache)
+                                     (let ((h (make-hash-table :test 'equal)))
+                                       (puthash key h clutch--column-details-cache)
+                                       h))))
+                     (puthash table details cache)
+                     (clutch--clear-column-details-status conn table)
+                     (clutch--clear-column-details-active conn)
+                     (clutch--refresh-schema-status-ui conn)
+                     (clutch--drain-column-details-async conn))))
+               (lambda (message)
+                 (when (clutch--column-details-ticket-current-p conn table ticket)
+                   (clutch--set-column-details-status conn table 'failed
+                                                      message ticket)
                    (clutch--clear-column-details-active conn)
                    (clutch--refresh-schema-status-ui conn)
-                   (clutch--drain-column-details-async conn)))
-               (lambda (message)
-                 (clutch--set-column-details-status conn table 'failed message)
-                 (clutch--clear-column-details-active conn)
-                 (clutch--refresh-schema-status-ui conn)
-                 (clutch--drain-column-details-async conn)))
+                   (clutch--drain-column-details-async conn))))
         (clutch--set-column-details-status conn table 'failed
-                                           "Column detail fetch is unavailable")
+                                           "Column detail fetch is unavailable"
+                                           ticket)
         (clutch--clear-column-details-active conn)
         (clutch--refresh-schema-status-ui conn)
         (clutch--drain-column-details-async conn)))))
 
 (defun clutch--ensure-column-details-async (conn table)
   "Queue an async column-detail fetch for TABLE on CONN when needed."
-  (let ((state (plist-get (clutch--column-details-status conn table) :state)))
+  (let ((state (plist-get (clutch--column-details-status conn table) :state))
+        (ticket (clutch--begin-column-details-ticket)))
     (unless (or (clutch--cached-column-details conn table)
                 (memq state '(queued loading)))
-      (clutch--set-column-details-status conn table 'queued)
+      (clutch--set-column-details-status conn table 'queued nil ticket)
       (clutch--set-column-details-queue
        conn
        (append (clutch--column-details-queue conn) (list table)))
@@ -4025,14 +4159,12 @@ SQL keyword/function docs are shown even without a connection."
   "Insert indented column detail lines for TBL using CONN."
   (let* ((sync-p (clutch-db-completion-sync-columns-p conn))
          (details (if sync-p
-                      (condition-case nil
-                          (clutch-db-column-details conn tbl)
-                        (clutch-db-error nil))
+                      (clutch--ensure-column-details conn tbl)
                     (or (clutch--cached-column-details conn tbl)
                         (progn
                           (clutch--ensure-column-details-async conn tbl)
                           nil))))
-         (status (unless sync-p (clutch--column-details-status conn tbl))))
+         (status (clutch--column-details-status conn tbl)))
     (cond
      (details
       (let ((last-idx (1- (length details))))
@@ -4102,6 +4234,8 @@ Preserve the current table when possible."
   (interactive)
   (clutch--ensure-connection)
   (let* ((conn clutch-connection)
+         (params clutch--connection-params)
+         (product clutch--conn-sql-product)
          (schema (clutch--schema-for-connection))
          (eager-p (clutch-db-eager-schema-refresh-p conn))
          (tables (cond
@@ -4113,8 +4247,8 @@ Preserve the current table when possible."
                        (or (clutch-db-database conn) "?")))))
     (with-current-buffer buf
       (clutch-schema-mode)
-      (setq-local clutch-connection conn
-                  clutch-schema--tables tables)
+      (clutch--bind-connection-context conn params product)
+      (setq-local clutch-schema--tables tables)
       (clutch-schema--render)
       (goto-char (point-min)))
     (pop-to-buffer buf '((display-buffer-at-bottom)))
@@ -4177,6 +4311,7 @@ can offer table-specific actions on the completion candidates."
            (read-string "Table: "))))
   (clutch--ensure-connection)
   (let* ((conn clutch-connection)
+         (params clutch--connection-params)
          (product (or clutch--conn-sql-product
                       (and clutch--connection-params
                            (clutch--effective-sql-product clutch--connection-params))
@@ -4187,7 +4322,7 @@ can offer table-specific actions on the completion candidates."
       (let ((inhibit-read-only t))
         (sql-mode)
         (sql-set-product product)
-        (setq-local clutch-connection conn)
+        (clutch--bind-connection-context conn params product)
         (erase-buffer)
         (insert ddl)
         (insert "\n")
@@ -4685,8 +4820,8 @@ Includes the active WHERE filter when one is applied."
   (interactive)
   (let* ((conn clutch-connection)
          (base (clutch-result--effective-query)))
-    (unless (clutch--connection-alive-p conn)
-      (user-error "Not connected"))
+    (clutch--ensure-connection)
+    (setq conn clutch-connection)
     (let* ((count-sql (clutch--build-count-sql base))
            (result (condition-case err
                        (clutch--run-db-query conn count-sql)
@@ -4704,7 +4839,7 @@ Includes the active WHERE filter when one is applied."
   "Re-execute the last query that produced this result buffer."
   (interactive)
   (if-let* ((sql (clutch-result--effective-query)))
-      (clutch--execute sql clutch-connection)
+      (clutch--execute sql)
     (user-error "No query to re-execute")))
 
 (defun clutch-result--revert (_ignore-auto _noconfirm)
@@ -5018,6 +5153,30 @@ All field types use the same delay so feedback timing is consistent."
                     clutch-result-edit-json--field-name field-name))
       buf)))
 
+(defun clutch--finish-json-sub-editor (parent missing-message updater
+                                              &optional success-message)
+  "Close the current JSON sub-editor and apply UPDATER in PARENT.
+Signal MISSING-MESSAGE when PARENT is dead.  UPDATER runs in PARENT.
+When SUCCESS-MESSAGE is non-nil, echo it after returning to PARENT."
+  (unless (buffer-live-p parent)
+    (user-error "%s" missing-message))
+  (quit-window 'kill)
+  (with-current-buffer parent
+    (funcall updater))
+  (pop-to-buffer parent)
+  (when success-message
+    (message "%s" success-message)))
+
+(defun clutch--cancel-json-sub-editor (parent &optional restorer)
+  "Close the current JSON sub-editor and return to live PARENT.
+When RESTORER is non-nil, run it in PARENT before switching back."
+  (quit-window 'kill)
+  (when (buffer-live-p parent)
+    (with-current-buffer parent
+      (when restorer
+        (funcall restorer)))
+    (pop-to-buffer parent)))
+
 (defun clutch-result-edit-json-finish ()
   "Save the JSON sub-editor contents back to the parent edit buffer."
   (interactive)
@@ -5025,23 +5184,18 @@ All field types use the same delay so feedback timing is consistent."
          (field-name clutch-result-edit-json--field-name)
          (raw (string-trim (buffer-substring-no-properties (point-min) (point-max))))
          (value (clutch-result-insert--json-normalize-string raw)))
-    (unless (buffer-live-p parent)
-      (user-error "Edit buffer no longer exists"))
-    (quit-window 'kill)
-    (with-current-buffer parent
-      (erase-buffer)
-      (insert value)
-      (goto-char (point-min)))
-    (pop-to-buffer parent)
-    (message "Updated JSON for %s" field-name)))
+    (clutch--finish-json-sub-editor
+     parent "Edit buffer no longer exists"
+     (lambda ()
+       (erase-buffer)
+       (insert value)
+       (goto-char (point-min)))
+     (format "Updated JSON for %s" field-name))))
 
 (defun clutch-result-edit-json-cancel ()
   "Cancel JSON sub-editing and return to the parent edit buffer."
   (interactive)
-  (let ((parent clutch-result-edit-json--parent-buffer))
-    (quit-window 'kill)
-    (when (buffer-live-p parent)
-      (pop-to-buffer parent))))
+  (clutch--cancel-json-sub-editor clutch-result-edit-json--parent-buffer))
 
 (defun clutch-result--edit-pending-insert (ridx)
   "Re-open staged insert at result row RIDX in the insert buffer."
@@ -5081,6 +5235,8 @@ All field types use the same delay so feedback timing is consistent."
           (clutch-result-edit--refresh-header-line)
           (setq-local clutch-result--edit-callback
                       (lambda (new-value)
+                        (unless (buffer-live-p result-buf)
+                          (user-error "Result buffer no longer exists"))
                         (with-current-buffer result-buf
                           (clutch-result--apply-edit ridx cidx new-value))))
           (setq-local clutch-result--edit-result-buffer result-buf))
@@ -6061,29 +6217,24 @@ If nothing handles the completion, fall back to `completing-read'."
          (field-name clutch-result-insert-json--field-name)
          (raw (string-trim (buffer-substring-no-properties (point-min) (point-max))))
          (value (clutch-result-insert--json-normalize-string raw)))
-    (unless (buffer-live-p parent)
-      (user-error "Insert buffer no longer exists"))
-    (quit-window 'kill)
-    (with-current-buffer parent
-      (when-let* ((field (clutch-result-insert--field-state field-name))
-                  (bounds (clutch-result-insert--field-value-bounds field)))
-        (let ((inhibit-modification-hooks nil))
-          (delete-region (car bounds) (cdr bounds))
-          (goto-char (car bounds))
-          (insert value)
-          (clutch-result-insert--validate-field-live field)
-          (clutch-result-insert--normalize-point)))
-      (pop-to-buffer parent))))
+    (clutch--finish-json-sub-editor
+     parent "Insert buffer no longer exists"
+     (lambda ()
+       (when-let* ((field (clutch-result-insert--field-state field-name))
+                   (bounds (clutch-result-insert--field-value-bounds field)))
+         (let ((inhibit-modification-hooks nil))
+           (delete-region (car bounds) (cdr bounds))
+           (goto-char (car bounds))
+           (insert value)
+           (clutch-result-insert--validate-field-live field)
+           (clutch-result-insert--normalize-point)))))))
 
 (defun clutch-result-insert-json-cancel ()
   "Cancel JSON field editing and return to the insert buffer."
   (interactive)
-  (let ((parent clutch-result-insert-json--parent-buffer))
-    (quit-window 'kill)
-    (when (buffer-live-p parent)
-      (with-current-buffer parent
-        (clutch-result-insert--normalize-point))
-      (pop-to-buffer parent))))
+  (clutch--cancel-json-sub-editor
+   clutch-result-insert-json--parent-buffer
+   #'clutch-result-insert--normalize-point))
 
 (defun clutch-result-insert--populate-buffer (table col-names &optional fields)
   "Populate the current insert buffer for TABLE and COL-NAMES using FIELDS."
@@ -7343,28 +7494,44 @@ Prompts for format:
                  (mapcar #'car choices) nil t nil nil default-label)))
     (or (cdr (assoc label choices)) default)))
 
+(defun clutch--export-text-to-file (text rows prompt default-file message-fmt
+                                         &rest message-args)
+  "Write TEXT for ROWS to a user-selected file and report success.
+PROMPT and DEFAULT-FILE are passed to `read-file-name'.  MESSAGE-FMT and
+MESSAGE-ARGS are forwarded to `message' after the row count data and path."
+  (let ((path (read-file-name prompt nil nil nil default-file)))
+    (with-temp-buffer
+      (insert text)
+      (write-region (point-min) (point-max) path nil 'silent))
+    (apply #'message message-fmt
+           (length rows) (if (= (length rows) 1) "" "s")
+           path message-args)))
+
+(defun clutch--export-text-to-clipboard (text rows message-fmt &rest message-args)
+  "Copy TEXT for ROWS to the kill ring and report success."
+  (kill-new text)
+  (apply #'message message-fmt
+         (length rows) (if (= (length rows) 1) "" "s")
+         message-args))
+
 (defun clutch--export-csv-rows-to-file (rows)
   "Export ROWS as CSV to a file."
-  (let* ((path (read-file-name "Export CSV to file: " nil nil nil "export.csv"))
-         (coding (clutch--read-csv-export-coding-system))
-         (coding-system-for-write coding))
-    (with-temp-buffer
-      (insert (clutch--csv-content rows))
-      (write-region (point-min) (point-max) path nil 'silent))
-    (message "Exported %d row%s to %s (%s)"
-             (length rows) (if (= (length rows) 1) "" "s")
-             path coding)))
+  (let* ((coding (clutch--read-csv-export-coding-system))
+         (coding-system-for-write coding)
+         (text (clutch--csv-content rows)))
+    (clutch--export-text-to-file
+     text rows "Export CSV to file: " "export.csv"
+     "Exported %d row%s to %s (%s)" coding)))
 
 (defun clutch--export-csv-rows-to-clipboard (rows)
   "Copy ROWS as CSV to the kill ring."
-  (kill-new (clutch--csv-content rows))
-  (message "Copied %d row%s as CSV"
-           (length rows) (if (= (length rows) 1) "" "s")))
+  (clutch--export-text-to-clipboard
+   (clutch--csv-content rows) rows
+   "Copied %d row%s as CSV"))
 
 (defun clutch-result--collect-all-export-rows ()
   "Return all rows for current result by auto-paging when needed."
-  (unless (clutch--connection-alive-p clutch-connection)
-    (user-error "Not connected"))
+  (clutch--ensure-connection)
   (let ((effective-sql (clutch-result--effective-query)))
     (cond
      ((null effective-sql)
@@ -7423,19 +7590,16 @@ Prompts for format:
 
 (defun clutch--export-insert-rows-to-file (rows)
   "Export ROWS as INSERT statements to a SQL file."
-  (let ((path (read-file-name "Export SQL to file: " nil nil nil "export.sql")))
-    (with-temp-buffer
-      (insert (clutch--insert-content rows))
-      (write-region (point-min) (point-max) path nil 'silent))
-    (message "Exported %d row%s as INSERT SQL to %s"
-             (length rows) (if (= (length rows) 1) "" "s")
-             path)))
+  (clutch--export-text-to-file
+   (clutch--insert-content rows) rows
+   "Export SQL to file: " "export.sql"
+   "Exported %d row%s as INSERT SQL to %s"))
 
 (defun clutch--export-insert-rows-to-clipboard (rows)
   "Copy ROWS as INSERT statements to the kill ring."
-  (kill-new (clutch--insert-content rows))
-  (message "Copied %d row%s as INSERT SQL"
-           (length rows) (if (= (length rows) 1) "" "s")))
+  (clutch--export-text-to-clipboard
+   (clutch--insert-content rows) rows
+   "Copied %d row%s as INSERT SQL"))
 
 (defun clutch--export-insert-all-file ()
   "Export all query rows as INSERT statements to a SQL file."
@@ -7449,19 +7613,16 @@ Prompts for format:
 
 (defun clutch--export-update-rows-to-file (rows)
   "Export ROWS as UPDATE statements to a SQL file."
-  (let ((path (read-file-name "Export SQL to file: " nil nil nil "export.sql")))
-    (with-temp-buffer
-      (insert (clutch--update-content rows))
-      (write-region (point-min) (point-max) path nil 'silent))
-    (message "Exported %d row%s as UPDATE SQL to %s"
-             (length rows) (if (= (length rows) 1) "" "s")
-             path)))
+  (clutch--export-text-to-file
+   (clutch--update-content rows) rows
+   "Export SQL to file: " "export.sql"
+   "Exported %d row%s as UPDATE SQL to %s"))
 
 (defun clutch--export-update-rows-to-clipboard (rows)
   "Copy ROWS as UPDATE statements to the kill ring."
-  (kill-new (clutch--update-content rows))
-  (message "Copied %d row%s as UPDATE SQL"
-           (length rows) (if (= (length rows) 1) "" "s")))
+  (clutch--export-text-to-clipboard
+   (clutch--update-content rows) rows
+   "Copied %d row%s as UPDATE SQL"))
 
 (defun clutch--export-update-all-file ()
   "Export all query rows as UPDATE statements to a SQL file."
@@ -7842,10 +8003,10 @@ Accumulates input until a semicolon is found, then executes."
 
 (defun clutch-repl--execute-and-print (sql)
   "Execute SQL and print results inline in the REPL."
-  (if (not (clutch--connection-alive-p clutch-connection))
-      (clutch-repl--output "ERROR: Not connected.  Use C-c C-e to connect.\ndb> ")
-    (setq clutch--last-query sql)
-    (condition-case err
+  (condition-case err
+      (progn
+        (clutch--ensure-connection)
+        (setq clutch--last-query sql)
         (let* ((start (float-time))
                (result (clutch--run-db-query clutch-connection sql))
                (elapsed (- (float-time) start))
@@ -7860,10 +8021,10 @@ Accumulates input until a semicolon is found, then executes."
                          table-str (length rows)
                          (if (= (length rows) 1) "" "s")
                          elapsed)))
-            (clutch-repl--output (clutch-repl--format-dml-result result elapsed))))
-      (clutch-db-error
-       (clutch-repl--output
-        (format "\nERROR: %s\n\ndb> " (error-message-string err)))))))
+            (clutch-repl--output (clutch-repl--format-dml-result result elapsed)))))
+    (error
+     (clutch-repl--output
+      (format "\nERROR: %s\n\ndb> " (error-message-string err))))))
 
 ;;;###autoload
 (defun clutch-repl ()
