@@ -385,7 +385,7 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defun clutch--effective-sql-product (params)
   "Return the SQL product to use for connection PARAMS."
   (or (plist-get params :sql-product)
-      (pcase (plist-get params :backend)
+      (pcase (or (plist-get params :backend) 'mysql)
         ((or 'pg 'postgresql) 'postgres)
         ((or 'mysql 'mariadb) 'mysql)
         ('sqlite 'sqlite)

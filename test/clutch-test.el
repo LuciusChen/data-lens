@@ -2889,6 +2889,14 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                          :user "u" :read-timeout 5))
    :type 'user-error))
 
+(ert-deftest clutch-test-effective-sql-product-defaults-missing-backend-to-mysql ()
+  "Saved connections without :backend should still derive mysql SQL product."
+  (should (eq (clutch--effective-sql-product '(:host "127.0.0.1"
+                                               :port 3306
+                                               :user "u"
+                                               :database "db"))
+              'mysql)))
+
 (ert-deftest clutch-test-default-connect-timeout-is-10-seconds ()
   "Project default connect timeout should stay at 10 seconds."
   (should (= clutch-connect-timeout-seconds 10)))
