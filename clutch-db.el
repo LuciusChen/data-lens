@@ -203,6 +203,16 @@ the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
 (cl-defgeneric clutch-db-list-tables (conn)
   "Return a list of table name strings for CONN's current database.")
 
+(cl-defgeneric clutch-db-list-table-entries (conn)
+  "Return table entry plists for CONN's current database.
+Each plist should include at least :name, and may also include metadata such as
+:type, :schema, and :source-schema.")
+
+(cl-defmethod clutch-db-list-table-entries ((conn t))
+  "Default table entry listing derived from `clutch-db-list-tables'."
+  (mapcar (lambda (name) (list :name name))
+          (clutch-db-list-tables conn)))
+
 (cl-defgeneric clutch-db-list-columns (conn table)
   "Return a list of column name strings for TABLE on CONN.")
 
@@ -212,6 +222,14 @@ the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
 (cl-defmethod clutch-db-complete-tables ((_conn t) _prefix)
   "Backends without direct completion support return nil."
   nil)
+
+(cl-defgeneric clutch-db-search-table-entries (conn prefix)
+  "Return table entry plists matching PREFIX on CONN, or nil when unsupported.")
+
+(cl-defmethod clutch-db-search-table-entries ((conn t) prefix)
+  "Default table entry search derived from `clutch-db-complete-tables'."
+  (mapcar (lambda (name) (list :name name))
+          (or (clutch-db-complete-tables conn prefix) '())))
 
 (cl-defgeneric clutch-db-complete-columns (conn table prefix)
   "Return column candidates for TABLE and PREFIX on CONN.

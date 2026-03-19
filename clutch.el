@@ -114,6 +114,21 @@
   "Face for column-page scroll indicators (◂ and ▸) at table edges."
   :group 'clutch)
 
+(defface clutch-table-source-face
+  '((t :inherit shadow))
+  "Face for table-source annotations in minibuffer completions."
+  :group 'clutch)
+
+(defface clutch-table-public-source-face
+  '((t :inherit shadow))
+  "Face for PUBLIC table-source annotations in minibuffer completions."
+  :group 'clutch)
+
+(defface clutch-table-type-face
+  '((t :inherit shadow))
+  "Face for table-type annotations in minibuffer completions."
+  :group 'clutch)
+
 (defface clutch-null-face
   '((t :inherit shadow :slant italic))
   "Face for NULL values."
@@ -2292,6 +2307,13 @@ If the result has columns, shows a table; otherwise shows DML summary."
   (or (clutch-db-sql-has-top-level-limit-p sql)
       (clutch-db-sql-has-top-level-offset-p sql)))
 
+(defun clutch--sql-derived-table-alias (alias &optional conn)
+  "Return a derived-table alias clause for ALIAS on CONN.
+Oracle does not accept AS before a subquery alias."
+  (if (clutch--connection-oracle-jdbc-p (or conn clutch-connection))
+      (replace-regexp-in-string "\\`_+" "" alias)
+    (format "AS %s" alias)))
+
 (defun clutch--build-paged-sql (base-sql page-num page-size &optional order-by)
   "Build a paged SQL query wrapping BASE-SQL.
 PAGE-NUM is 0-based, PAGE-SIZE is the row limit.
@@ -2300,9 +2322,10 @@ If BASE-SQL already has a top-level LIMIT/OFFSET, pagination and sorting
 operate on that result set via an outer wrapper query."
   (let ((effective-base
          (if (clutch--sql-has-page-tail-p base-sql)
-             (format "SELECT * FROM (%s) AS _clutch_page"
+             (format "SELECT * FROM (%s) %s"
                      (string-trim-right
-                      (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
+                      (replace-regexp-in-string ";\\s-*\\'" "" base-sql))
+                     (clutch--sql-derived-table-alias "_clutch_page"))
            base-sql)))
     (clutch-db-build-paged-sql clutch-connection effective-base
                                page-num page-size order-by)))
@@ -3975,6 +3998,15 @@ Works without a database connection."
                                       (not (looking-at-p "\\s-")))
                              (insert " "))))))
 
+(defun clutch--install-completion-capfs ()
+  "Install completion CAPFs for the current buffer in priority order.
+Identifier completion must run before SQL keyword completion so table names in
+contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
+  (add-hook 'completion-at-point-functions
+            #'clutch-completion-at-point nil t)
+  (add-hook 'completion-at-point-functions
+            #'clutch-sql-keyword-completion-at-point t t))
+
 (defun clutch-completion-at-point ()
   "Completion-at-point function for SQL identifiers.
 Skips column loading if the connection is busy (prevents re-entrancy
@@ -4111,7 +4143,7 @@ SQL keyword/function docs are shown even without a connection."
   \\[clutch-schema-expand-all]	Expand all tables
   \\[clutch-schema-collapse-all]	Collapse all tables
   \\[clutch-schema-describe-at-point]	Show DDL for table
-  \\[clutch-schema-browse-at-point]	Browse table data (insert SELECT into console)
+  \\[clutch-schema-browse-at-point]	Browse object (insert SELECT into console)
   \\[clutch-schema-refresh]	Refresh"
   (setq truncate-lines t)
   (setq-local revert-buffer-function #'clutch-schema--revert))
@@ -4301,6 +4333,191 @@ can offer table-specific actions on the completion candidates."
                        (complete-with-action action tables str pred)))
                    nil t))
 
+(defun clutch--table-entry-label (entry)
+  "Return a compact source/type label for table ENTRY."
+  (let* ((source (plist-get entry :source-schema))
+         (type (clutch--table-entry-type-display entry)))
+    (cond
+     ((and source (not (string-empty-p type)))
+      (format "%s/%s" source type))
+     (source source)
+     ((not (string-empty-p type)) type)
+     (t ""))))
+
+(defun clutch--table-entry-type-display (entry)
+  "Return the compact type display for table ENTRY."
+  (let ((type (upcase (or (plist-get entry :type) ""))))
+    (cond
+     ((equal type "PUBLIC SYNONYM") "synonym")
+     ((string-empty-p type) "")
+     (t (downcase type)))))
+
+(defun clutch--table-entry-identity-key (entry)
+  "Return a stable identity key for table ENTRY."
+  (list (or (plist-get entry :name) "")
+        (or (plist-get entry :type) "")
+        (or (plist-get entry :schema) "")
+        (or (plist-get entry :source-schema) "")))
+
+(defun clutch--table-entry-sort-key (entry)
+  "Return a stable sort key for browse ENTRY."
+  (list (if (equal (plist-get entry :source-schema) "PUBLIC") 1 0)
+        (or (plist-get entry :source-schema) "")
+        (or (plist-get entry :type) "")
+        (or (plist-get entry :name) "")))
+
+(defun clutch--table-entry-key< (left right)
+  "Return non-nil when sort key LEFT should sort before RIGHT."
+  (or (< (nth 0 left) (nth 0 right))
+      (and (= (nth 0 left) (nth 0 right))
+           (or (string< (nth 1 left) (nth 1 right))
+               (and (string= (nth 1 left) (nth 1 right))
+                    (string< (nth 2 left) (nth 2 right)))))))
+
+(defun clutch--merge-table-entries (&rest entry-lists)
+  "Merge ENTRY-LISTS by object identity, preserving the first occurrence."
+  (let ((seen (make-hash-table :test 'equal))
+        merged)
+    (dolist (entries entry-lists)
+      (dolist (entry entries)
+        (let ((key (clutch--table-entry-identity-key entry)))
+          (unless (gethash key seen)
+            (puthash key t seen)
+            (push entry merged)))))
+    (nreverse merged)))
+
+(defun clutch--table-entry-target (entry)
+  "Return the target schema display for table ENTRY, or nil."
+  (let ((schema (or (plist-get entry :schema) ""))
+        (source (or (plist-get entry :source-schema) "")))
+    (unless (or (string-empty-p schema)
+                (string= schema source))
+      schema)))
+
+(defun clutch--table-entry-display-detail (entry duplicate-counts)
+  "Return optional disambiguation detail for table ENTRY.
+DUPLICATE-COUNTS is a hash table keyed by object name."
+  (let* ((name (or (plist-get entry :name) ""))
+         (target (clutch--table-entry-target entry)))
+    (when (and (> (gethash name duplicate-counts 0) 1)
+               target)
+      target)))
+
+(defun clutch--table-entry-candidate (entry duplicate-counts)
+  "Return a completion candidate string for ENTRY.
+DUPLICATE-COUNTS maps object names to the number of visible entries."
+  (let* ((name (or (plist-get entry :name) ""))
+         (count (gethash name duplicate-counts 0)))
+    (if (> count 1)
+        (concat name
+                (propertize
+                 (format "\t%s\t%s\t%s"
+                         (clutch--table-entry-label entry)
+                         (or (plist-get entry :schema) "")
+                         (or (plist-get entry :source-schema) ""))
+                 'invisible t))
+      name)))
+
+(defun clutch--table-entry-annotation (entry duplicate-counts)
+  "Return a propertized minibuffer annotation string for table ENTRY."
+  (let* ((label (clutch--table-entry-label entry))
+         (detail (clutch--table-entry-display-detail entry duplicate-counts)))
+    (concat
+     (propertize "  " 'face 'shadow)
+     (propertize label
+                 'face (if (equal (plist-get entry :source-schema) "PUBLIC")
+                           'clutch-table-public-source-face
+                         'clutch-table-source-face))
+     (when detail
+       (concat
+        (propertize "  " 'face 'shadow)
+        (propertize detail 'face 'clutch-table-type-face))))))
+
+(defun clutch--table-entry-affixation (cands entry-map duplicate-counts)
+  "Return affixated completion tuples for CANDS using ENTRY-MAP."
+  (let* ((labels
+          (mapcar (lambda (cand)
+                    (clutch--table-entry-label (gethash cand entry-map)))
+                  cands))
+         (label-width (if labels
+                          (apply #'max (mapcar #'string-width labels))
+                        0)))
+    (mapcar
+     (lambda (cand)
+       (let* ((entry (gethash cand entry-map))
+              (label (clutch--table-entry-label entry))
+              (detail (clutch--table-entry-display-detail entry duplicate-counts))
+              (label-face (if (equal (plist-get entry :source-schema) "PUBLIC")
+                               'clutch-table-public-source-face
+                             'clutch-table-source-face))
+              (suffix
+               (concat
+                (propertize "  " 'face 'shadow)
+                (propertize
+                 (format (format "%%-%ds" label-width) label)
+                 'face label-face)
+                (if detail
+                    (concat
+                     (propertize "  " 'face 'shadow)
+                     (propertize detail 'face 'clutch-table-type-face))
+                  ""))))
+         (list cand "" suffix)))
+     cands)))
+
+(defun clutch--browse-table-base-entries (conn)
+  "Return the base browse-table entry list for CONN.
+Includes both schema/browser entries and search-discovered entries so browse
+can surface objects from different Oracle sources and types."
+  (clutch--merge-table-entries
+   (clutch-db-list-table-entries conn)
+   (clutch-db-search-table-entries conn "")))
+
+(defun clutch--browse-table-entry-reader (conn prompt)
+  "Read a table name for browse/insert actions on CONN using PROMPT.
+Uses the browse list plus backend search results, with source/type annotations
+rendered in an Emacs-native completion style."
+  (let* ((entries
+          (sort (clutch--browse-table-base-entries conn)
+                (lambda (a b)
+                  (clutch--table-entry-key<
+                   (clutch--table-entry-sort-key a)
+                   (clutch--table-entry-sort-key b)))))
+         (entry-map (make-hash-table :test 'equal))
+         (duplicate-counts (make-hash-table :test 'equal))
+         candidates)
+    (dolist (entry entries)
+      (puthash (plist-get entry :name)
+               (1+ (gethash (plist-get entry :name) duplicate-counts 0))
+               duplicate-counts))
+    (dolist (entry entries)
+      (let ((candidate
+             (clutch--table-entry-candidate entry duplicate-counts)))
+        (puthash candidate entry entry-map)
+        (push candidate candidates)))
+    (setq candidates (nreverse candidates))
+    (cl-labels ((candidate-list () candidates)
+                (annotation (candidate)
+                  (when-let* ((entry (gethash candidate entry-map)))
+                    (clutch--table-entry-annotation entry duplicate-counts)))
+                (affixate (cands)
+                  (clutch--table-entry-affixation cands entry-map duplicate-counts))
+                (complete (str pred action)
+                  (if (eq action 'metadata)
+                      `(metadata
+                        (category . clutch-table)
+                        (annotation-function . ,#'annotation)
+                        (affixation-function . ,#'affixate)
+                        (display-sort-function . identity)
+                        (cycle-sort-function . identity))
+                    (complete-with-action action (candidate-list) str pred))))
+      (let ((choice
+             (completing-read
+              prompt
+              #'complete
+              nil t)))
+        (or (plist-get (gethash choice entry-map) :name)
+            choice)))))
+
 (defun clutch-describe-table (table)
   "Show the DDL of TABLE using SHOW CREATE TABLE."
   (interactive
@@ -4375,15 +4592,13 @@ can offer table-specific actions on the completion candidates."
 
 (defun clutch-browse-table (table)
   "Insert SELECT * FROM TABLE at end of the current console buffer.
-Prompts for TABLE via `completing-read' using schema cache table names."
+Prompts for a browseable database object via `completing-read'."
   (interactive
-   (list (let* ((schema (clutch--schema-for-connection))
-                (tables (or (and schema (hash-table-keys schema))
-                            (progn (clutch--ensure-connection)
-                                   (clutch-db-list-tables clutch-connection)))))
-           (when schema
+   (list (progn
+           (clutch--ensure-connection)
+           (when (clutch--schema-for-connection)
              (clutch--warn-schema-cache-state))
-           (clutch--read-table-name "Browse table: " tables))))
+           (clutch--browse-table-entry-reader clutch-connection "Browse object: "))))
   (clutch--ensure-connection)
   (let ((sql (format "SELECT * FROM %s;"
                      (clutch-db-escape-identifier clutch-connection table))))
@@ -4424,15 +4639,12 @@ Key bindings:
   \\[clutch-connect]	Connect to server
   \\[clutch-list-tables]	List tables
   \\[clutch-describe-table-at-point]	Describe table at point
-  \\[clutch-browse-table]	Browse table data
+  \\[clutch-browse-table]	Browse object
   \\[clutch-preview-execution-sql]	Preview execution"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
   (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
   (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
-  (add-hook 'completion-at-point-functions
-            #'clutch-completion-at-point nil t)
-  (add-hook 'completion-at-point-functions
-            #'clutch-sql-keyword-completion-at-point nil t)
+  (clutch--install-completion-capfs)
   (add-hook 'eldoc-documentation-functions
             #'clutch--eldoc-function nil t)
   (clutch--update-mode-line))
@@ -4777,9 +4989,13 @@ defaults to 0.  Returns nil if not found."
   (let ((trimmed (string-trim-right
                   (replace-regexp-in-string ";\\s-*\\'" "" sql))))
     (pcase op
-      ('where (format "SELECT * FROM (%s) AS _clutch_filter WHERE %s" trimmed arg))
-      ('count (format "SELECT COUNT(*) FROM (%s) AS _clutch_count"
-                      (clutch--sql-strip-top-level-tail trimmed)))
+      ('where (format "SELECT * FROM (%s) %s WHERE %s"
+                      trimmed
+                      (clutch--sql-derived-table-alias "_clutch_filter")
+                      arg))
+      ('count (format "SELECT COUNT(*) FROM (%s) %s"
+                      (clutch--sql-strip-top-level-tail trimmed)
+                      (clutch--sql-derived-table-alias "_clutch_count")))
       (_ (error "Unsupported rewrite op: %s" op)))))
 
 (defun clutch--sql-rewrite (sql op &optional arg)
@@ -4790,11 +5006,14 @@ fallback path; AST-based rewrite can replace this later."
       (let ((normalized (clutch--sql-normalize-for-rewrite sql)))
         (pcase op
           ('where
-           (format "SELECT * FROM (%s) AS _clutch_filter WHERE %s"
-                   normalized arg))
+           (format "SELECT * FROM (%s) %s WHERE %s"
+                   normalized
+                   (clutch--sql-derived-table-alias "_clutch_filter")
+                   arg))
           ('count
-           (format "SELECT COUNT(*) FROM (%s) AS _clutch_count"
-                   (clutch--sql-strip-top-level-tail normalized)))
+           (format "SELECT COUNT(*) FROM (%s) %s"
+                   (clutch--sql-strip-top-level-tail normalized)
+                   (clutch--sql-derived-table-alias "_clutch_count")))
           (_ (error "Unsupported rewrite op: %s" op))))
     (error
      (clutch--sql-rewrite-fallback sql op arg))))
@@ -4804,7 +5023,9 @@ fallback path; AST-based rewrite can replace this later."
 Uses the rewrite layer so complex SQL is handled via derived-table count."
   (let ((normalized (clutch--sql-normalize-for-rewrite sql)))
     (if (clutch--sql-has-page-tail-p normalized)
-        (format "SELECT COUNT(*) FROM (%s) AS _clutch_count" normalized)
+        (format "SELECT COUNT(*) FROM (%s) %s"
+                normalized
+                (clutch--sql-derived-table-alias "_clutch_count"))
       (clutch--sql-rewrite normalized 'count))))
 
 (defun clutch-result--effective-query ()
@@ -7961,10 +8182,7 @@ Selects JSON, XML, or binary string view based on column type and content."
   \\[clutch-describe-table-at-point]	Describe table at point"
   (setq comint-prompt-regexp "^db> \\|^    -> ")
   (setq comint-input-sender #'clutch-repl--input-sender)
-  (add-hook 'completion-at-point-functions
-            #'clutch-completion-at-point nil t)
-  (add-hook 'completion-at-point-functions
-            #'clutch-sql-keyword-completion-at-point nil t))
+  (clutch--install-completion-capfs))
 
 (defun clutch-repl--input-sender (_proc input)
   "Process INPUT from comint.
@@ -8077,7 +8295,7 @@ Accumulates input until a semicolon is found, then executes."
    ["Schema"
     ("t" "List tables"      clutch-list-tables)
     ("D" "Describe table"   clutch-describe-table-at-point)
-    ("j" "Browse table"     clutch-browse-table)
+    ("j" "Browse object"    clutch-browse-table)
     ("s" "Refresh schema"   clutch-refresh-schema)]])
 
 (transient-define-prefix clutch-result-dispatch ()

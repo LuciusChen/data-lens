@@ -458,7 +458,7 @@ Connection profile plist keys:
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
 | `clutch-jdbc-agent-dir` | `~/.emacs.d/clutch-jdbc/` | directory | Directory for agent jar and `drivers/` |
-| `clutch-jdbc-agent-version` | `"0.1.5"` | string | Agent version to download |
+| `clutch-jdbc-agent-version` | `"0.1.10"` | string | Agent version to download |
 | `clutch-jdbc-agent-sha256` | (hash string) | string or nil | Expected SHA-256 of agent jar; nil to disable |
 | `clutch-jdbc-agent-java-executable` | `"java"` | string | Java executable path |
 | `clutch-jdbc-agent-jvm-args` | `'("-Xss512k")` | list of strings | Extra JVM arguments |
@@ -827,7 +827,7 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | `execute` | Execute SQL, returns `cursorId` for SELECT |
 | `fetch` | Fetch next batch from cursor, returns `rows`, `columns`, `done` |
 | `close-cursor` | Explicitly close a cursor |
-| `get-tables` | List tables via `DatabaseMetaData` |
+| `get-tables` | List schema/browser tables; Oracle uses direct SQL over `user_*`, `user_synonyms`, and accessible `all_*` views |
 | `get-columns` | List columns for table |
 | `get-primary-keys` | List primary keys |
 | `get-foreign-keys` | List foreign keys |

@@ -58,13 +58,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.1.9"
+(defcustom clutch-jdbc-agent-version "0.1.10"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "ba384b758d4929f5b728994de5e9dca18f8c6a4bf57eb0266308d342d952ee93"
+  "aa9075f0ba2682cc3b588d51b6ef85967fc1a5b8932f813bdd5385c64bd2624e"
   "Expected SHA-256 for the bundled clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -603,6 +603,13 @@ Otherwise fetches remaining cursor pages via `clutch-jdbc--fetch-all'."
         first-rows
       (nconc first-rows (clutch-jdbc--fetch-all conn cursor-id)))))
 
+(defun clutch-jdbc--table-entry-from-row (row)
+  "Convert a get-tables ROW into a table entry plist."
+  (list :name (nth 0 row)
+        :type (nth 1 row)
+        :schema (nth 2 row)
+        :source-schema (or (nth 3 row) (nth 2 row))))
+
 (defun clutch-jdbc--type-category (jdbc-type-name)
   "Map a JDBC type name string to a clutch-db type-category symbol."
   (let ((t-upper (upcase (or jdbc-type-name ""))))
@@ -793,13 +800,18 @@ Oracle uses the username as schema (uppercased).  Other backends return nil."
   "Return table names for JDBC CONN using DatabaseMetaData.
 For Oracle, defaults the schema filter to the connected username to avoid
 returning tables from SYS/SYSTEM and other visible schemas."
+  (mapcar (lambda (entry) (plist-get entry :name))
+          (clutch-db-list-table-entries conn)))
+
+(cl-defmethod clutch-db-list-table-entries ((conn clutch-jdbc-conn))
+  "Return table entry plists for JDBC CONN."
   (let* ((schema  (clutch-jdbc--conn-schema conn))
          (result  (clutch-jdbc--rpc
                    "get-tables"
                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                      ,@(when schema `((schema . ,schema))))))
          (all-rows (clutch-jdbc--collect-table-rows conn result)))
-    (mapcar #'car all-rows)))
+    (mapcar #'clutch-jdbc--table-entry-from-row all-rows)))
 
 (cl-defmethod clutch-db-refresh-schema-async ((conn clutch-jdbc-conn) callback
                                               &optional errback)
@@ -856,9 +868,20 @@ For Oracle: uses the schema cache when available (no RPC); falls back to a
                     (eq (plist-get (clutch--schema-status-entry conn) :state) 'ready)))
               (schema (and schema-ready
                            (gethash (clutch--connection-key conn) clutch--schema-cache))))
-        (seq-filter (lambda (name)
-                      (string-prefix-p (upcase prefix) (upcase name)))
-                    (hash-table-keys schema))
+        (let ((cached
+               (seq-filter (lambda (name)
+                             (string-prefix-p (upcase prefix) (upcase name)))
+                           (hash-table-keys schema))))
+          (if cached
+              cached
+            (let* ((s      (clutch-jdbc--conn-schema conn))
+                   (result (clutch-jdbc--rpc
+                            "search-tables"
+                            `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                              (prefix  . ,prefix)
+                              ,@(when s `((schema . ,s)))))))
+              (mapcar (lambda (tbl) (plist-get tbl :name))
+                      (plist-get result :tables)))))
       (let* ((s      (clutch-jdbc--conn-schema conn))
              (result (clutch-jdbc--rpc
                       "search-tables"
@@ -867,6 +890,16 @@ For Oracle: uses the schema cache when available (no RPC); falls back to a
                         ,@(when s `((schema . ,s)))))))
         (mapcar (lambda (tbl) (plist-get tbl :name))
                 (plist-get result :tables))))))
+
+(cl-defmethod clutch-db-search-table-entries ((conn clutch-jdbc-conn) prefix)
+  "Return table entry plists matching PREFIX for JDBC CONN."
+  (let* ((schema (clutch-jdbc--conn-schema conn))
+         (result (clutch-jdbc--rpc
+                  "search-tables"
+                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                    (prefix  . ,prefix)
+                    ,@(when schema `((schema . ,schema)))))))
+    (plist-get result :tables)))
 
 (cl-defmethod clutch-db-complete-columns ((conn clutch-jdbc-conn) table prefix)
   "Return column name candidates for TABLE matching PREFIX on JDBC CONN."

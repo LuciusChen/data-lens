@@ -329,9 +329,9 @@
                        captured-timeout timeout-seconds)
                  (should-not errback)
                  (funcall callback '(:cursor-id nil
-                                    :columns ("name" "type" "schema")
-                                    :rows (("USERS" "TABLE" "SCOTT")
-                                           ("ORDERS" "TABLE" "SCOTT"))
+                                    :columns ("name" "type" "schema" "source_schema")
+                                    :rows (("USERS" "TABLE" "SCOTT" "SCOTT")
+                                           ("ORDERS" "TABLE" "SCOTT" "SCOTT"))
                                     :done t))
                  42)))
       (should (clutch-db-refresh-schema-async
@@ -343,6 +343,43 @@
       (should (equal (alist-get 'schema captured-params) "SCOTT"))
       (should (= captured-timeout clutch-jdbc-rpc-timeout-seconds))
       (should (equal callback-result '("USERS" "ORDERS"))))))
+
+(ert-deftest clutch-db-test-jdbc-list-tables-oracle-uses-get-tables ()
+  "Oracle list-tables should use get-tables so browse shares schema-refresh data."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                     :params '(:driver oracle :user "app")))
+        captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout-seconds)
+                 (setq captured-op op
+                       captured-params params)
+                 '(:cursor-id nil
+                   :columns ("name" "type" "schema" "source_schema")
+                   :rows (("CUSTOMERS" "SYNONYM" "DATA_OWNER" "APP")
+                          ("ORDERS" "SYNONYM" "DATA_OWNER" "APP")
+                          ("PAYMENTS" "TABLE" "DATA_OWNER" "DATA_OWNER"))
+                   :done t))))
+      (let ((tables (clutch-db-list-tables conn)))
+        (should (equal captured-op "get-tables"))
+        (should (= (alist-get 'conn-id captured-params) 9))
+        (should (equal (alist-get 'schema captured-params) "APP"))
+        (should (equal tables '("CUSTOMERS" "ORDERS" "PAYMENTS")))))))
+
+(ert-deftest clutch-db-test-jdbc-list-table-entries-preserves-source-schema ()
+  "JDBC table entry listing should preserve schema/source metadata."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                     :params '(:driver oracle :user "app"))))
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (&rest _args)
+                 '(:cursor-id nil
+                   :columns ("name" "type" "schema" "source_schema")
+                   :rows (("ORDERS" "SYNONYM" "DATA_OWNER" "APP")
+                          ("USER_TABLES" "PUBLIC SYNONYM" "SYS" "PUBLIC"))
+                   :done t))))
+      (let ((entries (clutch-db-list-table-entries conn)))
+        (should (equal entries
+                       '((:name "ORDERS" :type "SYNONYM" :schema "DATA_OWNER" :source-schema "APP")
+                         (:name "USER_TABLES" :type "PUBLIC SYNONYM" :schema "SYS" :source-schema "PUBLIC"))))))))
 
 (ert-deftest clutch-db-test-jdbc-refresh-schema-async-uses-connection-rpc-timeout ()
   "Async JDBC schema refresh should respect per-connection rpc timeout."
@@ -417,6 +454,28 @@
         (should-not rpc-called)
         (should (equal (sort (copy-sequence result) #'string<)
                        '("USERS" "USER_ROLES")))))))
+
+(ert-deftest clutch-db-test-jdbc-complete-tables-ready-empty-cache-fallback-rpc ()
+  "Oracle completion should fall back to RPC when the ready cache has no matches."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 5
+                                      :params '(:driver oracle :user "scott")))
+         (clutch--schema-cache (make-hash-table :test 'equal))
+         (schema (make-hash-table :test 'equal))
+         captured-op)
+    (puthash "AUDIT_LOG" nil schema)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "test-key"))
+              ((symbol-function 'clutch--schema-status-entry)
+               (lambda (_conn) '(:state ready)))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (setq captured-op op)
+                 (should (equal (alist-get 'prefix params) "OR"))
+                 '(:tables ((:name "ORDERS"))))))
+      (puthash "test-key" schema clutch--schema-cache)
+      (let ((result (clutch-db-complete-tables conn "OR")))
+        (should (equal captured-op "search-tables"))
+        (should (equal result '("ORDERS")))))))
 
 (ert-deftest clutch-db-test-jdbc-complete-tables-stale-cache-fallback-rpc ()
   "Oracle completion should ignore stale cache entries and fall back to RPC."

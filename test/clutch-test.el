@@ -2650,6 +2650,21 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (should (string-prefix-p "SELECT COUNT(*) FROM (SELECT id FROM t)" result))
     (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
 
+(ert-deftest clutch-test-build-count-sql-omits-as-for-oracle-derived-table ()
+  "Oracle count rewrite should not use AS before a derived-table alias."
+  (cl-letf (((symbol-function 'clutch--connection-oracle-jdbc-p)
+             (lambda (&rest _) t)))
+    (should (equal (clutch--build-count-sql
+                    "SELECT id FROM t FETCH FIRST 50 ROWS ONLY")
+                   "SELECT COUNT(*) FROM (SELECT id FROM t FETCH FIRST 50 ROWS ONLY) clutch_count"))))
+
+(ert-deftest clutch-test-apply-where-omits-as-for-oracle-derived-table ()
+  "Oracle WHERE rewrite should not use AS before a derived-table alias."
+  (cl-letf (((symbol-function 'clutch--connection-oracle-jdbc-p)
+             (lambda (&rest _) t)))
+    (should (equal (clutch--apply-where "SELECT * FROM t" "id = 1")
+                   "SELECT * FROM (SELECT * FROM t) clutch_filter WHERE id = 1"))))
+
 (ert-deftest clutch-test-build-paged-sql-wraps-limited-query-result-set ()
   "Paging should wrap queries with top-level LIMIT so paging stays correct."
   (let ((clutch-connection 'fake-conn)
@@ -3331,6 +3346,43 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           (should (member "ZJ_NCBUSINESSDATA" candidates))
           (should (member "ZJ_SYS_PARA" candidates)))))))
 
+(ert-deftest clutch-test-install-completion-capfs-keeps-identifier-before-keyword ()
+  "Identifier completion should precede keyword completion in buffer-local CAPFs."
+  (with-temp-buffer
+    (setq-local completion-at-point-functions nil)
+    (clutch--install-completion-capfs)
+    (should (equal completion-at-point-functions
+                   '(clutch-completion-at-point
+                     clutch-sql-keyword-completion-at-point)))))
+
+(ert-deftest clutch-test-completion-at-point-prefers-table-candidates-in-from-context ()
+  "FROM/JOIN table completion should not be shadowed by SQL keyword completion."
+  (with-temp-buffer
+    (insert "SELECT * FROM OR")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake)
+          captured)
+      (puthash "ORDERS" nil schema)
+      (setq-local completion-at-point-functions nil)
+      (clutch--install-completion-capfs)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) nil))
+                (completion-in-region-function
+                 (lambda (start end collection &optional predicate)
+                   (setq captured
+                         (list :input (buffer-substring-no-properties start end)
+                               :candidates (all-completions
+                                            (buffer-substring-no-properties start end)
+                                            collection predicate)))
+                   t)))
+        (should (completion-at-point))
+        (should (equal (plist-get captured :input) "OR"))
+        (should (equal (plist-get captured :candidates) '("ORDERS")))))))
+
 (ert-deftest clutch-test-completion-at-point-uses-direct-column-candidates-when-sync-loads-disabled ()
   "Direct backend column completion should avoid synchronous ensure-columns."
   (with-temp-buffer
@@ -3748,6 +3800,95 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (should (string-suffix-p
              "\n\nSELECT * FROM \"order-items\";"
              (buffer-string)))))
+
+(ert-deftest clutch-test-browse-table-entry-reader-annotates-source-groups ()
+  "Browse table reader should annotate source/type and merge dynamic Oracle hits."
+  (let (captured)
+    (cl-letf (((symbol-function 'clutch-db-list-table-entries)
+               (lambda (_conn)
+                 '((:name "ORDERS" :type "SYNONYM" :schema "DATA_OWNER" :source-schema "APP")
+                   (:name "PAYMENTS" :type "TABLE" :schema "DATA_OWNER" :source-schema "DATA_OWNER"))))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (_conn prefix)
+                 (if (string-empty-p prefix)
+                     '((:name "USER_TABLES" :type "PUBLIC SYNONYM" :schema "SYS" :source-schema "PUBLIC"))
+                   nil)))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _args)
+                 (let* ((metadata (funcall collection "" nil 'metadata))
+                        (meta-alist (cdr metadata))
+                        (annotation-fn (alist-get 'annotation-function meta-alist))
+                        (affixation-fn (alist-get 'affixation-function meta-alist))
+                        (base (all-completions "" collection nil))
+                        (dynamic (all-completions "USER_" collection nil))
+                        (user-affix (car (funcall affixation-fn dynamic))))
+                   (setq captured
+                         (list :base base
+                               :dynamic dynamic
+                               :orders-ann (funcall annotation-fn "ORDERS")
+                               :user-ann (funcall annotation-fn "USER_TABLES")
+                               :user-prefix (nth 1 user-affix)
+                               :user-suffix (nth 2 user-affix)))
+                   "USER_TABLES"))))
+      (should (equal (clutch--browse-table-entry-reader 'fake-conn "Browse table: ")
+                     "USER_TABLES"))
+      (should (equal (plist-get captured :base) '("ORDERS" "PAYMENTS" "USER_TABLES")))
+      (should (equal (plist-get captured :dynamic) '("USER_TABLES")))
+      (should (equal (plist-get captured :orders-ann) "  APP/synonym"))
+      (should (equal (plist-get captured :user-ann) "  PUBLIC/synonym"))
+      (should (equal (substring-no-properties (plist-get captured :user-prefix))
+                     ""))
+      (should (equal (substring-no-properties (plist-get captured :user-suffix))
+                     "  PUBLIC/synonym")))))
+
+(ert-deftest clutch-test-browse-table-entry-reader-keeps-duplicate-object-names ()
+  "Browse table reader should keep duplicate names from different sources."
+  (let (captured)
+    (cl-letf (((symbol-function 'clutch-db-list-table-entries)
+               (lambda (_conn)
+                 '((:name "ORDERS" :type "SYNONYM" :schema "DATA_OWNER" :source-schema "APP")
+                   (:name "ORDERS" :type "TABLE" :schema "DATA_OWNER" :source-schema "DATA_OWNER"))))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (_conn _prefix) nil))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _args)
+                 (let ((base (funcall collection "" nil t)))
+                   (setq captured base)
+                   (car base)))))
+      (should (equal (clutch--browse-table-entry-reader 'fake-conn "Browse object: ")
+                     "ORDERS"))
+      (should (= (length captured) 2))
+      (should (cl-every (lambda (cand) (string-prefix-p "ORDERS" cand)) captured))
+      (should-not (equal (car captured) (cadr captured))))))
+
+(ert-deftest clutch-test-table-entry-annotation-shows-detail-only-for-duplicates ()
+  "Target owner detail should only appear when duplicate names need disambiguation."
+  (let ((duplicate-counts (make-hash-table :test 'equal)))
+    (puthash "ORDERS" 1 duplicate-counts)
+    (should (equal (substring-no-properties
+                    (clutch--table-entry-annotation
+                     '(:name "ORDERS" :type "SYNONYM"
+                       :schema "DATA_OWNER" :source-schema "APP")
+                     duplicate-counts))
+                   "  APP/synonym"))
+    (puthash "ORDERS" 2 duplicate-counts)
+    (should (equal (substring-no-properties
+                    (clutch--table-entry-annotation
+                     '(:name "ORDERS" :type "SYNONYM"
+                       :schema "DATA_OWNER" :source-schema "APP")
+                     duplicate-counts))
+                   "  APP/synonym  DATA_OWNER"))))
+
+(ert-deftest clutch-test-table-entry-label-uses-lowercase-type ()
+  "Table-entry labels should keep schema uppercase and type lowercase."
+  (should (equal (clutch--table-entry-label
+                  '(:name "USER_TABLES" :type "PUBLIC SYNONYM"
+                    :schema "SYS" :source-schema "PUBLIC"))
+                 "PUBLIC/synonym"))
+  (should (equal (clutch--table-entry-label
+                  '(:name "MONTHLY_REPORT" :type "VIEW"
+                    :schema "DATA_OWNER" :source-schema "DATA_OWNER"))
+                 "DATA_OWNER/view")))
 
 ;;;; Live integration tests
 

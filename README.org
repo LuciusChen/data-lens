@@ -271,7 +271,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-b=   | Execute entire buffer      |
 | =C-c C-e=   | Connect / reconnect        |
 | =C-c C-t=   | List all tables            |
-| =C-c C-j=   | Browse table data          |
+| =C-c C-j=   | Browse object              |
 | =C-c C-d=   | DESCRIBE table at point (errors if not on a table name) |
 | =C-c C-p=   | Preview execution (dry-run) |
 | =C-c C-s=   | Refresh schema for current connection |
@@ -527,13 +527,22 @@ Suggested global bindings:
 
 #+begin_src
 C-c C-t                     ;; List all tables
-C-c C-j                     ;; Browse table data (select table, insert SELECT into console)
+C-c C-j                     ;; Browse object (select object, insert SELECT into console)
 TAB                          ;; Expand/collapse table columns (type, PK, FK)
 E / C                        ;; Expand all / Collapse all
 RET                          ;; Show DDL for table at point
-v                            ;; Browse table data at point (insert SELECT into console)
+v                            ;; Browse object at point (insert SELECT into console)
 g                            ;; Refresh
 #+end_src
+
+For JDBC/Oracle connections, =C-c C-j= shows annotated object candidates in the
+minibuffer.  The object name remains the primary candidate text; source/type is
+shown as a gray annotation on the right (for example =PUBLIC/synonym= or
+=APP/synonym=).  When duplicate names need disambiguation, the target owner is
+appended as extra detail.
+
+If you use [[https://github.com/oantolin/orderless][orderless]], annotation search works naturally here:
+=&public=, =&synonym=, =&view=, etc.
 
 ** Embark Integration (optional)
 
@@ -542,7 +551,7 @@ names can be acted on with a consistent action map:
 
 | Key | Action |
 |-----+--------|
-| =b= | Browse table (=SELECT *=) |
+| =b= | Browse object (=SELECT *=) |
 | =d= | Describe table (show DDL) |
 | =w= | Copy table name to kill ring |
 
@@ -552,7 +561,7 @@ Table names are recognised as targets in three contexts:
 - *=clutch-mode= (SQL buffer)* — symbol at point, validated against the schema cache
 - *=completing-read= minibuffer* — current candidate in =clutch-browse-table= or =clutch-describe-table=
 
-Example: invoke =C-c C-j= (browse table), navigate to a candidate, then press
+Example: invoke =C-c C-j= (browse object), navigate to a candidate, then press
 the Embark key and =d= to describe it instead — without cancelling and re-running.
 
 ** JDBC Backend (clutch-db-jdbc.el)
@@ -698,10 +707,23 @@ backends.  See [[*Password Management]] for details.
   names and column names are resolved through Oracle-specific prefix lookups, so
   connect stays non-blocking and completion does not have to enumerate the whole
   schema up front.
+- For low-privilege Oracle accounts, table prompts / browse / schema refresh use
+  the same business-object view: current-schema tables/views, =user_synonyms=,
+  and accessible =all_tables= / =all_views= rows outside the current schema.
+  This covers common "login user is empty, real objects live under another
+  owner" setups.
+- Dictionary objects exposed only through =PUBLIC SYNONYM= (for example
+  =USER_TABLES=) participate in completion, but they are not added to the schema
+  cache / schema browser snapshot.  That keeps Oracle system objects from
+  flooding =C-c C-j= and the schema browser for ordinary query-console use.
+- The Oracle search path filters common system owners in SQL for both
+  =get-tables= and =search-tables=, while still keeping =PUBLIC SYNONYM=
+  dictionary objects available to completion.
 - After connect (and after schema-affecting DDL), Oracle/JDBC also starts a
   background full table refresh.  Completion stays responsive because it keeps
-  using the prefix fast path, while the console's =schema~= state is eventually
-  backfilled to =schema Nt= once the cache snapshot finishes loading.
+  using the prefix fast path, while =C-c C-j= / the schema browser / the
+  console's =schema~= state are backfilled from the same low-privilege-aware
+  table snapshot once loading finishes.
 - Pagination uses =ROWNUM= subquery, compatible with all Oracle versions (9i+).
 - CJK character sets (e.g. ZHS16GBK) require =orai18n.jar= in addition to the
   active Oracle JDBC jar (=ojdbc8.jar= or =ojdbc11.jar=).
@@ -748,7 +770,7 @@ Pass arbitrary JDBC connection properties via =:props=:
 
 Requires the =transient= package (built-in since Emacs 28.1).
 
-Press =C-c ?= to open the transient menu.  The *Schema* group contains =List tables=, =Describe table=, and =Browse table=.
+Press =C-c ?= to open the transient menu.  The *Schema* group contains =List tables=, =Describe table=, and =Browse object=.
 
 In the result buffer, the *Edit* group in the transient menu provides the unified staged-commit workflow: =i= stages an insert, =d= stages a deletion, =C-c C-k= discards a pending change at point, and =C-c C-c= commits all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
 
