@@ -552,6 +552,7 @@ Connection profile plist keys:
 - **Eager (synchronous)**: MySQL, PostgreSQL, SQLite — blocks until schema loaded on connect
 - **Async (background)**: JDBC — background refresh with ticket-based stale-response guard and timeout/failure exit
   - Buffer status line shows: `[schema...]` (refreshing), `[schema~]` (stale), `[schema!]` (failed), `[schema Nt]` (ready)
+  - `Nt` is the size of the current schema-cache snapshot; `schema 0t` means refresh succeeded but cached zero browseable objects
 
 ### Cache Invalidation
 
