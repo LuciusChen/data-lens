@@ -728,8 +728,8 @@ Field names are read-only (`font-lock-face clutch-insert-field-name-face`, `read
 
 | Argument | Description |
 |----------|-------------|
-| `:connection NAME` | Use named profile from `clutch-connection-alist` |
-| `:backend SYM` | Backend: `mysql`, `pg`, `postgresql`, `sqlite`, `oracle`, `sqlserver`, `snowflake`, `redshift` |
+| `:connection NAME` | Use named profile from `clutch-connection-alist`; this supplies the backend when using a saved connection |
+| `:backend SYM` | Backend: `mysql`, `pg`, `postgresql`, `sqlite`, `oracle`, `sqlserver`, `snowflake`, `redshift`; required for inline params when `:connection` is absent |
 | `:host HOST` | Database host (inline, without `:connection`) |
 | `:port PORT` | Database port |
 | `:user USER` | Database user |

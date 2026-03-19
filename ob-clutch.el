@@ -167,20 +167,23 @@ Return CONN-PARAMS unchanged otherwise."
 (defun ob-clutch--resolve-connection (params default-backend)
   "Return (BACKEND . CONN-PARAMS) from Babel PARAMS.
 DEFAULT-BACKEND is used by language-specific executors."
-  (if-let* ((conn-name (cdr (assq :connection params))))
+    (if-let* ((conn-name (cdr (assq :connection params))))
       (let* ((entry (or (assoc conn-name clutch-connection-alist)
                         (user-error "Unknown connection: %s" conn-name)))
              (plist (copy-sequence (cdr entry)))
              (plist (ob-clutch--inject-entry-name plist conn-name))
              (backend (ob-clutch--normalize-backend
-                       (or (plist-get plist :backend) default-backend)))
+                       (or (plist-get plist :backend) default-backend 'mysql)))
              (conn-params (ob-clutch--plist-without-meta plist)))
         (cons backend
               (ob-clutch--guard-jdbc-pass-entry
                backend plist
                (ob-clutch--maybe-inject-password backend conn-params plist))))
-    (let* ((backend (ob-clutch--normalize-backend
-                     (or (cdr (assq :backend params)) default-backend)))
+    (let* ((backend-sym (or (cdr (assq :backend params)) default-backend))
+           (backend (or (and backend-sym
+                             (ob-clutch--normalize-backend backend-sym))
+                        (user-error
+                         "Missing :backend for clutch block (or use :connection to reference a saved connection)")))
            (conn-params (ob-clutch--inline-params params backend))
            (source-params (append (ob-clutch--plist-without-meta params)
                                   (when-let* ((entry (cdr (assq :pass-entry params))))
@@ -233,8 +236,7 @@ DEFAULT-BACKEND is used by language-specific executors."
 (defun org-babel-execute:clutch (body params)
   "Execute a generic clutch BODY with Babel PARAMS."
   (ob-clutch--execute body params
-                      (or (cdr (assq :backend params))
-                          (user-error "Missing :backend for clutch block"))))
+                      (cdr (assq :backend params))))
 
 (defun org-babel-execute:mysql (body params)
   "Execute a MySQL BODY with Babel PARAMS."

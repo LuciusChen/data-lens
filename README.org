@@ -805,6 +805,10 @@ Using a saved connection (works for any backend including JDBC):
 : SELECT * FROM employees WHERE ROWNUM <= 10;
 : #+end_src
 
+The generic =clutch= block does not need an inline =:backend= when =:connection=
+is present; the backend is taken from the saved connection entry.  An explicit
+=:backend= is only required for inline connection parameters.
+
 Or with inline connection parameters:
 
 : #+begin_src mysql :host 127.0.0.1 :port 3306 :user root :password test :database mydb

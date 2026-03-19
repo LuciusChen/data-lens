@@ -39,6 +39,15 @@
         (should (equal (plist-get conn-params :password) "secret"))
         (should (equal (plist-get resolved :pass-entry) "dev"))))))
 
+(ert-deftest ob-clutch-test-resolve-connection-saved-entry-defaults-to-mysql ()
+  "Saved connections without :backend should follow clutch's mysql default."
+  (let ((clutch-connection-alist
+         '(("dev" . (:host "127.0.0.1" :port 3306 :user "root")))))
+    (pcase-let ((`(,backend . ,conn-params)
+                 (ob-clutch--resolve-connection '((:connection . "dev")) nil)))
+      (should (eq backend 'mysql))
+      (should (equal (plist-get conn-params :host) "127.0.0.1")))))
+
 (ert-deftest ob-clutch-test-resolve-connection-inline-default-port ()
   "Test inline mysql connection defaults to port 3306."
   (pcase-let ((`(,backend . ,conn-params)
@@ -121,6 +130,65 @@
              (c2 (ob-clutch--connect params 'mysql)))
         (should (equal c1 c2))
         (should (= created 1))))))
+
+(ert-deftest ob-clutch-test-generic-execute-accepts-connection-without-backend ()
+  "Generic clutch Babel blocks should accept :connection without inline :backend."
+  (let ((clutch-connection-alist
+         '(("demo" . (:backend mysql :host "127.0.0.1" :port 3306
+                      :user "root" :database "demo"))))
+        connected
+        queried)
+    (cl-letf (((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (backend params)
+                 (setq connected (list backend params))
+                 (should (eq backend 'mysql))
+                 (should (equal (plist-get params :database) "demo"))
+                 'fake-conn))
+              ((symbol-function 'org-babel-expand-body:generic)
+               (lambda (body _params) body))
+              ((symbol-function 'clutch-db-query)
+               (lambda (conn sql)
+                 (setq queried (list conn sql))
+                 (make-clutch-db-result :columns nil :rows nil :affected-rows 1))))
+      (should (equal (org-babel-execute:clutch
+                      "select 1"
+                      '((:connection . "demo")))
+                     "Affected rows: 1"))
+      (should (equal (car connected) 'mysql))
+      (should (equal (plist-get (cadr connected) :database) "demo"))
+      (should (equal queried '(fake-conn "select 1"))))))
+
+(ert-deftest ob-clutch-test-generic-execute-accepts-saved-connection-without-entry-backend ()
+  "Generic clutch Babel blocks should default saved connections without :backend to mysql."
+  (let ((clutch-connection-alist
+         '(("demo" . (:host "127.0.0.1" :port 3306
+                      :user "root" :database "demo"))))
+        connected)
+    (cl-letf (((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (backend params)
+                 (setq connected (list backend params))
+                 'fake-conn))
+              ((symbol-function 'org-babel-expand-body:generic)
+               (lambda (body _params) body))
+              ((symbol-function 'clutch-db-query)
+               (lambda (_conn _sql)
+                 (make-clutch-db-result :columns nil :rows nil :affected-rows 1))))
+      (should (equal (org-babel-execute:clutch
+                      "select 1"
+                      '((:connection . "demo")))
+                     "Affected rows: 1"))
+      (should (equal (car connected) 'mysql))
+      (should (equal (plist-get (cadr connected) :database) "demo")))))
+
+(ert-deftest ob-clutch-test-generic-execute-errors-when-backend-and-connection-missing ()
+  "Generic clutch Babel blocks should error clearly when both backend and connection are absent."
+  (should-error
+   (org-babel-execute:clutch "select 1" nil)
+   :type 'user-error))
 
 (provide 'ob-clutch-test)
 ;;; ob-clutch-test.el ends here
