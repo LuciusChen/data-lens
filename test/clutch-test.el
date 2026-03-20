@@ -1558,6 +1558,47 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should (eq (plist-get (gethash "fake" clutch--schema-status-cache) :state)
                   'ready)))))
 
+(ert-deftest clutch-test-install-schema-cache-batches-large-refreshes ()
+  "Large schema installs should be split across idle slices."
+  (let ((clutch--schema-cache (make-hash-table :test 'equal))
+        (clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--column-details-status-cache (make-hash-table :test 'equal))
+        (clutch--column-details-queue-cache (make-hash-table :test 'equal))
+        (clutch--column-details-active-cache (make-hash-table :test 'equal))
+        (clutch--columns-status-cache (make-hash-table :test 'equal))
+        (clutch--table-comment-cache (make-hash-table :test 'equal))
+        (clutch--help-doc-cache (make-hash-table :test 'equal))
+        (clutch--object-cache (make-hash-table :test 'equal))
+        (clutch--object-warmup-timers (make-hash-table :test 'equal))
+        (clutch--schema-status-cache (make-hash-table :test 'equal))
+        (clutch--schema-refresh-tickets (make-hash-table :test 'equal))
+        (clutch--schema-install-timers (make-hash-table :test 'equal))
+        (clutch-schema-cache-install-batch-size 2)
+        callbacks
+        warmup-called)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "fake"))
+              ((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
+              ((symbol-function 'clutch--schedule-object-warmup)
+               (lambda (_conn) (setq warmup-called t)))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (_secs _repeat fn)
+                 (push fn callbacks)
+                 (intern (format "fake-timer-%s" (length callbacks))))))
+      (puthash "fake" 1 clutch--schema-refresh-tickets)
+      (puthash "fake" '(:state refreshing) clutch--schema-status-cache)
+      (should (clutch--install-schema-cache 'fake-conn '("a" "b" "c") 1))
+      (should-not (gethash "fake" clutch--schema-cache))
+      (should (eq (plist-get (gethash "fake" clutch--schema-status-cache) :state) 'refreshing))
+      (funcall (car (last callbacks)))
+      (should-not (gethash "fake" clutch--schema-cache))
+      (funcall (car callbacks))
+      (should (= (hash-table-count (gethash "fake" clutch--schema-cache)) 3))
+      (should (eq (plist-get (gethash "fake" clutch--schema-status-cache) :state) 'ready))
+      (should warmup-called))))
+
 (ert-deftest clutch-test-schema-affecting-query-p ()
   "DDL-like statements should mark schema stale."
   (should (clutch--schema-affecting-query-p "CREATE TABLE t (id INT)"))
@@ -3052,6 +3093,16 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
         (should-not marked)))))
 
+(ert-deftest clutch-test-executed-sql-overlay-clears-on-boundary-edit ()
+  "Editing at the edge of executed SQL should clear the success overlay."
+  (with-temp-buffer
+    (insert "SELECT 1;")
+    (clutch--mark-executed-sql-region (point-min) (point-max))
+    (should (overlayp clutch--executed-sql-overlay))
+    (goto-char (overlay-start clutch--executed-sql-overlay))
+    (insert "SELECT 0;\n")
+    (should-not (overlayp clutch--executed-sql-overlay))))
+
 (ert-deftest clutch-test-execute-quit-disconnects-and-clears-connection ()
   "Test `clutch--execute' converts quit into recoverable interruption."
   (let ((disconnected nil)
@@ -3288,13 +3339,13 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should-not result))))
 
 (ert-deftest clutch-test-completion-at-point-keeps-short-prefix-table-only ()
-  "Identifier completion should not load columns for a one-char prefix."
+  "Non-keyword short prefixes should not load columns eagerly."
   (with-temp-buffer
-    (insert "u")
+    (insert "x")
     (let ((schema (make-hash-table :test 'equal))
           (clutch-connection 'fake)
           called)
-      (puthash "users" nil schema)
+      (puthash "xaccounts" nil schema)
       (cl-letf (((symbol-function 'clutch--schema-for-connection)
                  (lambda () schema))
                 ((symbol-function 'clutch-db-busy-p)
@@ -3306,7 +3357,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (let* ((capf (clutch-completion-at-point))
                (candidates (nth 2 capf)))
           (should capf)
-          (should (member "users" candidates))
+          (should (member "xaccounts" candidates))
           (should-not called))))))
 
 (ert-deftest clutch-test-completion-at-point-loads-columns-for-small-statement-scope ()
@@ -3391,6 +3442,24 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should (completion-at-point))
         (should (equal (plist-get captured :input) "OR"))
         (should (equal (plist-get captured :candidates) '("ORDERS")))))))
+
+(ert-deftest clutch-test-completion-at-point-defers-to-keywords-for-keyword-prefixes ()
+  "Statement-start keyword prefixes should not be shadowed by schema tables."
+  (with-temp-buffer
+    (insert "sele")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake))
+      (puthash "SELECT_LOG" nil schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil)))
+        (should-not (clutch-completion-at-point))
+        (let* ((capf (clutch-sql-keyword-completion-at-point))
+               (candidates (nth 2 capf)))
+          (should capf)
+          (should (member "SELECT" candidates))
+          (should-not (member "SELECT_LOG" candidates)))))))
 
 (ert-deftest clutch-test-completion-at-point-uses-direct-column-candidates-when-sync-loads-disabled ()
   "Direct backend column completion should avoid synchronous ensure-columns."
@@ -3915,7 +3984,45 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                         :schema "APP" :source-schema "APP")
                        (:name "PROCESS_ORDER" :type "PROCEDURE"
                         :schema "APP" :source-schema "APP"))))
-      (should scheduled))))
+      (when scheduled
+        (should (equal (car scheduled) clutch-object-warmup-idle-delay-seconds))))))
+
+(ert-deftest clutch-test-object-warmup-prefers-async-object-loading-when-available ()
+  "Warmup should use backend async object loading when supported."
+  (let ((clutch--object-cache (make-hash-table :test 'equal))
+        (clutch--object-warmup-timers (make-hash-table :test 'equal))
+        async-call sync-called timer-fn)
+    (cl-letf (((symbol-function 'clutch--object-cache-key)
+               (lambda (_conn) "fake-key"))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--object-cache-loaded-categories)
+               (lambda (_conn) nil))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (_secs _repeat fn)
+                 (setq timer-fn fn)
+                 'fake-timer))
+              ((symbol-function 'clutch-db-list-objects-async)
+               (lambda (_conn category callback &optional _errback)
+                 (setq async-call category)
+                 (funcall callback
+                          '((:name "ORDER_IDX" :type "INDEX"
+                             :schema "APP" :source-schema "APP")))
+                 t))
+              ((symbol-function 'clutch--store-object-cache-type-entries)
+               (lambda (_conn type entries)
+                 (setq async-call (list async-call type entries))))
+              ((symbol-function 'clutch--object-type-entries)
+               (lambda (&rest _args)
+                 (setq sync-called t)
+                 nil)))
+      (clutch--schedule-object-warmup 'fake-conn)
+      (should timer-fn)
+      (funcall timer-fn)
+      (should (equal async-call
+                     '(indexes "INDEX" ((:name "ORDER_IDX" :type "INDEX"
+                                 :schema "APP" :source-schema "APP")))))
+      (should-not sync-called))))
 
 (ert-deftest clutch-test-browseable-object-entries-skip-empty-search-for-oracle-jdbc ()
   "Oracle JDBC browseable entries should not issue an extra empty-prefix search."
@@ -4070,6 +4177,37 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should (equal switched "cjh_test"))
         (should (equal clutch--connection-params '(:backend mysql :database "cjh_test")))
         (should (equal cleared-keys '("current" "user@host:3306/zj_test")))))))
+
+(ert-deftest clutch-test-clear-connection-metadata-caches-cancels-explicit-key-timers ()
+  "Clearing metadata for an explicit key should cancel timers for that key."
+  (let ((clutch--schema-cache (make-hash-table :test 'equal))
+        (clutch--columns-status-cache (make-hash-table :test 'equal))
+        (clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--column-details-status-cache (make-hash-table :test 'equal))
+        (clutch--column-details-queue-cache (make-hash-table :test 'equal))
+        (clutch--column-details-active-cache (make-hash-table :test 'equal))
+        (clutch--table-comment-cache (make-hash-table :test 'equal))
+        (clutch--help-doc-cache (make-hash-table :test 'equal))
+        (clutch--object-cache (make-hash-table :test 'equal))
+        (clutch--schema-status-cache (make-hash-table :test 'equal))
+        (clutch--schema-refresh-tickets (make-hash-table :test 'equal))
+        (clutch--schema-install-timers (make-hash-table :test 'equal))
+        (clutch--object-warmup-timers (make-hash-table :test 'equal))
+        canceled)
+    (puthash "old-key" 'schema-timer clutch--schema-install-timers)
+    (puthash "old-key" 'warmup-timer clutch--object-warmup-timers)
+    (cl-letf (((symbol-function 'cancel-timer)
+               (lambda (timer)
+                 (push timer canceled)))
+              ((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "new-key"))
+              ((symbol-function 'clutch--object-cache-key)
+               (lambda (_conn) "new-key")))
+      (clutch--clear-connection-metadata-caches 'fake-conn "old-key")
+      (should (member 'schema-timer canceled))
+      (should (member 'warmup-timer canceled))
+      (should-not (gethash "old-key" clutch--schema-install-timers))
+      (should-not (gethash "old-key" clutch--object-warmup-timers)))))
 
 (ert-deftest clutch-test-switch-schema-header-line-shows-current-schema ()
   "Connection header line should display a non-default effective schema."

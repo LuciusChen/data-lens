@@ -64,8 +64,8 @@
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "a26eb5ffd9b522f4b693094f2bee976dbdc890f6e62716c731435beb5b1f84cb"
-  "Expected SHA-256 for the bundled clutch-jdbc-agent jar.
+  "982756d66e6b0a1edc33bce9898e5ec727373af79be1a3b613c19addade5f43a"
+  "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
   :group 'clutch-jdbc)
@@ -323,6 +323,48 @@ Return non-nil when RESPONSE was consumed asynchronously."
     (setq clutch-jdbc--response-queue nil)
     (clutch-jdbc--start-agent)))
 
+(defun clutch-jdbc--agent-stderr-buffer ()
+  "Return the JDBC agent stderr buffer, or nil when absent."
+  (get-buffer "*clutch-jdbc-agent-stderr*"))
+
+(defun clutch-jdbc--agent-stderr-string ()
+  "Return the full JDBC agent stderr buffer as a string, or nil when empty."
+  (when-let* ((buf (clutch-jdbc--agent-stderr-buffer))
+              ((buffer-live-p buf)))
+    (with-current-buffer buf
+      (let ((text (string-trim (buffer-string))))
+        (unless (string-empty-p text)
+          text)))))
+
+(defun clutch-jdbc--agent-stderr-tail (&optional max-lines)
+  "Return the last non-empty MAX-LINES of agent stderr as a string.
+Defaults to 8 lines.  Return nil when stderr is empty."
+  (when-let* ((text (clutch-jdbc--agent-stderr-string)))
+    (let* ((lines (seq-filter
+                   (lambda (line) (not (string-empty-p (string-trim line))))
+                   (split-string text "\n" t)))
+           (count (or max-lines 8)))
+      (when lines
+        (string-join
+         (last lines (min count (length lines)))
+         "\n")))))
+
+(defun clutch-jdbc--agent-exit-error-message ()
+  "Return a user-facing error string when the JDBC agent exited early."
+  (let ((stderr (clutch-jdbc--agent-stderr-string))
+        (stderr-tail (clutch-jdbc--agent-stderr-tail)))
+    (cond
+     ((and stderr
+           (string-match-p "UnsupportedClassVersionError" stderr))
+      (format (concat "clutch-jdbc-agent requires a newer Java runtime than `%s'. "
+                      "Update `clutch-jdbc-agent-java-executable' or JAVA_HOME.\n%s")
+              clutch-jdbc-agent-java-executable
+              stderr-tail))
+     (stderr-tail
+      (format "clutch-jdbc-agent exited before replying:\n%s" stderr-tail))
+     (t
+      "clutch-jdbc-agent exited before replying"))))
+
 ;;;; Synchronous RPC
 
 (defvar clutch-jdbc--next-request-id 1
@@ -340,7 +382,8 @@ Return non-nil when RESPONSE was consumed asynchronously."
 TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'."
   (let ((deadline (+ (float-time)
                      (or timeout-seconds clutch-jdbc-rpc-timeout-seconds)))
-        response)
+        response
+        failure-message)
     (while (and (not response) (< (float-time) deadline))
       ;; Drain any queued responses while preserving unmatched entries.
       (when clutch-jdbc--response-queue
@@ -353,7 +396,18 @@ TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'."
           (setq clutch-jdbc--response-queue
                 (nconc (nreverse remaining) clutch-jdbc--response-queue))))
       (unless response
-        (accept-process-output clutch-jdbc--agent-process 0.05)))
+        (if (and clutch-jdbc--agent-process
+                 (not (process-live-p clutch-jdbc--agent-process)))
+            (setq failure-message (clutch-jdbc--agent-exit-error-message)
+                  response :agent-exited)
+          (accept-process-output clutch-jdbc--agent-process 0.05))))
+    (when (eq response :agent-exited)
+      (setq response nil))
+    (when (and (not response)
+               (not failure-message)
+               clutch-jdbc--agent-process
+               (not (process-live-p clutch-jdbc--agent-process)))
+      (setq failure-message (clutch-jdbc--agent-exit-error-message)))
     (unless response
       ;; The agent is likely blocked on a dead JDBC call.  Kill the process so
       ;; it does not remain wedged — subsequent requests would otherwise pile up
@@ -364,7 +418,8 @@ TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'."
       (setq clutch-jdbc--agent-process nil
             clutch-jdbc--response-queue nil)
       (signal 'clutch-db-error
-              (list "Connection lost — reconnect with C-c C-e")))
+              (list (or failure-message
+                        "Connection lost — reconnect with C-c C-e"))))
     response))
 
 (defun clutch-jdbc--rpc (op params &optional timeout-seconds)
@@ -1052,6 +1107,38 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
                     ('triggers :triggers))))
         (mapcar #'clutch-jdbc--normalize-object-entry
                 (plist-get result key))))))
+
+(cl-defmethod clutch-db-list-objects-async ((conn clutch-jdbc-conn) category callback
+                                            &optional errback)
+  "Fetch object entry plists for CATEGORY on JDBC CONN asynchronously."
+  (let* ((schema (clutch-jdbc--conn-schema conn))
+         (op (pcase category
+               ('indexes "get-indexes")
+               ('sequences "get-sequences")
+               ('procedures "get-procedures")
+               ('functions "get-functions")
+               ('triggers "get-triggers")
+               (_ nil)))
+         (key (pcase category
+                ('indexes :indexes)
+                ('sequences :sequences)
+                ('procedures :procedures)
+                ('functions :functions)
+                ('triggers :triggers)
+                (_ nil))))
+    (when (and op key)
+      (clutch-jdbc--rpc-async
+       op
+       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+         ,@(when schema `((schema . ,schema))))
+       (lambda (result)
+         (when callback
+           (funcall callback
+                    (mapcar #'clutch-jdbc--normalize-object-entry
+                            (plist-get result key)))))
+       errback
+       (clutch-jdbc--conn-rpc-timeout conn))
+      t)))
 
 (cl-defmethod clutch-db-object-details ((conn clutch-jdbc-conn) entry)
   "Return detail plists for JDBC object ENTRY."

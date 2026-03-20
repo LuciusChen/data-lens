@@ -283,6 +283,15 @@ CATEGORY is one of: indexes, sequences, procedures, functions, triggers.")
   "Default: return nil when CATEGORY is unsupported."
   nil)
 
+(cl-defgeneric clutch-db-list-objects-async (conn category callback &optional errback)
+  "Fetch object entry plists for CATEGORY on CONN asynchronously.
+CALLBACK receives the entry plist list on success.  ERRBACK receives an error
+message string on failure.  Return non-nil when an async fetch was started.")
+
+(cl-defmethod clutch-db-list-objects-async ((_conn t) _category _callback &optional _errback)
+  "Default: asynchronous object loading is unsupported."
+  nil)
+
 (cl-defgeneric clutch-db-object-details (conn entry)
   "Return detail data for object ENTRY on CONN.
 ENTRY is the full entry plist so the backend can use :identity or

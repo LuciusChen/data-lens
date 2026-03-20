@@ -61,3 +61,13 @@ The correct boundary is now clearer:
 - `clutch.el` decides *when* metadata is requested
 - `clutch-jdbc-agent` decides *how* JDBC sessions are isolated so metadata work
   does not destabilize foreground SQL
+
+The follow-through fix keeps the same boundary:
+
+- JDBC object warmup now uses async metadata RPCs instead of synchronous
+  `clutch-db-list-objects` calls on the Emacs main thread
+- background object discovery no longer needs to freeze the UI just because it
+  happens after connect
+- Oracle/JDBC live verification also depends on running the agent with a Java
+  runtime new enough for the current `clutch-jdbc-agent` jar; otherwise startup
+  failures can masquerade as generic connection-loss errors

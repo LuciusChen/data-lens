@@ -1427,6 +1427,57 @@ Skips if `clutch-db-test-jdbc-oracle-password' is nil."
         (ignore-errors
           (clutch-db-query conn (format "DROP TABLE %s" tbl)))))))
 
+(ert-deftest clutch-db-test-jdbc-oracle-live-low-priv-completion ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Oracle JDBC low-privilege users should still get table completion and discovery."
+  (if (null clutch-db-test-jdbc-oracle-password)
+      (ert-skip "Set clutch-db-test-jdbc-oracle-password to enable Oracle live tests")
+    (require 'clutch-db-jdbc)
+    (let* ((admin (clutch-db-connect
+                   'oracle
+                   (list :host clutch-db-test-jdbc-oracle-host
+                         :port clutch-db-test-jdbc-oracle-port
+                         :user clutch-db-test-jdbc-oracle-user
+                         :password clutch-db-test-jdbc-oracle-password
+                         :database clutch-db-test-jdbc-oracle-service)))
+           (user (format "CCLP_%d" (abs (random 999999))))
+           (password "CcLowpriv123")
+           (table-name "CC_LOWPRIV_TABLE"))
+      (unwind-protect
+          (progn
+            (clutch-db-query
+             admin
+             (format "CREATE USER %s IDENTIFIED BY %s" user password))
+            (clutch-db-query
+             admin
+             (format "GRANT CREATE SESSION, CREATE TABLE, UNLIMITED TABLESPACE TO %s"
+                     user))
+            (let ((conn (clutch-db-connect
+                         'oracle
+                         (list :host clutch-db-test-jdbc-oracle-host
+                               :port clutch-db-test-jdbc-oracle-port
+                               :user user
+                               :password password
+                               :database clutch-db-test-jdbc-oracle-service))))
+              (unwind-protect
+                  (progn
+                    (clutch-db-query
+                     conn
+                     (format "CREATE TABLE %s (id NUMBER PRIMARY KEY)" table-name))
+                    (let ((tables (clutch-db-complete-tables conn "CC_LOW")))
+                      (should (member table-name tables)))
+                    (let ((entries (clutch-db-search-table-entries conn "CC_LOW")))
+                      (should
+                       (seq-some
+                        (lambda (entry)
+                          (and (equal (plist-get entry :name) table-name)
+                               (equal (plist-get entry :schema) user)))
+                        entries))))
+                (clutch-db-disconnect conn))))
+        (ignore-errors
+          (clutch-db-query admin (format "DROP USER %s CASCADE" user)))
+        (clutch-db-disconnect admin)))))
+
 ;;;; Unit tests — clutch--format-value and clutch--value-to-literal
 
 (ert-deftest clutch-db-test-format-value-primitives ()
@@ -1628,21 +1679,23 @@ immediately without touching the agent process."
         (should (equal cancelled '(fake-timer)))))))
 
 (ert-deftest clutch-db-test-jdbc-recv-response-timeout-agent-already-dead ()
-  "When the RPC timeout fires and the agent is already dead, no crash.
-delete-process is not called, but state is still reset and error is signaled."
+  "When the agent already died, recv-response reports agent exit clearly."
   (let (deleted-proc)
     (cl-letf (((symbol-function 'process-live-p) (lambda (_p) nil))
               ((symbol-function 'delete-process)  (lambda (p) (setq deleted-proc p)))
               ((symbol-function 'accept-process-output) (lambda (_p _s) nil)))
       (let ((clutch-jdbc--agent-process 'dead-proc)
             (clutch-jdbc--response-queue nil))
-        (should-error (clutch-jdbc--recv-response 9999 0.0) :type 'clutch-db-error)
+        (condition-case err
+            (progn (clutch-jdbc--recv-response 9999 0.0) (should nil))
+          (clutch-db-error
+           (should (string-match-p "exited before replying" (cadr err)))))
         (should (null deleted-proc))
         (should (null clutch-jdbc--agent-process))))))
 
 (ert-deftest clutch-db-test-jdbc-recv-response-timeout-error-contains-connection-lost ()
-  "The timeout error message mentions 'Connection lost' so the user knows to reconnect."
-  (cl-letf (((symbol-function 'process-live-p) (lambda (_p) nil))
+  "A live-but-stuck agent still reports 'Connection lost' on timeout."
+  (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
             ((symbol-function 'delete-process)  #'ignore)
             ((symbol-function 'accept-process-output) (lambda (_p _s) nil)))
     (let ((clutch-jdbc--agent-process 'fake-proc)
@@ -1651,6 +1704,27 @@ delete-process is not called, but state is still reset and error is signaled."
           (progn (clutch-jdbc--recv-response 9999 0.0) (should nil))
         (clutch-db-error
          (should (string-match-p "Connection lost" (cadr err))))))))
+
+(ert-deftest clutch-db-test-jdbc-recv-response-agent-exit-reports-java-version-mismatch ()
+  "An early agent exit with UnsupportedClassVersionError should report Java mismatch."
+  (let ((stderr (get-buffer-create "*clutch-jdbc-agent-stderr*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer stderr
+            (erase-buffer)
+            (insert "Exception in thread \"main\" java.lang.UnsupportedClassVersionError: clutch/jdbc/Agent has been compiled by a more recent version of the Java Runtime\n"))
+          (cl-letf (((symbol-function 'process-live-p) (lambda (_p) nil))
+                    ((symbol-function 'delete-process) #'ignore)
+                    ((symbol-function 'accept-process-output) (lambda (_p _s) nil)))
+            (let ((clutch-jdbc--agent-process 'dead-proc)
+                  (clutch-jdbc--response-queue nil)
+                  (clutch-jdbc-agent-java-executable "java"))
+              (condition-case err
+                  (progn (clutch-jdbc--recv-response 9999 0.0) (should nil))
+                (clutch-db-error
+                 (should (string-match-p "requires a newer Java runtime" (cadr err)))
+                 (should (string-match-p "`java'" (cadr err))))))))
+      (kill-buffer stderr))))
 
 (ert-deftest clutch-db-test-jdbc-agent-filter-drops-invalid-json-lines ()
   "Malformed agent output should be ignored instead of enqueuing nil."

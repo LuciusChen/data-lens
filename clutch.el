@@ -317,6 +317,20 @@ not yet enforce a server-side statement timeout."
   :type 'natnum
   :group 'clutch)
 
+(defcustom clutch-object-warmup-idle-delay-seconds 0.5
+  "Idle delay before warming non-table object metadata.
+A small non-zero delay keeps connect and initial UI painting responsive before
+background object discovery starts."
+  :type 'number
+  :group 'clutch)
+
+(defcustom clutch-schema-cache-install-batch-size 500
+  "Maximum number of schema entries to install per idle slice.
+Large schema snapshots are installed incrementally to keep Emacs responsive
+after async metadata refreshes."
+  :type 'natnum
+  :group 'clutch)
+
 (defcustom clutch-csv-export-default-coding-system 'utf-8-with-signature
   "Default coding system when exporting CSV files."
   :type '(choice (const :tag "UTF-8 (with BOM)" utf-8-with-signature)
@@ -934,28 +948,31 @@ Returns nil when the schema is ready (no noise for the happy path)."
 Each value is (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS).
 ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
 
+(defun clutch--db-backend-icon-for-key (key)
+  "Return a colored backend icon for KEY, or nil."
+  (when-let* ((spec (alist-get key clutch--db-icon-specs)))
+    (let* ((rest      (cddr spec))
+           (color     (plist-get rest :color))
+           (icon-args (cl-loop for (k v) on rest by #'cddr
+                               unless (eq k :color) nconc (list k v)))
+           (icon      (apply #'clutch--icon (car spec) (cadr spec) icon-args)))
+      (if (and color (not (string-empty-p icon)))
+          (propertize icon 'face `(:foreground ,color :inherit ,(get-text-property 0 'face icon)))
+        icon))))
+
 (defun clutch--db-backend-icon (conn)
   "Return a colored nerd-icons glyph for CONN's database backend, or nil.
 JDBC connections expose the driver symbol via `clutch-jdbc-conn-params';
 native backends are identified by their display name string."
-  (let* ((driver (and (fboundp 'clutch-jdbc-conn-params)
-                      (ignore-errors
-                        (plist-get (clutch-jdbc-conn-params conn) :driver))))
-         (key    (or driver
-                     (pcase (clutch-db-display-name conn)
-                       ("MySQL"      'mysql)
-                       ("PostgreSQL" 'pg)
-                       ("SQLite"     'sqlite))))
-         (spec   (alist-get key clutch--db-icon-specs)))
-    (when spec
-      (let* ((rest      (cddr spec))
-             (color     (plist-get rest :color))
-             (icon-args (cl-loop for (k v) on rest by #'cddr
-                                 unless (eq k :color) nconc (list k v)))
-             (icon      (apply #'clutch--icon (car spec) (cadr spec) icon-args)))
-        (if (and color (not (string-empty-p icon)))
-            (propertize icon 'face `(:foreground ,color :inherit ,(get-text-property 0 'face icon)))
-          icon)))))
+  (let ((driver (and (fboundp 'clutch-jdbc-conn-params)
+                     (ignore-errors
+                       (plist-get (clutch-jdbc-conn-params conn) :driver)))))
+    (clutch--db-backend-icon-for-key
+     (or driver
+         (pcase (clutch-db-display-name conn)
+           ("MySQL"      'mysql)
+           ("PostgreSQL" 'pg)
+           ("SQLite"     'sqlite))))))
 
 (defun clutch--backend-key-from-params (params)
   "Return backend icon key for connection PARAMS, or nil."
@@ -988,16 +1005,20 @@ native backends are identified by their display name string."
 
 (defun clutch--db-backend-icon-from-params (params)
   "Return a colored nerd-icons glyph for connection PARAMS, or nil."
-  (when-let* ((key  (clutch--backend-key-from-params params))
-              (spec (alist-get key clutch--db-icon-specs)))
-    (let* ((rest      (cddr spec))
-           (color     (plist-get rest :color))
-           (icon-args (cl-loop for (k v) on rest by #'cddr
-                               unless (eq k :color) nconc (list k v)))
-           (icon      (apply #'clutch--icon (car spec) (cadr spec) icon-args)))
-      (if (and color (not (string-empty-p icon)))
-          (propertize icon 'face `(:foreground ,color :inherit ,(get-text-property 0 'face icon)))
-        icon))))
+  (when-let* ((key (clutch--backend-key-from-params params)))
+    (clutch--db-backend-icon-for-key key)))
+
+(defun clutch--connection-backend-segment (&optional conn params)
+  "Return the shared backend segment for CONN or PARAMS, or nil."
+  (let* ((icon (or (and conn (clutch--db-backend-icon conn))
+                   (and params (clutch--db-backend-icon-from-params params))))
+         (name (or (and conn (clutch-db-display-name conn))
+                   (and params (clutch--backend-display-name-from-params params)))))
+    (when name
+      (let ((backend (propertize name 'face 'bold)))
+        (if icon
+            (concat icon " " backend)
+          backend)))))
 
 (defun clutch--connection-state-icon (connected)
   "Return a connection state icon for CONNECTED."
@@ -1019,20 +1040,13 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   (let ((indent (clutch--header-line-indent)))
     (if (not (clutch--connection-alive-p clutch-connection))
         (let* ((sep          (propertize "  •  " 'face 'shadow))
-               (backend-icon (or (and clutch-connection (clutch--db-backend-icon clutch-connection))
-                                 (and clutch--connection-params
-                                      (clutch--db-backend-icon-from-params clutch--connection-params))))
-               (backend-name (or (and clutch-connection (clutch-db-display-name clutch-connection))
-                                 (and clutch--connection-params
-                                      (clutch--backend-display-name-from-params clutch--connection-params))))
-               (backend      (and backend-name (propertize backend-name 'face 'bold)))
+               (backend      (clutch--connection-backend-segment
+                              clutch-connection clutch--connection-params))
                (disconnect   (concat (clutch--connection-state-icon nil)
                                      " "
                                      (propertize "Disconnect" 'face 'warning)))
                (parts        (delq nil (list (if backend
-                                                 (if backend-icon
-                                                     (concat backend-icon " " backend)
-                                                   backend)
+                                                 backend
                                                nil)
                                              disconnect))))
           (concat indent
@@ -1040,8 +1054,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
                       (mapconcat #'identity parts sep)
                     disconnect)))
       (let* ((sep     (propertize "  •  " 'face 'shadow))
-             (icon    (clutch--db-backend-icon clutch-connection))
-             (backend (propertize (clutch-db-display-name clutch-connection) 'face 'bold))
+             (backend (clutch--connection-backend-segment clutch-connection))
              (key     (concat (clutch--connection-state-icon t)
                               " "
                               (clutch--connection-display-key clutch-connection)))
@@ -1052,7 +1065,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
                 (format "Schema: %s" schema)))
              (schema  (clutch--schema-status-header-line-segment clutch-connection))
              (tx      (clutch--tx-header-line-segment clutch-connection))
-             (parts   (delq nil (list (if icon (concat icon " " backend) backend)
+             (parts   (delq nil (list backend
                                       key current-schema schema tx))))
         (concat indent (mapconcat #'identity parts sep))))))
 
@@ -2680,17 +2693,29 @@ Prompts for confirmation on destructive operations."
         (when (< tbeg tend)
           (cons tbeg tend))))))
 
+(defun clutch--clear-executed-sql-overlay (&rest _)
+  "Remove the last executed SQL overlay in the current buffer."
+  (when (overlayp clutch--executed-sql-overlay)
+    (let ((overlay clutch--executed-sql-overlay))
+      (setq clutch--executed-sql-overlay nil)
+      (delete-overlay overlay))))
+
 (defun clutch--mark-executed-sql-region (beg end)
   "Highlight the last successfully executed SQL region BEG..END."
   (when-let* ((trimmed (clutch--trim-sql-bounds beg end))
               (tbeg (car trimmed))
               (tend (cdr trimmed)))
-    (when (overlayp clutch--executed-sql-overlay)
-      (delete-overlay clutch--executed-sql-overlay))
-    (setq clutch--executed-sql-overlay (make-overlay tbeg tend))
+    (clutch--clear-executed-sql-overlay)
+    (setq clutch--executed-sql-overlay (make-overlay tbeg tend nil t t))
     (overlay-put clutch--executed-sql-overlay 'face 'clutch-executed-sql-face)
     (overlay-put clutch--executed-sql-overlay 'priority 1000)
-    (overlay-put clutch--executed-sql-overlay 'evaporate t)))
+    (overlay-put clutch--executed-sql-overlay 'evaporate t)
+    (overlay-put clutch--executed-sql-overlay 'modification-hooks
+                 '(clutch--clear-executed-sql-overlay))
+    (overlay-put clutch--executed-sql-overlay 'insert-in-front-hooks
+                 '(clutch--clear-executed-sql-overlay))
+    (overlay-put clutch--executed-sql-overlay 'insert-behind-hooks
+                 '(clutch--clear-executed-sql-overlay))))
 
 (defun clutch--sql-line-column-to-position (sql line column)
   "Return 1-based character position in SQL for LINE and COLUMN."
@@ -3142,6 +3167,9 @@ Each value is a plist with at least :entries and :fetched-at.")
 (defvar clutch--object-warmup-timers (make-hash-table :test 'equal)
   "Idle timers warming object discovery caches keyed by connection key string.")
 
+(defvar clutch--schema-install-timers (make-hash-table :test 'equal)
+  "Idle timers finishing large schema installs keyed by connection key string.")
+
 (defvar clutch--schema-status-cache (make-hash-table :test 'equal)
   "Schema refresh status cache keyed by connection key string.
 Each value is a plist with :state and optional :tables / :error.")
@@ -3229,6 +3257,55 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
        (eql (gethash (clutch--connection-key conn) clutch--schema-refresh-tickets)
             ticket)))
 
+(defun clutch--cancel-schema-install (conn &optional key)
+  "Cancel any pending schema-install timer for CONN or explicit KEY."
+  (let ((key (or key (clutch--connection-key conn))))
+    (when-let* ((timer (gethash key clutch--schema-install-timers)))
+      (cancel-timer timer)
+      (remhash key clutch--schema-install-timers))))
+
+(defun clutch--finish-install-schema-cache (conn key schema)
+  "Publish installed SCHEMA cache for CONN under KEY."
+  (puthash key schema clutch--schema-cache)
+  (remhash key clutch--columns-status-cache)
+  (remhash key clutch--column-details-cache)
+  (remhash key clutch--column-details-status-cache)
+  (remhash key clutch--column-details-queue-cache)
+  (remhash key clutch--column-details-active-cache)
+  (remhash key clutch--table-comment-cache)
+  (remhash key clutch--help-doc-cache)
+  (clutch--cancel-object-warmup conn)
+  (remhash key clutch--object-cache)
+  (clutch--set-schema-status conn 'ready (hash-table-count schema))
+  (clutch--schedule-object-warmup conn)
+  t)
+
+(defun clutch--install-schema-cache-batched (conn table-names key ticket)
+  "Install TABLE-NAMES for CONN incrementally using idle timers."
+  (let ((schema (make-hash-table :test 'equal))
+        (remaining table-names)
+        (batch-size (max 1 clutch-schema-cache-install-batch-size)))
+    (cl-labels ((step ()
+                  (remhash key clutch--schema-install-timers)
+                  (when (and conn
+                             (clutch--connection-alive-p conn)
+                             (or (null ticket)
+                                 (clutch--schema-refresh-ticket-current-p conn ticket)))
+                    (let ((count 0))
+                      (while (and remaining (< count batch-size))
+                        (puthash (car remaining) nil schema)
+                        (setq remaining (cdr remaining))
+                        (cl-incf count))
+                      (if remaining
+                          (puthash key
+                                   (run-with-idle-timer 0 nil #'step)
+                                   clutch--schema-install-timers)
+                        (clutch--finish-install-schema-cache conn key schema))))))
+      (puthash key
+               (run-with-idle-timer 0 nil #'step)
+               clutch--schema-install-timers))
+    t))
+
 (defun clutch--install-schema-cache (conn table-names &optional ticket)
   "Install TABLE-NAMES as the schema cache for CONN.
 When TICKET is non-nil, ignore the update unless it is still current."
@@ -3237,22 +3314,17 @@ When TICKET is non-nil, ignore the update unless it is still current."
              (or (null ticket)
                  (clutch--schema-refresh-ticket-current-p conn ticket)))
     (let* ((key (clutch--connection-key conn))
-           (schema (make-hash-table :test 'equal)))
-      (dolist (tbl table-names)
-        (puthash tbl nil schema))
-      (puthash key schema clutch--schema-cache)
-      (remhash key clutch--columns-status-cache)
-      (remhash key clutch--column-details-cache)
-      (remhash key clutch--column-details-status-cache)
-      (remhash key clutch--column-details-queue-cache)
-      (remhash key clutch--column-details-active-cache)
-      (remhash key clutch--table-comment-cache)
-      (remhash key clutch--help-doc-cache)
+           (small-p (<= (length table-names) clutch-schema-cache-install-batch-size))
+           (schema (and small-p (make-hash-table :test 'equal))))
+      (clutch--cancel-schema-install conn)
       (clutch--cancel-object-warmup conn)
       (remhash key clutch--object-cache)
-      (clutch--set-schema-status conn 'ready (hash-table-count schema))
-      (clutch--schedule-object-warmup conn)
-      t)))
+      (if small-p
+          (progn
+            (dolist (tbl table-names)
+              (puthash tbl nil schema))
+            (clutch--finish-install-schema-cache conn key schema))
+        (clutch--install-schema-cache-batched conn table-names key ticket)))))
 
 (defun clutch--clear-connection-metadata-caches (conn &optional key)
   "Clear schema-scoped metadata caches for CONN.
@@ -3266,7 +3338,8 @@ When KEY is non-nil, clear that cache namespace instead of CONN's current key."
     (remhash key clutch--column-details-active-cache)
     (remhash key clutch--table-comment-cache)
     (remhash key clutch--help-doc-cache)
-    (clutch--cancel-object-warmup conn)
+    (clutch--cancel-schema-install conn key)
+    (clutch--cancel-object-warmup conn key)
     (remhash key clutch--object-cache)
     (remhash key clutch--schema-status-cache)
     (remhash key clutch--schema-refresh-tickets)))
@@ -4160,6 +4233,13 @@ Returns nil when SYM is not a known built-in on this server."
   "Return non-nil when completion STATUS means candidate was accepted."
   (memq status '(finished exact sole)))
 
+(defun clutch--sql-keyword-prefix-p (prefix)
+  "Return non-nil when PREFIX matches the start of any SQL keyword."
+  (let ((upcase-prefix (upcase prefix)))
+    (seq-some (lambda (keyword)
+                (string-prefix-p upcase-prefix keyword))
+              clutch--sql-keywords)))
+
 
 (defun clutch-sql-keyword-completion-at-point ()
   "Completion-at-point function for SQL keywords.
@@ -4214,9 +4294,15 @@ when completion triggers during an in-flight query)."
                 (when (and tables
                            (<= (length tables) clutch--schema-inline-table-limit))
                   tables))))
+           (prefer-keyword-p
+            (and (not table-context-p)
+                 (null context-tables)
+                 (clutch--sql-keyword-prefix-p prefix)))
            (candidates nil))
       (setq candidates
-            (if context-tables
+            (if prefer-keyword-p
+                nil
+              (if context-tables
                 (let ((all (copy-sequence (or (and schema (hash-table-keys schema))
                                               '()))))
                   (dolist (tbl context-tables)
@@ -4230,8 +4316,8 @@ when completion triggers during an in-flight query)."
                       (when cols
                         (setq all (nconc all (copy-sequence cols))))))
                   (delete-dups all))
-              (delete-dups (append direct-table-candidates
-                                   (and schema (hash-table-keys schema))))))
+                (delete-dups (append direct-table-candidates
+                                     (and schema (hash-table-keys schema)))))))
       (when candidates
         (list beg end candidates
               :exclusive 'no
@@ -4458,12 +4544,22 @@ SQL keyword/function docs are shown even without a connection."
                     #'equal)
       most-positive-fixnum))
 
-(defun clutch--cancel-object-warmup (conn)
-  "Cancel any pending object warmup timer for CONN."
-  (when-let* ((timer (gethash (clutch--object-cache-key conn)
-                              clutch--object-warmup-timers)))
-    (cancel-timer timer)
-    (remhash (clutch--object-cache-key conn) clutch--object-warmup-timers)))
+(defun clutch--object-category-type (category)
+  "Return the normalized object TYPE string for CATEGORY."
+  (pcase category
+    ('indexes "INDEX")
+    ('sequences "SEQUENCE")
+    ('procedures "PROCEDURE")
+    ('functions "FUNCTION")
+    ('triggers "TRIGGER")
+    (_ nil)))
+
+(defun clutch--cancel-object-warmup (conn &optional key)
+  "Cancel any pending object warmup timer for CONN or explicit KEY."
+  (let ((key (or key (clutch--object-cache-key conn))))
+    (when-let* ((timer (gethash key clutch--object-warmup-timers)))
+      (cancel-timer timer)
+      (remhash key clutch--object-warmup-timers))))
 
 (defun clutch--schedule-object-warmup (conn)
   "Warm non-table object categories for CONN during idle time."
@@ -4483,21 +4579,30 @@ SQL keyword/function docs are shown even without a connection."
       (puthash
        key
        (run-with-idle-timer
-        0 nil
+        clutch-object-warmup-idle-delay-seconds nil
         (lambda ()
           (remhash key clutch--object-warmup-timers)
           (when (and conn (ignore-errors (clutch--connection-alive-p conn)))
-            (condition-case nil
-                (clutch--object-type-entries
-                 conn
-                 (pcase next
-                   ('indexes "INDEX")
-                   ('sequences "SEQUENCE")
-                   ('procedures "PROCEDURE")
-                   ('functions "FUNCTION")
-                   ('triggers "TRIGGER")))
-              (error nil))
-            (clutch--schedule-object-warmup conn))))
+            (let ((type (clutch--object-category-type next)))
+              (unless
+                  (and type
+                       (clutch-db-list-objects-async
+                        conn next
+                        (lambda (entries)
+                          (when (and conn
+                                     (ignore-errors (clutch--connection-alive-p conn)))
+                            (clutch--store-object-cache-type-entries conn type entries)
+                            (clutch--schedule-object-warmup conn)))
+                        (lambda (&rest _)
+                          (when (and conn
+                                     (ignore-errors (clutch--connection-alive-p conn)))
+                            (clutch--schedule-object-warmup conn)))))
+                (condition-case nil
+                    (progn
+                      (when type
+                        (clutch--object-type-entries conn type))
+                      (clutch--schedule-object-warmup conn))
+                  (error nil)))))))
        clutch--object-warmup-timers)))))
 
 (defun clutch--partial-object-entries (conn)

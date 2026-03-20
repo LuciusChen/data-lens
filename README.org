@@ -622,7 +622,9 @@ protocol implementation.  It delegates SQL execution and metadata queries to
 one-JSON-object-per-line protocol on stdin/stdout.  The agent maintains
 separate primary and metadata JDBC sessions for each logical clutch connection,
 so background introspection does not contend with foreground SQL execution.
-Java 17+ is required.
+Java 17+ is required.  If the configured =java= is too old for the current
+=clutch-jdbc-agent= jar, clutch reports a startup error instead of a generic
+connection-loss timeout.
 
 *** Supported Databases
 
@@ -662,9 +664,9 @@ drivers directory.
 Driver jars are stored in =~/.emacs.d/clutch-jdbc/drivers/=
 (configurable via =clutch-jdbc-agent-dir=).
 
-The agent jar itself is verified against the release SHA-256 before startup.
+The agent jar itself is verified against the configured SHA-256 before startup.
 This catches the common case where a local =clutch-jdbc-agent-<version>.jar=
-exists but does not actually match the current release asset.
+exists but does not actually match the jar you intend clutch to launch.
 Running =clutch-jdbc-ensure-agent= also removes stale versioned
 =clutch-jdbc-agent-*.jar= files from the same directory.
 
