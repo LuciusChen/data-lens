@@ -4033,7 +4033,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
               ((symbol-function 'thing-at-point)
                (lambda (&rest _) "BQS_BERTH_QUEUE"))
               ((symbol-function 'clutch--object-matches-by-name)
-               (lambda (_conn name &optional _table-like-only)
+               (lambda (_conn name &optional _table-like-only _allowed-types)
                  (should (equal name "BQS_BERTH_QUEUE"))
                  '((:name "BQS_BERTH_QUEUE" :type "PUBLIC SYNONYM"
                     :schema "SYS" :source-schema "PUBLIC")
