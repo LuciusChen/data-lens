@@ -405,16 +405,20 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
 (ert-deftest clutch-test-render-footer-includes-sort-and-pending-summary ()
   "Footer should aggregate sort state and staged changes."
   (with-temp-buffer
-    (setq-local clutch--order-by '("created_at" . "desc")
+    (setq-local clutch-connection 'fake-conn
+                clutch--order-by '("created_at" . "desc")
                 clutch--pending-edits '(a)
                 clutch--pending-deletes '(b)
                 clutch--pending-inserts '(c))
-    (let ((footer (substring-no-properties
-                   (clutch--render-footer 10 0 500 100 1 1))))
-      (should (string-match-p "DESC\\[created_at\\]" footer))
-      (should (string-match-p "E-1 D-1 I-1" footer))
-      (should (string-match-p "commit:C-c C-c" footer))
-      (should (string-match-p "discard:C-c C-k" footer)))))
+    (cl-letf (((symbol-function 'clutch--tx-header-line-segment)
+               (lambda (_conn) "Tx: Manual*")))
+      (let ((footer (substring-no-properties
+                     (clutch--render-footer 10 0 500 100 1 1))))
+        (should (string-match-p "Tx: Manual\\*" footer))
+        (should (string-match-p "DESC\\[created_at\\]" footer))
+        (should (string-match-p "E-1 D-1 I-1" footer))
+        (should (string-match-p "commit:C-c C-c" footer))
+        (should (string-match-p "discard:C-c C-k" footer))))))
 
 (ert-deftest clutch-test-render-footer-warns-when-primary-key-missing ()
   "Footer should explain when edit/delete are disabled due to missing PK."
@@ -422,11 +426,15 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (setq-local clutch--result-columns '("id" "name")
                 clutch--last-query "SELECT * FROM users"
                 clutch--cached-pk-indices nil)
-    (let ((footer (substring-no-properties
-                   (clutch--render-footer 10 0 500 100 1 1))))
+    (let* ((footer-prop (clutch--render-footer 10 0 500 100 1 1))
+           (footer (substring-no-properties footer-prop))
+           (pk-start (string-match "PK missing" footer)))
       (should (string-match-p "PK missing" footer))
       (should (string-match-p "users" footer))
-      (should (string-match-p "E/D off" footer)))))
+      (should (string-match-p "E/D off" footer))
+      (should pk-start)
+      (should (equal (get-text-property pk-start 'face footer-prop)
+                     '(:inherit font-lock-warning-face :weight normal))))))
 
 (ert-deftest clutch-test-insert-buffer-tab-navigation ()
   "Insert buffer TAB navigation should jump between field value positions."
@@ -1593,15 +1601,15 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                      (propertize "schema…" 'face 'shadow))))))
 
 (ert-deftest clutch-test-tx-header-line-and-update ()
-  "Manual-commit mode surfaces Tx: Manual in header-line; dirty adds *."
+  "Tx header-line uses semantic colors and dirty adds *."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq)))
     (with-temp-buffer
       (clutch-mode)
       (setq-local clutch-connection 'fake-conn)
       (cl-letf (((symbol-function 'clutch-db-display-name)
                  (lambda (_conn) "Oracle"))
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "scott@db:1521/ORCL"))
+                ((symbol-function 'clutch--connection-display-key)
+                 (lambda (_conn) "scott@db"))
                 ((symbol-function 'clutch--connection-alive-p)
                  (lambda (_conn) t))
                 ((symbol-function 'clutch-db-manual-commit-p)
@@ -1613,15 +1621,25 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         ;; Mode-line is now just the mode name.
         (clutch--update-mode-line)
         (should (equal mode-name "clutch"))
+        ;; Auto-commit: shows Tx: Auto in success face.
+        (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
+                   (lambda (_conn) nil)))
+          (let ((seg (clutch--tx-header-line-segment clutch-connection)))
+            (should (string-match-p "Tx: Auto" seg))
+            (should (eq (get-text-property 0 'face seg) 'success))))
         ;; header-line-format is an (:eval ...) form; evaluate it to get content.
         (let ((hl (clutch--build-connection-header-line)))
           ;; Clean manual-commit: shows Tx: Manual (no asterisk).
           (should (string-match-p "Tx: Manual" hl))
           (should-not (string-match-p "Tx: Manual\\*" hl)))
+        (let ((seg (clutch--tx-header-line-segment clutch-connection)))
+          (should (eq (get-text-property 0 'face seg) 'warning)))
         ;; Dirty: header-line shows Tx: Manual*.
         (puthash clutch-connection t clutch--tx-dirty-cache)
-        (let ((hl (clutch--build-connection-header-line)))
-          (should (string-match-p "Tx: Manual\\*" hl)))))))
+        (let ((hl (clutch--build-connection-header-line))
+              (seg (clutch--tx-header-line-segment clutch-connection)))
+          (should (string-match-p "Tx: Manual\\*" hl))
+          (should (eq (get-text-property 0 'face seg) 'error)))))))
 
 (ert-deftest clutch-test-run-db-query-marks-manual-commit-dirty ()
   "Successful DML should mark manual-commit connections dirty."
@@ -3989,6 +4007,141 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (clutch-describe-dwim)
         (should (equal resolved-prompt "Describe object: "))
         (should (equal captured '(:name "IDX_A" :type "INDEX")))))))
+
+(ert-deftest clutch-test-switch-schema-uses-selected-schema-and-refreshes ()
+  "Schema switching should update params, clear caches, and refresh metadata."
+  (let ((conn 'fake-conn)
+        switched refresh-called message-text)
+    (with-temp-buffer
+      (setq-local clutch-connection conn
+                  clutch--connection-params '(:driver oracle :schema "ZJ_TEST"))
+      (cl-letf (((symbol-function 'clutch-db-list-schemas)
+                 (lambda (_conn) '("ZJ_TEST" "CJH_TEST")))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "user@host:1521/ORCL"))
+                ((symbol-function 'clutch-db-current-schema)
+                 (lambda (_conn) "ZJ_TEST"))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _args) "CJH_TEST"))
+                ((symbol-function 'clutch-db-set-current-schema)
+                 (lambda (_conn schema) (setq switched schema) schema))
+                ((symbol-function 'clutch--clear-connection-metadata-caches)
+                 (lambda (_conn &optional _key) (setq refresh-called 'cleared)))
+                ((symbol-function 'clutch--refresh-current-schema)
+                 (lambda (&optional quiet)
+                   (setq refresh-called (list refresh-called quiet))
+                   t))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq message-text (apply #'format fmt args)))))
+        (clutch-switch-schema)
+        (should (equal switched "CJH_TEST"))
+        (should (equal clutch--connection-params '(:driver oracle :schema "CJH_TEST")))
+        (should (equal refresh-called '(cleared t)))
+        (should (equal message-text "Switched schema to CJH_TEST"))))))
+
+(ert-deftest clutch-test-switch-schema-updates-mysql-database-param ()
+  "MySQL schema switching should persist the selected database in buffer params."
+  (let ((conn 'fake-conn)
+        switched cleared-keys)
+    (with-temp-buffer
+      (setq-local clutch-connection conn
+                  clutch--connection-params '(:backend mysql :database "zj_test"))
+      (cl-letf (((symbol-function 'clutch--connection-key)
+                 (lambda (_conn)
+                   (if (equal clutch--connection-params '(:backend mysql :database "zj_test"))
+                       "user@host:3306/zj_test"
+                     "user@host:3306/cjh_test")))
+                ((symbol-function 'clutch-db-list-schemas)
+                 (lambda (_conn) '("zj_test" "cjh_test")))
+                ((symbol-function 'clutch-db-current-schema)
+                 (lambda (_conn) "zj_test"))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _args) "cjh_test"))
+                ((symbol-function 'clutch-db-set-current-schema)
+                 (lambda (_conn schema) (setq switched schema) schema))
+                ((symbol-function 'clutch--clear-connection-metadata-caches)
+                 (lambda (_conn &optional key)
+                   (push (or key "current") cleared-keys)))
+                ((symbol-function 'clutch--refresh-current-schema)
+                 (lambda (&optional _quiet) t))
+                ((symbol-function 'message) (lambda (&rest _args) nil)))
+        (clutch-switch-schema)
+        (should (equal switched "cjh_test"))
+        (should (equal clutch--connection-params '(:backend mysql :database "cjh_test")))
+        (should (equal cleared-keys '("current" "user@host:3306/zj_test")))))))
+
+(ert-deftest clutch-test-switch-schema-header-line-shows-current-schema ()
+  "Connection header line should display a non-default effective schema."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--db-backend-icon) (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-display-name) (lambda (_conn) "Oracle"))
+              ((symbol-function 'clutch--connection-display-key) (lambda (_conn) "scott@dbhost"))
+              ((symbol-function 'clutch-db-user) (lambda (_conn) "SCOTT"))
+              ((symbol-function 'clutch-db-database) (lambda (_conn) "ORCL"))
+              ((symbol-function 'clutch-db-current-schema) (lambda (_conn) "ZJ_TEST"))
+              ((symbol-function 'clutch--schema-status-header-line-segment) (lambda (_conn) nil))
+              ((symbol-function 'clutch--tx-header-line-segment) (lambda (_conn) nil))
+              ((symbol-function 'clutch--header-line-indent) (lambda () "")))
+      (let ((line (clutch--build-connection-header-line)))
+        (should (string-match-p "scott@dbhost" line))
+        (should (string-match-p "Schema: ZJ_TEST" line))))))
+
+(ert-deftest clutch-test-switch-schema-header-line-hides-redundant-schema ()
+  "Connection header line should hide schema when it duplicates user or database."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--db-backend-icon) (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-display-name) (lambda (_conn) "MySQL"))
+              ((symbol-function 'clutch--connection-display-key) (lambda (_conn) "user@host"))
+              ((symbol-function 'clutch-db-user) (lambda (_conn) "user"))
+              ((symbol-function 'clutch-db-database) (lambda (_conn) "zj_test"))
+              ((symbol-function 'clutch-db-current-schema) (lambda (_conn) "zj_test"))
+              ((symbol-function 'clutch--schema-status-header-line-segment) (lambda (_conn) nil))
+              ((symbol-function 'clutch--tx-header-line-segment) (lambda (_conn) nil))
+              ((symbol-function 'clutch--header-line-indent) (lambda () "")))
+      (let ((line (clutch--build-connection-header-line)))
+        (should (string-match-p "user@host" line))
+        (should-not (string-match-p "Schema:" line))))))
+
+(ert-deftest clutch-test-disconnected-header-line-shows-backend-and-warning-state ()
+  "Disconnected header line should keep backend context and warn loudly."
+  (with-temp-buffer
+    (setq-local clutch-connection nil
+                clutch--connection-params '(:backend jdbc :driver oracle))
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) nil))
+              ((symbol-function 'clutch--db-backend-icon-from-params) (lambda (_params) "[db]"))
+              ((symbol-function 'clutch--backend-display-name-from-params) (lambda (_params) "Oracle"))
+              ((symbol-function 'clutch--connection-state-icon) (lambda (_connected) "[disc]"))
+              ((symbol-function 'clutch--header-line-indent) (lambda () "")))
+      (let* ((line (clutch--build-connection-header-line))
+             (start (string-match "Disconnect" line)))
+        (should (string-match-p "\\[db\\] Oracle" line))
+        (should (string-match-p "Oracle  •  \\[disc\\] Disconnect" line))
+        (should-not (string-match-p "\\[disc\\]  •  Disconnect" line))
+        (should start)
+        (should (eq (get-text-property start 'face line) 'warning))))))
+
+(ert-deftest clutch-test-connection-display-key-hides-default-port ()
+  "Connection display key should omit the backend default port."
+  (cl-letf (((symbol-function 'clutch-db-user) (lambda (_conn) "scott"))
+            ((symbol-function 'clutch-db-host) (lambda (_conn) "dbhost"))
+            ((symbol-function 'clutch-db-port) (lambda (_conn) 1521))
+            ((symbol-function 'clutch-db-display-name) (lambda (_conn) "Oracle")))
+    (should (equal (clutch--connection-display-key 'fake-conn)
+                   "scott@dbhost"))))
+
+(ert-deftest clutch-test-connection-display-key-keeps-nondefault-port ()
+  "Connection display key should keep non-default ports."
+  (cl-letf (((symbol-function 'clutch-db-user) (lambda (_conn) "scott"))
+            ((symbol-function 'clutch-db-host) (lambda (_conn) "dbhost"))
+            ((symbol-function 'clutch-db-port) (lambda (_conn) 1522))
+            ((symbol-function 'clutch-db-display-name) (lambda (_conn) "Oracle")))
+    (should (equal (clutch--connection-display-key 'fake-conn)
+                   "scott@dbhost:1522"))))
 
 (ert-deftest clutch-test-object-resolve-prefers-definition-buffer-object-over-symbol-at-point ()
   "Definition buffers should use the displayed object before symbol-at-point."

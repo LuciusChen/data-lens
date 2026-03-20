@@ -80,7 +80,7 @@ The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
 - Schema refresh state is explicit: eager backends refresh on connect, lazy backends start stale, query console buffer names surface =schema...= / =schema~= / =schema!= / =schema 42t= style state markers; here =Nt= means "the current schema-cache snapshot contains N browseable table/object names". =schema 0t= is therefore a successful empty snapshot, not an error. Schema errors also appear in the console header-line (see below)
-- Console header-line shows live connection context: database-type icon (with brand color) + backend name + connection key, plus =schema~= / =schema!= warnings when the schema cache needs attention, and =Tx: Auto= / =Tx: Manual= / =Tx: Manual*= for the current commit mode; header text is indented to align with the buffer text area (respects =display-line-numbers-mode=)
+- Console header-line shows live connection context: database-type icon + backend name, a dedicated connection-state icon before the compact connection key (=user@host=, with =:port= only when non-default), a separate =Schema: ...= segment when the effective schema differs from the login default, and =Tx: Auto= / =Tx: Manual= / =Tx: Manual*= for the current commit mode; disconnected state keeps the backend context visible and warns explicitly instead of dimming it away
 - Cache-backed schema actions also warn when the schema cache is stale, failed, or still refreshing, so completion / table prompts do not silently pretend cached metadata is current
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
 - Value viewer (=v=): auto-detects JSON (pretty-printed with =json-ts-mode=), XML (formatted via =xmllint= if available, rendered with =nxml-mode=), or BLOB (concise text/hex preview); XML/BLOB size is shown in viewer header-line (without polluting content highlighting)
@@ -273,6 +273,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-d=   | Describe object at point, or prompt |
 | =C-c C-o=   | Show object actions at point, or prompt |
 | =C-c C-p=   | Preview execution (dry-run) |
+| =C-c C-l=   | Switch current schema/database on the active connection |
 | =C-c C-s=   | Refresh schema for current connection |
 | =C-c C-m=   | Commit transaction (manual-commit connections only) |
 | =C-c C-u=   | Roll back transaction (manual-commit connections only) |
@@ -540,7 +541,9 @@ runs the object's default action.
 
 =C-c C-d= is a convenience wrapper over the same resolution logic.  It resolves
 the object at point when possible; otherwise it prompts with the same flat
-picker.  It opens the shared describe buffer for the target object.
+picker.  It opens the shared describe buffer for the target object.  That
+buffer is only a view over the same object model; it does not define a second
+action universe.
 
 =C-c C-o= is the direct “show me actions” wrapper over the same object model.
 It resolves the object at point when possible; otherwise it prompts, then opens
@@ -553,6 +556,17 @@ intentionally small and shared across Embark and Transient:
   such as indexes, triggers, and synonyms
 - =n=: copy object name
 - =f=: copy fully-qualified object name
+
+=C-c C-l= switches the current schema/database on the active connection and
+refreshes metadata for the new context.  The first implementation targets
+Oracle/JDBC connections that can switch business schemas such as =zj_test= and
+=cjh_test= within one connection, and MySQL connections where switching schema
+maps to =USE database=.
+
+For JDBC backends, clutch-jdbc-agent now isolates foreground SQL from metadata
+traffic by keeping separate primary and metadata JDBC sessions under one
+logical clutch connection.  This avoids Oracle-style contention between user
+queries and background schema/object introspection.
 
 Default actions only depend on the object type:
 
@@ -586,7 +600,7 @@ Objects are recognised as targets in four contexts:
 
 - *=clutch-mode= (SQL buffer)* — symbol at point, resolved against known objects
 - *=clutch-repl-mode=* — symbol at point
-- *=completing-read= minibuffer* — current candidate in =C-c C-d= / =C-c C-o=
+- *=completing-read= minibuffer* — current candidate in =C-c C-j= / =C-c C-d= / =C-c C-o=
 - *describe / definition buffers* — the object currently shown in that buffer
 
 Without Embark, =C-c C-o= opens a =transient= menu with the same object-driven
@@ -603,9 +617,12 @@ metadata.
 ** JDBC Backend (clutch-db-jdbc.el)
 
 =clutch-db-jdbc.el= adds support for databases that have no pure Elisp wire
-protocol implementation.  It delegates all SQL execution and metadata queries
-to =clutch-jdbc-agent=, a minimal JVM sidecar process that speaks a
-one-JSON-object-per-line protocol on stdin/stdout.  Java 17+ is required.
+protocol implementation.  It delegates SQL execution and metadata queries to
+=clutch-jdbc-agent=, a minimal JVM sidecar process that speaks a
+one-JSON-object-per-line protocol on stdin/stdout.  The agent maintains
+separate primary and metadata JDBC sessions for each logical clutch connection,
+so background introspection does not contend with foreground SQL execution.
+Java 17+ is required.
 
 *** Supported Databases
 

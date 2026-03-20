@@ -64,7 +64,7 @@
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "7da1e8e486b4873b922af7cbf9a15d928290945a3732bd9454f19c7170661e80"
+  "a26eb5ffd9b522f4b693094f2bee976dbdc890f6e62716c731435beb5b1f84cb"
   "Expected SHA-256 for the bundled clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -540,6 +540,12 @@ stored in params at connect time."
   "Return non-nil when CONN is an Oracle JDBC connection."
   (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle))
 
+(defconst clutch-jdbc--oracle-system-schemas
+  '("SYS" "SYSTEM" "XDB" "MDSYS" "CTXSYS" "LBACSYS" "OLAPSYS"
+    "WMSYS" "DBSNMP" "APPQOSSYS" "AUDSYS" "DVSYS"
+    "GSMADMIN_INTERNAL" "OJVMSYS" "OUTLN")
+  "Oracle schemas hidden from interactive schema switching by default.")
+
 (cl-defmethod clutch-db-manual-commit-p ((conn clutch-jdbc-conn))
   "Return non-nil when JDBC CONN runs with auto-commit disabled."
   (let ((params (clutch-jdbc-conn-params conn)))
@@ -818,6 +824,25 @@ Oracle uses the username as schema (uppercased).  Other backends return nil."
   (or (plist-get (clutch-jdbc-conn-params conn) :schema)
       (clutch-jdbc--default-schema conn)))
 
+(defun clutch-jdbc--visible-schemas (conn schemas)
+  "Normalize visible SCHEMAS for CONN."
+  (let* ((current (clutch-jdbc--conn-schema conn))
+         (schemas (delete-dups
+                   (seq-filter
+                    (lambda (schema)
+                      (and (stringp schema)
+                           (not (string-empty-p schema))
+                           (or (not (clutch-jdbc--oracle-conn-p conn))
+                               (not (member-ignore-case schema
+                                                        clutch-jdbc--oracle-system-schemas)))))
+                    schemas))))
+    (sort schemas
+          (lambda (a b)
+            (cond
+             ((and current (string-equal-ignore-case a current)) t)
+             ((and current (string-equal-ignore-case b current)) nil)
+             (t (string-collate-lessp a b)))))))
+
 (cl-defmethod clutch-db-list-tables ((conn clutch-jdbc-conn))
   "Return table names for JDBC CONN using DatabaseMetaData.
 For Oracle, defaults the schema filter to the connected username to avoid
@@ -834,6 +859,34 @@ returning tables from SYS/SYSTEM and other visible schemas."
                      ,@(when schema `((schema . ,schema))))))
          (entries (clutch-jdbc--collect-table-entries conn result)))
     entries))
+
+(cl-defmethod clutch-db-list-schemas ((conn clutch-jdbc-conn))
+  "Return visible schema names for JDBC CONN when supported."
+  (when (clutch-jdbc--oracle-conn-p conn)
+    (let* ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn))
+           (result (clutch-jdbc--rpc
+                    "get-schemas"
+                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+                    rpc-timeout)))
+      (clutch-jdbc--visible-schemas conn (plist-get result :schemas)))))
+
+(cl-defmethod clutch-db-current-schema ((conn clutch-jdbc-conn))
+  "Return the effective schema for JDBC CONN."
+  (clutch-jdbc--conn-schema conn))
+
+(cl-defmethod clutch-db-set-current-schema ((conn clutch-jdbc-conn) schema)
+  "Switch JDBC CONN to SCHEMA."
+  (unless (clutch-jdbc--oracle-conn-p conn)
+    (user-error "Schema switching is currently supported only for Oracle JDBC"))
+  (let ((schema (upcase schema)))
+    (clutch-jdbc--rpc
+     "set-current-schema"
+     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+       (schema . ,schema))
+     (clutch-jdbc--conn-rpc-timeout conn))
+    (setf (clutch-jdbc-conn-params conn)
+          (plist-put (clutch-jdbc-conn-params conn) :schema schema))
+    schema))
 
 (cl-defmethod clutch-db-browseable-object-entries ((conn clutch-jdbc-conn))
   "Return the fast browseable object snapshot for JDBC CONN.

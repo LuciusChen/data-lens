@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-**clutch** is an interactive Emacs database client designed to provide an intuitive visual interface for browsing, querying, and mutating SQL databases directly within Emacs. It eliminates the need for external GUI tools or CLI clients by providing a rich, column-paged result browser, schema explorer, and interactive REPL.
+**clutch** is an interactive Emacs database client designed to provide an intuitive visual interface for browsing, querying, and mutating SQL databases directly within Emacs. It eliminates the need for external GUI tools or CLI clients by providing a rich, column-paged result browser, object-centric schema workflow, and interactive REPL.
 
 ### Problem Statement
 
@@ -37,7 +37,7 @@ clutch follows a **layered, interface-based architecture** with clear separation
 ┌─────────────────────────────────────────────────────────┐
 │  UI Layer (clutch.el)                                   │
 │  - Interactive modes and transient menus                │
-│  - Result display, editing buffers, schema browser      │
+│  - Result display, editing buffers, object workflow     │
 │  - Query execution, column paging, mutation workflow    │
 └──────────────────────┬──────────────────────────────────┘
                        │
@@ -72,15 +72,23 @@ clutch follows a **layered, interface-based architecture** with clear separation
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `clutch.el` | ~7800 | Main UI: modes, transient menus, result display, mutation workflow, schema caching |
+| `clutch.el` | ~7800 | Main UI: modes, transient menus, result display, mutation workflow, object-centric schema workflow, schema caching |
 | `clutch-db.el` | ~300 | Generic interface: `cl-defgeneric` definitions, result struct, shared helpers |
 | `clutch-db-mysql.el` | ~320 | MySQL backend adapter, type-category mapping |
 | `clutch-db-pg.el` | ~350 | PostgreSQL backend adapter, OID-to-type mapping |
 | `clutch-db-sqlite.el` | ~330 | SQLite backend adapter (Emacs 29+ `sqlite-*` functions) |
-| `clutch-db-jdbc.el` | ~980 | JDBC backend: JVM sidecar management, JSON protocol, async schema |
+| `clutch-db-jdbc.el` | ~980 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
 | `ob-clutch.el` | ~265 | Org-Babel integration: connection caching, header argument parsing |
 | `mysql.el` | ~1460 | Pure Elisp MySQL wire protocol (no external CLI) |
 | `pg.el` | ~970 | Pure Elisp PostgreSQL wire protocol v3 |
+
+For JDBC-backed databases, one logical clutch connection now maps to two JDBC
+sessions inside the sidecar:
+- a primary session for foreground SQL, transactions, and DDL
+- a metadata session for schema/object introspection
+
+This keeps Oracle-style metadata refresh and object warming from contending with
+user queries on the same JDBC session.
 
 ---
 
@@ -281,25 +289,6 @@ Each field is displayed with:
 
 ---
 
-### clutch-schema-mode (Schema Browser)
-
-**Derived from**: `special-mode`
-**Buffer name pattern**: `*clutch-schema: USER@HOST:PORT/DB*`
-
-Browse tables, columns, indexes, primary and foreign keys, and DDL.
-
-**Keybindings**:
-
-| Key | Command | Description |
-|-----|---------|-------------|
-| `RET` | `clutch-schema-inspect-table` | Show table column details |
-| `D` | `clutch-schema-show-create` | View CREATE TABLE DDL |
-| `i` | `clutch-schema-insert-row` | Open insert buffer for selected table |
-| `g` | `clutch-schema-refresh` | Refresh schema from database |
-| `q` | `quit-window` | Close schema buffer |
-
----
-
 ### clutch-repl-mode (Interactive REPL)
 
 **Derived from**: `comint-mode`
@@ -366,14 +355,15 @@ Line-by-line SQL evaluation with history and inline results.
 | `clutch-result-export-json` | Export result as JSON array |
 | `clutch-result-export-org` | Export result as Org table |
 
-### Schema Browser
+### Object Workflow
 
 | Command | Description |
 |---------|-------------|
-| `clutch-schema-browse` | Open schema browser |
-| `clutch-schema-inspect-table` | Inspect table columns and constraints |
-| `clutch-schema-show-create` | View CREATE TABLE DDL |
-| `clutch-schema-refresh` | Refresh schema from database |
+| `clutch-jump` | Resolve an object and run its default action |
+| `clutch-describe-dwim` | Resolve an object and open its describe view |
+| `clutch-act-dwim` | Resolve an object and show object actions |
+| `clutch-switch-schema` | Switch the effective schema/database for the current connection |
+| `clutch-refresh-schema` | Refresh schema/object metadata from the database |
 
 ### JDBC Management
 
@@ -882,25 +872,6 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | **Multiple result sets** | Stored procedures returning multiple result sets not supported |
 | **Cancel/interrupt** | No UI to cancel a running query mid-execution |
 
-### Explicitly Deferred (v1 — Do Not Add Without Postmortem)
-
-- Connection pooling (HikariCP, c3p0)
-- Async/reactive JDBC (CompletableFuture, Project Reactor)
-- Full JSON-RPC framing (batch requests, notifications)
-- SQL parsing or query analysis in the agent
-- Schema caching inside the agent
-- Advanced transaction management beyond commit/rollback
-- Multiple result sets
-- Separate configuration file for the agent
-- Multi-schema workspace / schema switching within a single connection
-  - Future direction: cache object discovery by `(connection, effective-schema)` so schema switching does not force a full cold start
-  - Not in current scope: DataGrip-style “select multiple schemas and toggle between them” explorer workflow
-- Schema object editing beyond direct SQL authoring
-  - Future direction: add explicit editing flows for schema objects, starting with routine/trigger source editing
-  - Not in current scope: editing table definitions in place and synthesizing backend-specific `ALTER` statements automatically from edited DDL
-
----
-
 ## 19. Development Guidelines
 
 See `CLAUDE.md` in both repos for full rules. Key points:
@@ -934,8 +905,11 @@ M-x clutch-repl
 ;; Connect (from an open clutch-mode buffer)
 C-c C-e  (or  M-x clutch-connect)
 
-;; Browse schema
-M-x clutch-schema-browse
+;; Object jump / describe / actions / schema switch
+C-c C-j
+C-c C-d
+C-c C-o
+C-c C-l
 
 ;; Org-Babel (add to init)
 (require 'ob-clutch)
@@ -943,4 +917,4 @@ M-x clutch-schema-browse
 
 ---
 
-*Last updated: 2026-03-15*
+*Last updated: 2026-03-20*

@@ -801,6 +801,54 @@
                :params '(:driver sqlserver :user "sa"))))
     (should (null (clutch-jdbc--conn-schema conn)))))
 
+(ert-deftest clutch-db-test-jdbc-list-schemas-filters-oracle-system-schemas ()
+  "Oracle JDBC schema listing should filter common system schemas."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 7
+               :params '(:driver oracle :user "zjsy" :rpc-timeout 9)))
+        captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout-seconds)
+                 (setq captured-op op
+                       captured-params params)
+                 '(:schemas ("SYS" "SYSTEM" "ZJSY" "CJH_TEST" "ZJ_TEST")))))
+      (should (equal (clutch-db-list-schemas conn)
+                     '("ZJSY" "CJH_TEST" "ZJ_TEST")))
+      (should (equal captured-op "get-schemas"))
+      (should (= (alist-get 'conn-id captured-params) 7)))))
+
+(ert-deftest clutch-db-test-jdbc-set-current-schema-updates-params ()
+  "Oracle JDBC schema switching should update both JDBC sessions and persist :schema."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 7
+               :params '(:driver oracle :user "zjsy" :rpc-timeout 9)))
+        captured-op captured-params captured-timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional timeout-seconds)
+                 (setq captured-op op
+                       captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:conn-id 7 :schema "CJH_TEST"))))
+      (should (equal (clutch-db-set-current-schema conn "cjh_test") "CJH_TEST"))
+      (should (equal captured-op "set-current-schema"))
+      (should (= (alist-get 'conn-id captured-params) 7))
+      (should (equal (alist-get 'schema captured-params) "CJH_TEST"))
+      (should (= captured-timeout 9))
+      (should (equal (plist-get (clutch-jdbc-conn-params conn) :schema)
+                     "CJH_TEST")))))
+
+(ert-deftest clutch-db-test-mysql-set-current-schema-updates-connection-database ()
+  "MySQL schema switching should execute USE and update the connection database."
+  (let ((conn (make-mysql-conn :database "zj_test"))
+        executed-sql)
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn sql)
+                 (setq executed-sql sql)
+                 (make-clutch-db-result :connection conn :affected-rows 0))))
+      (should (equal (clutch-db-set-current-schema conn "cjh_test") "cjh_test"))
+      (should (equal executed-sql "USE `cjh_test`"))
+      (should (equal (mysql-conn-database conn) "cjh_test")))))
+
 ;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
 
 (ert-deftest clutch-db-test-jdbc-apply-timeout-defaults-fills-missing ()

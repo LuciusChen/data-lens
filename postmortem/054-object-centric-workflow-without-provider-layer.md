@@ -59,6 +59,26 @@ The object workflow therefore favors:
 
 instead of parallel stacks with overlapping responsibilities.
 
+## Describe View versus Definition
+
+The old tree workflow distinguished between two separate tasks:
+
+- inspect object metadata such as columns, parameters, or index keys
+- open the full DDL or source text
+
+That distinction should remain even after the tree buffer is removed.  A
+command named `describe` should answer "what is this object?" instead of
+collapsing into the same DDL/source path as the default action.
+
+The practical outcome is:
+
+- `C-c C-d` remains a describe/inspect view
+- `clutch-object-show-ddl-or-source` remains a separate action
+- Transient and Embark expose both through the same object-action model
+
+This keeps the object workflow converged without flattening two genuinely
+different tasks into one command.
+
 ## Alternatives considered
 
 - **Introduce a new provider layer above `clutch-db-*`**
@@ -74,6 +94,16 @@ instead of parallel stacks with overlapping responsibilities.
   Rejected because it preserved two competing metadata workflows and kept the UX
   split.
 
+- **Collapse describe into DDL/source**
+  Rejected because it duplicates the default action for many object types and
+  removes the first-class replacement for metadata inspection.
+
+- **Build a heavier inspector framework first**
+  Rejected because a simple `special-mode` describe buffer is sufficient for the
+  current object workflow.  The important part is preserving the distinction
+  between "inspect metadata" and "show definition", not building a larger UI
+  subsystem.
+
 ## Accepted limitations
 
 - `clutch.el` still contains both the main SQL UI and the object workflow.
@@ -88,3 +118,6 @@ instead of parallel stacks with overlapping responsibilities.
   backend calls.  If large-schema performance becomes an issue, that should be
   solved by improving object discovery/search APIs rather than by adding a
   second abstraction layer.
+
+- The describe view is intentionally text-based and simple.  It is a shared
+  object view, not a second action architecture.

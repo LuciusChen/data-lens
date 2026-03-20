@@ -8,7 +8,14 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Simplify relentlessly**: Three similar lines of code are better than a premature abstraction. A single large file (like eglot's 3500-line `eglot.el`) is better than five tiny files with unclear boundaries.
 - **Fewer files, clearer boundaries**: Only split a file when it has a genuinely distinct responsibility (e.g., wire protocol vs. UI). Never split for cosmetic reasons or predicted future growth.
 - **Delete, don't deprecate**: If something is unused, remove it entirely. No backward-compatibility shims, no re-exports, no "removed" comments.
-- **Converge UX, avoid mode branches**: Prefer one clear entry point and one consistent behavior model over multiple overlapping commands or prefix-driven branches. If two commands do nearly the same thing, merge them and keep the simpler mental model.
+- **Converge UX, avoid mode branches**: Prefer one clear entry point and one consistent behavior model over multiple overlapping commands or prefix-driven branches. If two commands do nearly the same thing, merge them and keep the simpler mental model. Wrapper commands are acceptable, but they must share one object resolution path, one action registry, and one default-action model.
+
+## Debug Discipline
+
+- **Find the root cause before changing behavior**: Do not patch UI timing, cache invalidation, or command flow until you can name the failing layer and explain why it is responsible.
+- **One failed fix narrows the hypothesis**: If the first attempted fix does not hold, reduce the hypothesis space and gather more evidence. Do not stack another speculative patch on top of the first one.
+- **Two failed fixes stop the patching loop**: After two failed fixes on the same issue, stop changing behavior and switch to diagnosis only: trace the data flow, identify ownership, and isolate the boundary that actually needs to move.
+- **Fix the right layer**: If the real problem belongs in the JDBC agent, protocol code, cache model, or connection lifecycle, move the fix there instead of compensating in the UI layer.
 
 ## Architecture
 
@@ -59,7 +66,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Mode Definitions
 
-- Derive read-only UI buffers from `special-mode` (`clutch-result-mode`, `clutch-record-mode`, `clutch-schema-mode`).
+- Derive read-only UI buffers from `special-mode` (`clutch-result-mode`, `clutch-record-mode`, object definition/describe buffers).
 - Derive editing modes from appropriate parents (`sql-mode` for `clutch-mode`, `comint-mode` for `clutch-repl-mode`).
 - `define-derived-mode` auto-creates `-map`, `-hook`, and `-syntax-table`. Use them.
 - Register buffer-local hooks in the mode body (e.g., `post-command-hook`, `completion-at-point-functions`) with the LOCAL arg `t`.
@@ -86,6 +93,12 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - Pure computation (no side effects) should be separate from display (buffer mutation).
 - Interactive commands should be thin wrappers: validate input, call internal function, show feedback.
 
+## Workflow Change Discipline
+
+- For any change that alters a primary entry point, default action, or action menu, write a short design note before implementing. The note can be brief, but it must state the intended entry point, the default action, and which commands are only wrappers.
+- Keep object resolution, action definition, and action presentation separate. Embark and Transient are presentation layers; they must not become independent business logic systems.
+- Do not let the interaction model drift mid-implementation. If the intended workflow changes, update the design note or postmortem before continuing.
+
 ## Completion
 
 - Always use standard `completing-read`. This works with vertico, ivy, helm, default, etc.
@@ -103,6 +116,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 Before committing significant changes, step back and review the whole diff:
 
 - **No heuristic shortcuts**: If a fix feels "good enough for now", it probably isn't. Either do it correctly or explicitly document why it's deferred in a postmortem.
+- **Fix the real layer**: If the root cause sits in another layer, move the fix there instead of masking it where the symptom appears.
 - **No redundancy**: Check for duplicated logic, dead code, or overlapping abstractions introduced by the change. Remove them.
 - **Long-term correctness**: Ask whether the approach holds up under edge cases (filtered views, missing PK, concurrent buffer edits, etc.).
 - **Docs in sync**: Any change to key bindings, defaults, workflow, or data structures must update `README.org` and, where applicable, add or update a postmortem.
@@ -179,6 +193,12 @@ Before releasing, ensure:
 - Any release-asset change that affects JDBC startup or installation must update `README.org` and, when the tradeoff is non-obvious, add or update a postmortem.
 
 ## Postmortems
+
+## Experimental Scope Discipline
+
+- Start new directions with the smallest slice that proves the workflow is worth having. Do not expand scope before the first slice has shown real user value.
+- Do not implement an object family just because another tool exposes it. Add it only when clutch has a clear, high-frequency workflow for it.
+- Keep speculative domains out of the main workflow until their default actions, object model, and user value are obvious.
 
 The `postmortem/` directory contains design decision records and lessons learned. **Read them before making significant changes.**
 

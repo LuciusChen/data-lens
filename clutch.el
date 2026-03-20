@@ -673,6 +673,30 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
           (or (clutch-db-port conn) "?")
           (or (clutch-db-database conn) "")))
 
+(defun clutch--default-port-for-connection (conn)
+  "Return the default port for CONN's backend, or nil when not applicable."
+  (pcase (downcase (or (clutch-db-display-name conn) ""))
+    ("mysql" 3306)
+    ("postgresql" 5432)
+    ("oracle" 1521)
+    ("sql server" 1433)
+    (_ nil)))
+
+(defun clutch--connection-display-key (conn)
+  "Return a compact display identity for CONN for use in UI only."
+  (let* ((user (or (clutch-db-user conn) "?"))
+         (host (or (clutch-db-host conn) "?"))
+         (port (clutch-db-port conn))
+         (default-port (clutch--default-port-for-connection conn)))
+    (format "%s@%s%s"
+            user
+            host
+            (if (and port default-port (equal port default-port))
+                ""
+              (if port
+                  (format ":%s" port)
+                "")))))
+
 (defun clutch--connection-oracle-jdbc-p (conn)
   "Return non-nil when CONN is a JDBC Oracle connection."
   (and conn
@@ -763,9 +787,9 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
     (let ((icon (clutch--icon '(mdicon . "nf-md-database_lock") "󰪪")))
       (if (clutch-db-manual-commit-p conn)
           (if (clutch--tx-dirty-p conn)
-              (propertize (concat icon " Tx: Manual*") 'face 'warning)
-            (propertize (concat icon " Tx: Manual")   'face 'shadow))
-        (propertize (concat icon " Tx: Auto") 'face 'shadow)))))
+              (propertize (concat icon " Tx: Manual*") 'face 'error)
+            (propertize (concat icon " Tx: Manual")   'face 'warning))
+        (propertize (concat icon " Tx: Auto") 'face 'success)))))
 
 (defun clutch--record-tx-state-after-query (conn sql)
   "Update transaction dirty state for successful SQL on CONN."
@@ -933,6 +957,58 @@ native backends are identified by their display name string."
             (propertize icon 'face `(:foreground ,color :inherit ,(get-text-property 0 'face icon)))
           icon)))))
 
+(defun clutch--backend-key-from-params (params)
+  "Return backend icon key for connection PARAMS, or nil."
+  (let ((backend (plist-get params :backend))
+        (driver  (plist-get params :driver)))
+    (or driver
+        (pcase backend
+          ((or 'pg 'postgresql) 'pg)
+          ((or 'mysql 'mariadb) 'mysql)
+          ('sqlite 'sqlite)
+          ('oracle 'oracle)
+          ('sqlserver 'sqlserver)
+          ('snowflake 'snowflake)
+          ('db2 'db2)
+          ('redshift 'redshift)
+          (_ nil)))))
+
+(defun clutch--backend-display-name-from-params (params)
+  "Return UI backend name for connection PARAMS, or nil."
+  (pcase (clutch--backend-key-from-params params)
+    ('mysql "MySQL")
+    ('pg "PostgreSQL")
+    ('sqlite "SQLite")
+    ('oracle "Oracle")
+    ('sqlserver "SQL Server")
+    ('snowflake "Snowflake")
+    ('db2 "DB2")
+    ('redshift "Redshift")
+    (_ nil)))
+
+(defun clutch--db-backend-icon-from-params (params)
+  "Return a colored nerd-icons glyph for connection PARAMS, or nil."
+  (when-let* ((key  (clutch--backend-key-from-params params))
+              (spec (alist-get key clutch--db-icon-specs)))
+    (let* ((rest      (cddr spec))
+           (color     (plist-get rest :color))
+           (icon-args (cl-loop for (k v) on rest by #'cddr
+                               unless (eq k :color) nconc (list k v)))
+           (icon      (apply #'clutch--icon (car spec) (cadr spec) icon-args)))
+      (if (and color (not (string-empty-p icon)))
+          (propertize icon 'face `(:foreground ,color :inherit ,(get-text-property 0 'face icon)))
+        icon))))
+
+(defun clutch--connection-state-icon (connected)
+  "Return a connection state icon for CONNECTED."
+  (if connected
+      (propertize
+       (concat (clutch--icon '(mdicon . "nf-md-connection") "⇄"))
+       'face 'success)
+    (propertize
+     (concat (clutch--icon '(mdicon . "nf-md-close_network") "⨯"))
+     'face 'warning)))
+
 (defun clutch--header-line-indent ()
   "Return leading spaces to align header-line text with the buffer text area.
 Accounts for the line-number gutter when `display-line-numbers-mode' is on."
@@ -942,15 +1018,42 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   "Build the header-line string for the current clutch buffer."
   (let ((indent (clutch--header-line-indent)))
     (if (not (clutch--connection-alive-p clutch-connection))
-        (concat indent (propertize "Not connected" 'face 'shadow))
+        (let* ((sep          (propertize "  •  " 'face 'shadow))
+               (backend-icon (or (and clutch-connection (clutch--db-backend-icon clutch-connection))
+                                 (and clutch--connection-params
+                                      (clutch--db-backend-icon-from-params clutch--connection-params))))
+               (backend-name (or (and clutch-connection (clutch-db-display-name clutch-connection))
+                                 (and clutch--connection-params
+                                      (clutch--backend-display-name-from-params clutch--connection-params))))
+               (backend      (and backend-name (propertize backend-name 'face 'bold)))
+               (disconnect   (concat (clutch--connection-state-icon nil)
+                                     " "
+                                     (propertize "Disconnect" 'face 'warning)))
+               (parts        (delq nil (list (if backend
+                                                 (if backend-icon
+                                                     (concat backend-icon " " backend)
+                                                   backend)
+                                               nil)
+                                             disconnect))))
+          (concat indent
+                  (if parts
+                      (mapconcat #'identity parts sep)
+                    disconnect)))
       (let* ((sep     (propertize "  •  " 'face 'shadow))
              (icon    (clutch--db-backend-icon clutch-connection))
              (backend (propertize (clutch-db-display-name clutch-connection) 'face 'bold))
-             (key     (clutch--connection-key clutch-connection))
+             (key     (concat (clutch--connection-state-icon t)
+                              " "
+                              (clutch--connection-display-key clutch-connection)))
+             (current-schema
+              (when-let* ((schema (clutch-db-current-schema clutch-connection))
+                          ((not (or (string-equal-ignore-case schema (or (clutch-db-database clutch-connection) ""))
+                                    (string-equal-ignore-case schema (or (clutch-db-user clutch-connection) ""))))))
+                (format "Schema: %s" schema)))
              (schema  (clutch--schema-status-header-line-segment clutch-connection))
              (tx      (clutch--tx-header-line-segment clutch-connection))
              (parts   (delq nil (list (if icon (concat icon " " backend) backend)
-                                      key schema tx))))
+                                      key current-schema schema tx))))
         (concat indent (mapconcat #'identity parts sep))))))
 
 (defun clutch--update-mode-line ()
@@ -1557,6 +1660,10 @@ the real rendered width, preventing column misalignment."
             raw)))
     (if face (propertize result 'face face) result)))
 
+(defun clutch--footer-icon (spec fallback face)
+  "Return footer icon SPEC/FALLBACK with explicit FACE."
+  (propertize (concat (clutch--icon spec fallback) " ") 'face face))
+
 (defun clutch--header-label (name cidx)
   "Build the display label for column NAME at index CIDX.
 Prepends sort indicator and pin marker before the name."
@@ -1747,8 +1854,8 @@ ROW-COUNT is the current page count, TOTAL-ROWS is the overall total or nil."
                          (propertize (format "[%s] " label) 'face dim))))
       (if (> (plist-get stats :count) 0)
           (concat
-           (propertize (concat (clutch--icon '(mdicon . "nf-md-calculator_variant") "∑") " ")
-                       'face dim)
+           (clutch--footer-icon '(mdicon . "nf-md-calculator_variant") "∑"
+                                'font-lock-keyword-face)
            label-part
            (propertize (format " sum=%g avg=%g min=%g max=%g"
                                (plist-get stats :sum)
@@ -1762,8 +1869,8 @@ ROW-COUNT is the current page count, TOTAL-ROWS is the overall total or nil."
                                (plist-get stats :skipped))
                        'face dim))
         (concat
-         (propertize (concat (clutch--icon '(mdicon . "nf-md-calculator_variant") "∑") " ")
-                     'face dim)
+         (clutch--footer-icon '(mdicon . "nf-md-calculator_variant") "∑"
+                              'font-lock-keyword-face)
          label-part
          (propertize " n/a" 'face hi)
          (propertize (format " [r%d c%d s%d]"
@@ -1779,13 +1886,15 @@ Returns a list of propertized strings (may be empty)."
         (list
          (clutch--footer-aggregate-part)
          (when clutch--where-filter
-           (let ((icon (clutch--icon '(codicon . "nf-cod-filter") "W:")))
-             (concat (propertize (concat icon " ") 'face 'font-lock-warning-face)
+           (let ((icon (clutch--footer-icon '(codicon . "nf-cod-filter") "W:"
+                                            'font-lock-warning-face)))
+             (concat icon
                      (propertize clutch--where-filter
                                  'face 'font-lock-warning-face))))
          (when clutch--filter-pattern
-           (let ((icon (clutch--icon '(codicon . "nf-cod-search") "/:")))
-             (concat (propertize (concat icon " ") 'face 'font-lock-string-face)
+           (let ((icon (clutch--footer-icon '(codicon . "nf-cod-search") "/:"
+                                            'font-lock-string-face)))
+             (concat icon
                      (propertize clutch--filter-pattern
                                  'face 'font-lock-string-face)))))))
 
@@ -1793,13 +1902,11 @@ Returns a list of propertized strings (may be empty)."
   "Build footer part for active SQL ORDER BY state."
   (when-let* ((order clutch--order-by))
     (pcase-let ((`(,column . ,direction) order))
-      (let ((dim 'font-lock-comment-face)
-            (icon (if (string-match-p "\\`desc\\'" direction)
+      (let ((icon (if (string-match-p "\\`desc\\'" direction)
                       '(octicon . "nf-oct-sort_desc")
                     '(octicon . "nf-oct-sort_asc")))
             (hi 'font-lock-keyword-face))
-        (concat (propertize (concat (clutch--icon icon "↕") " ")
-                            'face dim)
+        (concat (clutch--footer-icon icon "↕" hi)
                 (propertize (format "%s[%s]" (upcase direction) column)
                             'face hi))))))
 
@@ -1817,8 +1924,8 @@ Returns a list of propertized strings (may be empty)."
             parts))
     (when parts
       (concat
-       (propertize (concat (clutch--icon '(codicon . "nf-cod-diff_modified") "✎") " ")
-                   'face 'font-lock-comment-face)
+       (clutch--footer-icon '(codicon . "nf-cod-diff_modified") "✎"
+                            'clutch-modified-face)
        (propertize (mapconcat #'identity (nreverse parts) " ")
                    'face 'clutch-modified-face)
        (propertize "  commit:C-c C-c  discard:C-c C-k"
@@ -1829,12 +1936,11 @@ Returns a list of propertized strings (may be empty)."
   (when-let* ((table (and clutch--result-columns
                           (clutch-result--detect-table))))
     (unless clutch--cached-pk-indices
-      (let ((dim 'font-lock-comment-face)
-            (warn 'font-lock-warning-face))
-        (concat (propertize (concat (clutch--icon '(codicon . "nf-cod-warning") "⚠") " ")
-                            'face dim)
-                (propertize "PK missing" 'face warn)
-                (propertize (format "  %s  E/D off" table) 'face dim))))))
+      (let ((warn-icon 'font-lock-warning-face)
+            (warn-text '(:inherit font-lock-warning-face :weight normal)))
+        (concat (clutch--footer-icon '(codicon . "nf-cod-warning") "⚠" warn-icon)
+                (propertize "PK missing" 'face warn-text)
+                (propertize (format "  %s  E/D off" table) 'face warn-text))))))
 
 (defun clutch--footer-main-parts (row-count page-num page-size
                                              total-rows col-num-pages col-cur-page)
@@ -1845,24 +1951,21 @@ Returns a list of propertized strings (may be empty)."
                         (max 1 (ceiling total-rows (float page-size))))))
     (delq nil
           (list
-           (concat (propertize (concat (clutch--icon '(mdicon . "nf-md-sigma") "Σ") " ")
-                               'face dim)
+           (concat (clutch--footer-icon '(mdicon . "nf-md-sigma") "Σ" hi)
                    (clutch--footer-row-summary row-count total-rows))
-           (concat (propertize (concat (clutch--icon '(codicon . "nf-cod-files") "⊞") " ")
-                               'face dim)
+           (concat (clutch--footer-icon '(codicon . "nf-cod-files") "⊞" hi)
                    (propertize (format "%d" (1+ page-num)) 'face hi)
                    (propertize " / " 'face dim)
                    (propertize (format "%d" (or total-pages 1)) 'face hi))
            (when (> col-num-pages 1)
-             (concat (propertize (concat (clutch--icon '(codicon . "nf-cod-split_horizontal") "⫼") " ")
-                                 'face dim)
+             (concat (clutch--footer-icon '(codicon . "nf-cod-split_horizontal") "⫼" hi)
                      (propertize (format "%d/%d" col-cur-page col-num-pages) 'face hi)))
+           (clutch--tx-header-line-segment clutch-connection)
            (clutch--footer-sort-part)
            (clutch--footer-mutation-capability-part)
            (clutch--footer-pending-part)
            (when clutch--query-elapsed
-             (concat (propertize (concat (clutch--icon '(mdicon . "nf-md-timer_outline") "⏱") " ")
-                                 'face dim)
+             (concat (clutch--footer-icon '(mdicon . "nf-md-timer_outline") "⏱" hi)
                      (propertize (clutch--format-elapsed clutch--query-elapsed)
                                  'face hi)))))))
 
@@ -3151,6 +3254,23 @@ When TICKET is non-nil, ignore the update unless it is still current."
       (clutch--schedule-object-warmup conn)
       t)))
 
+(defun clutch--clear-connection-metadata-caches (conn &optional key)
+  "Clear schema-scoped metadata caches for CONN.
+When KEY is non-nil, clear that cache namespace instead of CONN's current key."
+  (let ((key (or key (clutch--connection-key conn))))
+    (remhash key clutch--schema-cache)
+    (remhash key clutch--columns-status-cache)
+    (remhash key clutch--column-details-cache)
+    (remhash key clutch--column-details-status-cache)
+    (remhash key clutch--column-details-queue-cache)
+    (remhash key clutch--column-details-active-cache)
+    (remhash key clutch--table-comment-cache)
+    (remhash key clutch--help-doc-cache)
+    (clutch--cancel-object-warmup conn)
+    (remhash key clutch--object-cache)
+    (remhash key clutch--schema-status-cache)
+    (remhash key clutch--schema-refresh-tickets)))
+
 (defun clutch--refresh-schema-cache-async (conn)
   "Refresh schema cache for CONN asynchronously when supported.
 Return non-nil when an asynchronous refresh was started."
@@ -3193,6 +3313,48 @@ Useful after DDL operations (CREATE TABLE, ALTER TABLE, DROP TABLE)
 executed outside clutch that would otherwise leave stale completions."
   (interactive)
   (clutch--refresh-current-schema))
+
+(defun clutch--update-connection-params-for-buffers (conn update-fn)
+  "Apply UPDATE-FN to buffer-local connection params for buffers attached to CONN."
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (eq clutch-connection conn)
+          (setq-local clutch--connection-params
+                      (funcall update-fn clutch--connection-params))
+          (clutch--update-mode-line))))))
+
+(defun clutch-switch-schema ()
+  "Switch the current Oracle/JDBC connection to another visible schema."
+  (interactive)
+  (let* ((context (clutch--command-connection-context))
+         (conn (or clutch-connection
+                   (plist-get context :connection)
+                   (user-error "No active connection")))
+         (schemas (clutch-db-list-schemas conn))
+         (current (clutch-db-current-schema conn))
+         (old-key (clutch--connection-key conn)))
+    (unless schemas
+      (user-error "Runtime schema switching is not available for this connection"))
+    (let ((schema (completing-read
+                   (if current
+                       (format "Switch schema (current %s): " current)
+                     "Switch schema: ")
+                   schemas nil t nil nil current)))
+      (unless (string-empty-p schema)
+        (if (and current (string-equal-ignore-case schema current))
+            (message "Already using schema %s" current)
+          (clutch-db-set-current-schema conn schema)
+          (clutch--update-connection-params-for-buffers
+           conn
+           (lambda (params)
+             (if (eq (plist-get params :backend) 'mysql)
+                 (plist-put params :database schema)
+               (plist-put params :schema schema))))
+          (clutch--clear-connection-metadata-caches conn old-key)
+          (clutch--clear-connection-metadata-caches conn)
+          (clutch--refresh-current-schema t)
+          (message "Switched schema to %s" schema))))))
 
 (defun clutch--ensure-columns (conn schema table)
   "Ensure column info for TABLE is loaded in SCHEMA.
@@ -5304,6 +5466,7 @@ only resolve table-like objects."
     (define-key map (kbd "C-c C-j") #'clutch-jump)
     (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
     (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
+    (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
     (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
     (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
     (define-key map (kbd "C-c ?") #'clutch-dispatch)
@@ -5323,6 +5486,7 @@ Key bindings:
   \\[clutch-jump]	Object jump
   \\[clutch-describe-dwim]	Describe object
   \\[clutch-act-dwim]	Object actions
+  \\[clutch-switch-schema]	Switch schema
   \\[clutch-preview-execution-sql]	Preview execution"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
   (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
@@ -8851,6 +9015,7 @@ Selects JSON, XML, or binary string view based on column type and content."
     (define-key map (kbd "C-c C-j") #'clutch-jump)
     (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
     (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
+    (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
     map)
   "Keymap for `clutch-repl-mode'.")
 
@@ -8864,7 +9029,8 @@ Selects JSON, XML, or binary string view based on column type and content."
   \\[clutch-connect]	Connect to server
   \\[clutch-jump]	Object jump
   \\[clutch-describe-dwim]	Describe object
-  \\[clutch-act-dwim]	Object actions"
+  \\[clutch-act-dwim]	Object actions
+  \\[clutch-switch-schema]	Switch schema"
   (setq comint-prompt-regexp "^db> \\|^    -> ")
   (setq comint-input-sender #'clutch-repl--input-sender)
   (clutch--install-completion-capfs))
@@ -8981,6 +9147,7 @@ Accumulates input until a semicolon is found, then executes."
     ("j" "Jump object"        clutch-jump)
     ("D" "Describe object"    clutch-describe-dwim)
     ("o" "Object actions"     clutch-act-dwim)
+    ("l" "Switch schema"      clutch-switch-schema)
     ("s" "Refresh schema"   clutch-refresh-schema)]])
 
 (transient-define-prefix clutch-result-dispatch ()

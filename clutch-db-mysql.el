@@ -178,6 +178,32 @@ Appends LIMIT/OFFSET directly to BASE-SQL.  ORDER-BY is (COL . DIR) or nil."
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
+(cl-defmethod clutch-db-list-schemas ((conn mysql-conn))
+  "Return visible MySQL schema/database names for CONN."
+  (condition-case err
+      (let ((result (mysql-query conn "SHOW DATABASES")))
+        (sort (mapcar #'car (mysql-result-rows result)) #'string-collate-lessp))
+    (mysql-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-current-schema ((conn mysql-conn))
+  "Return the current MySQL schema/database for CONN."
+  (clutch-db-database conn))
+
+(cl-defmethod clutch-db-set-current-schema ((conn mysql-conn) schema)
+  "Switch MySQL CONN to SCHEMA."
+  (condition-case err
+      (let ((schema (string-trim schema)))
+        (clutch-db-query
+         conn
+         (format "USE %s" (clutch-db-escape-identifier conn schema)))
+        (setf (mysql-conn-database conn) schema)
+        schema)
+    (mysql-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
 (cl-defmethod clutch-db-list-table-entries ((conn mysql-conn))
   "Return table/view entry plists for the current MySQL database."
   (condition-case err

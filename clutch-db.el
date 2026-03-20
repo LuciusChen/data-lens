@@ -203,6 +203,27 @@ the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
 (cl-defgeneric clutch-db-list-tables (conn)
   "Return a list of table name strings for CONN's current database.")
 
+(cl-defgeneric clutch-db-list-schemas (conn)
+  "Return available schema names for CONN, or nil when unsupported.")
+
+(cl-defmethod clutch-db-list-schemas ((_conn t))
+  "Backends without schema enumeration support return nil."
+  nil)
+
+(cl-defgeneric clutch-db-current-schema (conn)
+  "Return the effective current schema for CONN, or nil when not applicable.")
+
+(cl-defmethod clutch-db-current-schema ((_conn t))
+  "Default: no current schema abstraction."
+  nil)
+
+(cl-defgeneric clutch-db-set-current-schema (conn schema)
+  "Switch CONN to SCHEMA for subsequent metadata and query context.")
+
+(cl-defmethod clutch-db-set-current-schema ((_conn t) _schema)
+  "Default: runtime schema switching is unsupported."
+  (user-error "This backend does not support switching schemas"))
+
 (cl-defgeneric clutch-db-list-table-entries (conn)
   "Return browseable table-like object entries for CONN.
 Each entry is a plist containing at least :name and :type, and may also
