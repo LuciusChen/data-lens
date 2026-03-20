@@ -430,7 +430,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
            (footer (substring-no-properties footer-prop))
            (pk-start (string-match "PK missing" footer)))
       (should (string-match-p "PK missing" footer))
-      (should (string-match-p "users" footer))
+      (should-not (string-match-p "users" footer))
       (should (string-match-p "E/D off" footer))
       (should pk-start)
       (should (equal (get-text-property pk-start 'face footer-prop)
@@ -4308,6 +4308,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--icon) (lambda (&rest _) "[schema]"))
               ((symbol-function 'clutch--db-backend-icon) (lambda (_conn) nil))
               ((symbol-function 'clutch-db-display-name) (lambda (_conn) "Oracle"))
               ((symbol-function 'clutch--connection-display-key) (lambda (_conn) "scott@dbhost"))
@@ -4319,13 +4320,15 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
               ((symbol-function 'clutch--header-line-indent) (lambda () "")))
       (let ((line (clutch--build-connection-header-line)))
         (should (string-match-p "scott@dbhost" line))
-        (should (string-match-p "Schema: ZJ_TEST" line))))))
+        (should (string-match-p "\\[schema\\] ZJ_TEST" line))
+        (should-not (string-match-p "Schema:" line))))))
 
-(ert-deftest clutch-test-switch-schema-header-line-hides-redundant-schema ()
-  "Connection header line should hide schema when it duplicates user or database."
+(ert-deftest clutch-test-header-line-shows-schema-even-when-redundant ()
+  "Connection header line should show the effective schema whenever available."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--icon) (lambda (&rest _) "[schema]"))
               ((symbol-function 'clutch--db-backend-icon) (lambda (_conn) nil))
               ((symbol-function 'clutch-db-display-name) (lambda (_conn) "MySQL"))
               ((symbol-function 'clutch--connection-display-key) (lambda (_conn) "user@host"))
@@ -4337,6 +4340,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
               ((symbol-function 'clutch--header-line-indent) (lambda () "")))
       (let ((line (clutch--build-connection-header-line)))
         (should (string-match-p "user@host" line))
+        (should (string-match-p "\\[schema\\] zj_test" line))
         (should-not (string-match-p "Schema:" line))))))
 
 (ert-deftest clutch-test-disconnected-header-line-shows-backend-and-warning-state ()
@@ -4486,13 +4490,36 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                          (clutch--embark-action-specs
                           (lambda (spec)
                             (not (eq (plist-get spec :id) 'jump-target)))))
-                 '(describe copy-name copy-fqname))))
+                 '(describe show-definition copy-name copy-fqname))))
 
 (ert-deftest clutch-test-embark-target-action-specs-keep-jump-target ()
   "Target-capable Embark menus should keep jump-target."
   (should (equal (mapcar (lambda (spec) (plist-get spec :id))
                          (clutch--embark-action-specs))
-                 '(describe jump-target copy-name copy-fqname))))
+                 '(describe show-definition jump-target copy-name copy-fqname))))
+
+(ert-deftest clutch-test-embark-command-label-uses-shared-label ()
+  "Embark command labels should reuse the shared object action wording."
+  (should (equal (clutch--embark-command-label 'clutch-object-show-ddl-or-source)
+                 "Show definition"))
+  (should (equal (clutch--embark-command-label 'clutch-object-default-action)
+                 "Default action")))
+
+(ert-deftest clutch-test-render-object-describe-keeps-fqname-in-body-not-header ()
+  "Describe buffers should keep the fqname in the body title, not duplicate it in the header-line."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'clutch--bind-connection-context) #'ignore)
+              ((symbol-function 'clutch--icon) (lambda (&rest _) "[desc]"))
+              ((symbol-function 'clutch--object-describe-text)
+               (lambda (_conn _entry)
+                 "PUBLIC.orders (TABLE)\n\nSummary\n  Name  orders")))
+      (clutch--render-object-describe
+       'fake-conn
+       '(:name "orders" :type "TABLE" :source-schema "PUBLIC"))
+      (should (string-match-p "PUBLIC.orders (TABLE)" (buffer-string)))
+      (should (string-match-p "\\[desc\\]" (format "%s" header-line-format)))
+      (should (string-match-p "show definition" (format "%s" header-line-format)))
+      (should-not (string-match-p "PUBLIC.orders" (format "%s" header-line-format))))))
 
 (ert-deftest clutch-test-browse-table-inserts-escaped-select ()
   "Browse-table compatibility wrapper should still escape identifiers."

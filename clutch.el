@@ -953,6 +953,15 @@ Returns nil when the schema is ready (no noise for the happy path)."
       ('failed     (propertize "schema!" 'face 'error))
       (_ nil))))
 
+(defun clutch--current-schema-header-line-segment (conn)
+  "Return a header-line segment for CONN's current schema, or nil."
+  (when-let* ((schema (clutch-db-current-schema conn)))
+    (let ((icon (clutch--icon-with-face '(mdicon . "nf-md-sitemap_outline")
+                                        "≣" 'header-line)))
+      (if (string-empty-p icon)
+          schema
+        (format "%s %s" icon schema)))))
+
 (defconst clutch--db-icon-specs
   ;; Each entry: (BACKEND . (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS))
   ;; :color sets the icon foreground; remaining ICON-ARGS (e.g. :height) are
@@ -1044,12 +1053,8 @@ native backends are identified by their display name string."
 (defun clutch--connection-state-icon (connected)
   "Return a connection state icon for CONNECTED."
   (if connected
-      (propertize
-       (concat (clutch--icon '(mdicon . "nf-md-connection") "⇄"))
-       'face 'success)
-    (propertize
-     (concat (clutch--icon '(mdicon . "nf-md-close_network") "⨯"))
-     'face 'warning)))
+      (clutch--icon '(mdicon . "nf-md-connection") "⇄")
+    (clutch--icon '(mdicon . "nf-md-close_network") "⨯")))
 
 (defun clutch--header-line-indent ()
   "Return leading spaces to align header-line text with the buffer text area.
@@ -1063,9 +1068,11 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
         (let* ((sep          (propertize "  •  " 'face 'shadow))
                (backend      (clutch--connection-backend-segment
                               clutch-connection clutch--connection-params))
-               (disconnect   (concat (clutch--connection-state-icon nil)
-                                     " "
-                                     (propertize "Disconnect" 'face 'warning)))
+               (disconnect   (propertize
+                              (concat (clutch--connection-state-icon nil)
+                                      " "
+                                      "Disconnect")
+                              'face 'warning))
                (parts        (delq nil (list (if backend
                                                  backend
                                                nil)
@@ -1080,10 +1087,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
                               " "
                               (clutch--connection-display-key clutch-connection)))
              (current-schema
-              (when-let* ((schema (clutch-db-current-schema clutch-connection))
-                          ((not (or (string-equal-ignore-case schema (or (clutch-db-database clutch-connection) ""))
-                                    (string-equal-ignore-case schema (or (clutch-db-user clutch-connection) ""))))))
-                (format "Schema: %s" schema)))
+              (clutch--current-schema-header-line-segment clutch-connection))
              (schema  (clutch--schema-status-header-line-segment clutch-connection))
              (tx      (clutch--tx-header-line-segment clutch-connection))
              (parts   (delq nil (list backend
@@ -1667,6 +1671,13 @@ Falls back gracefully when nerd-icons is not installed or unknown."
         fallback
         "")))
 
+(defun clutch--icon-with-face (name fallback face &rest icon-args)
+  "Return icon NAME/FALLBACK with FACE appended to its text properties."
+  (let ((icon (apply #'clutch--icon name fallback icon-args)))
+    (unless (string-empty-p icon)
+      (add-face-text-property 0 (length icon) face 'append icon))
+    icon))
+
 (defun clutch--fixed-width-icon (spec fallback &optional face)
   "Return icon with `string-width' matching actual display width.
 SPEC is (FAMILY . ICON-NAME) for `clutch--icon'.
@@ -1701,21 +1712,17 @@ the real rendered width, preventing column misalignment."
 (defun clutch--header-label (name cidx)
   "Build the display label for column NAME at index CIDX.
 Prepends sort indicator and pin marker before the name."
-  (let* ((hi 'font-lock-keyword-face)
-         (pin-face 'clutch-col-page-face)
-         (sort (when (and clutch--sort-column
+  (let* ((sort (when (and clutch--sort-column
                           (string= name clutch--sort-column))
                  (let ((s (clutch--fixed-width-icon
                            (if clutch--sort-descending
                                '(codicon . "nf-cod-arrow_down")
                              '(codicon . "nf-cod-arrow_up"))
-                           (if clutch--sort-descending "▼" "▲")
-                           hi)))
+                           (if clutch--sort-descending "▼" "▲"))))
                    (when s
                      (propertize s 'clutch-header-icon t)))))
          (pin (when (memq cidx clutch--pinned-columns)
                 (let ((s (clutch--icon '(mdicon . "nf-md-pin") "∎")))
-                  (add-face-text-property 0 (length s) pin-face 'append s)
                   (propertize s 'clutch-header-icon t)))))
     (if (or sort pin)
         (concat (or sort "") (or pin "") (if (or sort pin) " " "") name)
@@ -1967,14 +1974,14 @@ Returns a list of propertized strings (may be empty)."
 
 (defun clutch--footer-mutation-capability-part ()
   "Build footer part describing update/delete capability for the result."
-  (when-let* ((table (and clutch--result-columns
-                          (clutch-result--detect-table))))
+  (when (and clutch--result-columns
+             (clutch-result--detect-table))
     (unless clutch--cached-pk-indices
       (let ((warn-icon 'font-lock-warning-face)
             (warn-text '(:inherit font-lock-warning-face :weight normal)))
         (concat (clutch--footer-icon '(codicon . "nf-cod-warning") "⚠" warn-icon)
                 (propertize "PK missing" 'face warn-text)
-                (propertize (format "  %s  E/D off" table) 'face warn-text))))))
+                (propertize " E/D off" 'face warn-text))))))
 
 (defun clutch--footer-main-parts (row-count page-num page-size
                                              total-rows col-num-pages col-cur-page)
@@ -5408,8 +5415,12 @@ selection can surface objects from different Oracle sources and types."
     (setq-local clutch-browser-current-object entry
                 clutch--describe-object-entry entry
                 header-line-format
-                (format " %s  [s: show definition  C-c C-o: object actions  g: refresh]"
-                        (clutch--object-fqname entry))
+                (let ((icon (clutch--icon-with-face '(mdicon . "nf-md-table")
+                                                    "▦" 'header-line)))
+                  (if (string-empty-p icon)
+                      " [s: show definition  C-c C-o: object actions  g: refresh]"
+                    (format " %s  [s: show definition  C-c C-o: object actions  g: refresh]"
+                            icon)))
                 revert-buffer-function #'clutch-describe-refresh)
     (erase-buffer)
     (insert (clutch--object-describe-text conn entry))
@@ -9546,7 +9557,7 @@ Accumulates input until a semicolon is found, then executes."
 When PREDICATE is non-nil, keep only action specs matching it."
   (seq-filter
    (lambda (spec)
-     (and (not (memq (plist-get spec :id) '(browse show-definition)))
+     (and (not (eq (plist-get spec :id) 'browse))
           (or (null predicate)
               (funcall predicate spec))))
    clutch--object-action-registry))
@@ -9556,6 +9567,24 @@ When PREDICATE is non-nil, keep only action specs matching it."
   (if (clutch--object-supports-jump-target-p entry)
       'clutch-target-object
     'clutch-object))
+
+(defconst clutch--embark-command-labels
+  '((clutch-object-default-action . "Default action")
+    (clutch-object-describe . "Describe object")
+    (clutch-object-show-ddl-or-source . "Show definition")
+    (clutch-object-jump-target . "Jump target")
+    (clutch-copy-object-name . "Copy name")
+    (clutch-copy-object-fqname . "Copy fqname"))
+  "Display labels for clutch commands shown through Embark.")
+
+(defun clutch--embark-command-label (cmd)
+  "Return Embark display label for clutch command CMD, or nil."
+  (alist-get cmd clutch--embark-command-labels))
+
+(defun clutch--embark-command-name-advice (orig cmd)
+  "Return a clutch-specific display name for CMD, delegating to ORIG otherwise."
+  (or (clutch--embark-command-label cmd)
+      (funcall orig cmd)))
 
 ;;;; Embark integration (optional)
 
@@ -9578,6 +9607,12 @@ When PREDICATE is non-nil, keep only action specs matching it."
              ,clutch-browser-current-object)))))))
 
 (with-eval-after-load 'embark
+  (add-to-list 'embark-default-action-overrides
+               '(clutch-object . clutch-object-default-action))
+  (add-to-list 'embark-default-action-overrides
+               '(clutch-target-object . clutch-object-default-action))
+  (advice-add 'embark--command-name :around #'clutch--embark-command-name-advice)
+
   (defvar clutch-embark-object-actions
     (let ((map (make-sparse-keymap)))
       (dolist (spec (clutch--embark-action-specs
