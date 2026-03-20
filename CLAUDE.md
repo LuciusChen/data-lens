@@ -2,129 +2,103 @@
 
 Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/marginalia.
 
-## First Principles
+## Core Principles
 
-- **Question every abstraction**: Before adding a layer, file, or indirection, ask "is this solving a real problem right now?" If the answer is hypothetical, don't add it.
-- **Simplify relentlessly**: Three similar lines of code are better than a premature abstraction. A single large file (like eglot's 3500-line `eglot.el`) is better than five tiny files with unclear boundaries.
-- **Fewer files, clearer boundaries**: Only split a file when it has a genuinely distinct responsibility (e.g., wire protocol vs. UI). Never split for cosmetic reasons or predicted future growth.
-- **Delete, don't deprecate**: If something is unused, remove it entirely. No backward-compatibility shims, no re-exports, no "removed" comments.
-- **Converge UX, avoid mode branches**: Prefer one clear entry point and one consistent behavior model over multiple overlapping commands or prefix-driven branches. If two commands do nearly the same thing, merge them and keep the simpler mental model. Wrapper commands are acceptable, but they must share one object resolution path, one action registry, and one default-action model.
+- **Question every abstraction**: Before adding a layer, file, or indirection, ask whether it solves a current problem. If the answer is hypothetical, do not add it.
+- **Simplify relentlessly**: Three similar lines are better than a premature abstraction. A single large file is better than several tiny files with unclear boundaries.
+- **Fewer files, clearer boundaries**: Split only when a file has a genuinely distinct responsibility. Never split for cosmetic reasons.
+- **Delete, don't deprecate**: Remove unused code entirely. No backward-compatibility shims, re-exports, or "removed" comments.
+- **Converge UX**: Prefer one clear entry point and one consistent behavior model over overlapping commands or branchy mode-specific behavior. Wrapper commands are fine, but they must share one resolution path, one action registry, and one default-action model.
 
-## Debug Discipline
+## Diagnosis and Change Discipline
 
 - **Find the root cause before changing behavior**: Do not patch UI timing, cache invalidation, or command flow until you can name the failing layer and explain why it is responsible.
-- **One failed fix narrows the hypothesis**: If the first attempted fix does not hold, reduce the hypothesis space and gather more evidence. Do not stack another speculative patch on top of the first one.
-- **Two failed fixes stop the patching loop**: After two failed fixes on the same issue, stop changing behavior and switch to diagnosis only: trace the data flow, identify ownership, and isolate the boundary that actually needs to move.
+- **One failed fix narrows the hypothesis**: If the first attempted fix does not hold, reduce the hypothesis space and gather evidence. Do not stack another speculative patch on top.
+- **Two failed fixes stop the patching loop**: After two failed fixes on the same issue, stop changing behavior and switch to diagnosis only.
 - **Fix the right layer**: If the real problem belongs in the JDBC agent, protocol code, cache model, or connection lifecycle, move the fix there instead of compensating in the UI layer.
+- **Stabilize workflow changes before coding**: For any change that alters a primary entry point, default action, or action menu, write a short design note first. Keep object resolution, action definition, and action presentation separate.
+- **Keep experiments narrow**: Start new directions with the smallest slice that proves the workflow is worth having. Do not expand scope before the first slice shows real user value.
 
-## Architecture
+## Architecture and Implementation
 
-- **Interface / Implementation separation**: `mysql.el` and `pg.el` (protocol layers) are pure libraries with no UI; `clutch.el` (UI layer) depends on `clutch-db.el` (generic interface) but never on protocol layers directly. Keep the dependency flow strictly one-directional.
-- **Single responsibility per file**: Each file has one job. Don't mix protocol code with rendering code.
-- **No side effects on load**: Loading a file should not alter Emacs behavior. All behavior activation must be explicit (user calls a command or enables a mode).
-- **Reuse Emacs infrastructure**: Use `completing-read` (not framework-specific APIs), `special-mode` for read-only buffers, `text-property-search-forward` for navigation, standard hooks, etc.
+- **Interface / implementation separation**: `mysql.el` and `pg.el` are pure protocol libraries with no UI. `clutch.el` depends on `clutch-db.el`, not protocol layers directly.
+- **Single responsibility per file**: Do not mix protocol code with rendering code.
+- **No side effects on load**: Loading a file must not alter Emacs behavior. Activation must be explicit.
+- **Reuse Emacs infrastructure**: Use `completing-read`, `special-mode`, `text-property-search-forward`, standard hooks, and other stock primitives.
+- **Public naming**: `clutch-` for UI, `mysql-` / `pg-` for protocol. No double dash for public API.
+- **Private naming**: `clutch--`, `mysql--`, `pg--`. Never call private symbols from outside the defining file.
+- **Predicates**: Multi-word predicate names end in `-p`.
+- **Unused args**: Prefix with `_`.
+- **Prefer flat control flow**: Avoid deep `let` → `if` → `let` nesting. Use `if-let*`, `when-let*`, `pcase`, and `pcase-let`.
+- **Prefer `cl-loop` for non-trivial accumulation**: Use it instead of `dolist` + manual accumulators or over-clever folds.
+- **Use the right error type**: `user-error` for user-caused problems; `error` for programmer bugs; `condition-case` for recoverable failures.
+- **State placement**: `defvar-local` for buffer state, plain `defvar` for shared state, `defcustom` for user options. Major modes must make their state buffer-local.
+- **Mode definitions**: Read-only UI buffers derive from `special-mode`; editing buffers derive from the right parent (`sql-mode`, `comint-mode`, etc.). Register buffer-local hooks in the mode body with LOCAL=`t`.
+- **Rendering discipline**: Use text properties for data-bearing annotations and overlays only for ephemeral visuals. Build render buffers from cached data, not by reparsing displayed text.
+- **Function design**: Keep functions short, separate pure computation from display mutation, and keep interactive commands thin.
+
+## Completion and Object Workflow
+
+- Always use standard `completing-read`.
+- Completion-at-point functions must return quickly and use `:exclusive 'no`.
+- Add CAPFs buffer-locally via `add-hook` with LOCAL=`t`.
+- Keep object resolution, action definition, and action presentation separate. Embark and Transient are presentation layers, not independent business logic systems.
+
+## Mutation Workflow Convergence
+
+- **One staged-mutation vocabulary everywhere**: Footer, transient labels, help text, and `README.org` must use the same staged-edit / staged-delete / staged-insert terminology.
+- **Identity must converge fully**: If pending state becomes PK-based, every lookup and render path must also become PK-based.
+- **Preview must show real execution payload**: A command named `Preview execution` must preview what would actually run.
+- **Nearby workflows should share helpers**: Insert and edit flows should reuse completion, temporal helpers, and validation rules when semantics match.
+- **UI symmetry must follow SQL semantics**: Do not copy insert-buffer metadata or controls into edit buffers unless update semantics truly match.
+- **Validation must happen before context is destroyed**: Keep the user in the current insert/edit buffer when local validation fails.
 
 ## Version Baseline
 
 - `clutch` targets **Emacs 28.1+** for the native MySQL/PostgreSQL backends.
-- The SQLite backend requires **Emacs 29.1+** because it depends on the built-in
-  `sqlite-*` functions.
-- The JDBC path depends on `clutch-jdbc-agent`, whose published baseline is
-  **Java 17+**.
-- Do not silently raise any of these baselines in code, docs, or release assets.
-  If a change requires a higher Emacs or Java version, update:
+- The SQLite backend requires **Emacs 29.1+** because it depends on built-in `sqlite-*` functions.
+- The JDBC path depends on `clutch-jdbc-agent`, whose published baseline is **Java 17+**.
+- Do not silently raise any baseline. If a change requires a higher Emacs or Java version, update:
   - `README.org`
-  - the relevant release/version metadata
+  - relevant release/version metadata
   - a postmortem explaining why the higher baseline is justified
 
-## Naming
+## SQL Rewrite Guardrails
 
-- **Public API**: `clutch-` prefix for UI layer, `mysql-` / `pg-` prefix for protocol layers. No double dash for public symbols.
-- **Internal/private**: `clutch--`, `mysql--`, or `pg--` double-dash prefix. Never call from outside the defining file.
-- **Predicates**: multi-word names end in `-p` (e.g., `clutch--connection-alive-p`).
-- **Unused args**: prefix with `_` (e.g., `(_ridx)`).
+- Do not rewrite SQL by brittle raw string insertion of `WHERE`, `ORDER BY`, or `LIMIT`.
+- Prefer top-level clause-aware transformations with safe fallback behavior.
+- For CTE / UNION / DISTINCT / window-function queries, prioritize semantic correctness over aggressive rewriting.
+- Keep AST-level rewriting on the roadmap; do not force full AST complexity into small fixes.
 
-## Control Flow
+## Documentation and Release Records
 
-- Avoid deep `let` → `if` → `let` chains. Favor flat, linear control flow using `if-let*`, `when-let*`, or similar constructs whenever possible.
-- Use `pcase`/`pcase-let` for structured destructuring instead of nested `car`/`cdr`/`nth`.
-- Prefer `cl-loop` over manual `dolist` + accumulator, or `cl-reduce`, when building lists with complex iteration logic. `cl-reduce` is acceptable for simple single-operation folds (e.g., summing a list), but `cl-loop` is clearer when the logic involves multiple steps, conditionals, or accumulating into a non-trivial structure.
+- Any change to key bindings, defaults, export behavior, or user-visible workflow must update `README.org` in the same change.
+- If code and docs diverge, treat code as source of truth and fix docs immediately.
+- `clutch-jdbc-agent-version` and `clutch-jdbc-agent-sha256` are a pair. If one changes, review whether the other must change in the same commit.
+- Do not assume a release asset is immutable just because the version string is unchanged. If the jar bytes change, update `clutch-jdbc-agent-sha256` immediately.
+- Prefer bumping the agent version for released jar content changes. Replacing a GitHub release asset in place is an exceptional repair path, not normal workflow.
+- Any release-asset change affecting JDBC startup or installation must update `README.org` and, when the tradeoff is non-obvious, add or update a postmortem.
+- The `postmortem/` directory records design decisions and lessons learned. Read relevant records before significant changes.
+- Write a postmortem when:
+  - adding or changing a user-visible workflow
+  - choosing between non-obvious architectural approaches
+  - integrating an optional dependency
+  - reverting or abandoning an approach
+  - deliberately deferring a known limitation
+- Postmortems must explain **why**, not restate the code.
 
-## Error Handling
+## Quality and Release Checks
 
-- **`user-error`** for user-caused problems (no connection, no cell at point, invalid input). Does NOT trigger `debug-on-error`.
-- **`error`** for programmer bugs only.
-- **`condition-case`** to handle recoverable errors (network failures, query errors). Wrap non-essential operations (FK loading, schema caching) so errors never prevent primary results from being shown.
-- Error messages should state what is wrong, not what should be (e.g., "Not connected" not "Must be connected").
-
-## State Management
-
-- **`defvar-local`** for all per-buffer state. Set with `setq-local` in mode bodies.
-- **Plain `defvar`** for global/shared state (schema cache, history ring).
-- **`defcustom`** for all user-configurable values. Always specify `:type` precisely (`natnum`, `string`, `boolean`, `(choice ...)`) and `:group`.
-- Major modes must make all their state variables buffer-local.
-
-## Mode Definitions
-
-- Derive read-only UI buffers from `special-mode` (`clutch-result-mode`, `clutch-record-mode`, object definition/describe buffers).
-- Derive editing modes from appropriate parents (`sql-mode` for `clutch-mode`, `comint-mode` for `clutch-repl-mode`).
-- `define-derived-mode` auto-creates `-map`, `-hook`, and `-syntax-table`. Use them.
-- Register buffer-local hooks in the mode body (e.g., `post-command-hook`, `completion-at-point-functions`) with the LOCAL arg `t`.
-
-## Rendering
-
-- **Text properties** for data-bearing annotations (`clutch-row-idx`, `clutch-col-idx`, `clutch-full-value`, `clutch-header-col`). They are fast (interval tree) and travel with the text.
-- **Overlays** only for ephemeral visual effects that should not be part of the text (e.g., header active-column highlight). Keep overlay count minimal (O(n) lookup).
-- Build buffer content from scratch via `erase-buffer` + `insert` (magit-section pattern). Never parse buffer text to extract data — always read from the cached data structures (`--result-rows`, `--result-columns`).
-
-## Mutation Workflow Convergence
-
-- **One staged-mutation vocabulary everywhere**: If the UI exposes staged edits / deletes / inserts, the left marker column, footer, transient labels, mode help, and `README.org` must use the same terminology and the same behavior boundaries. Do not let `preview`, `discard`, or `commit` mean different things in different surfaces.
-- **If mutation identity becomes PK-based, every lookup must become PK-based**: Once pending state is keyed by primary key, render paths, record view, discard actions, and summary/state lookups must also move to PK-based identity. Partial migration is not acceptable; it creates invisible staged state.
-- **Preview must show what would really execute**: A command named `Preview execution` must preview the actual execution payload for the current workflow. Do not switch between query-preview and mutation-preview heuristics based on incidental UI state.
-- **Nearby workflows should share helpers, not drift**: Insert and edit flows must reuse the same completion candidates, temporal helpers, and field validation rules when the write semantics are the same. Do not fork a second "almost the same" rule set for edit buffers.
-- **UI symmetry must follow write semantics, not visual symmetry**: Do not copy insert-buffer metadata or controls into edit buffers unless the underlying SQL semantics really match. Tags such as `default` or `generated` need explicit update semantics before they belong in edit UI.
-- **Validation must happen before the editing context is destroyed**: For insert/edit buffers, local validation errors should keep the user in the current buffer so they can repair the value immediately. Do not close the buffer first and then surface the error.
-
-## Function Design
-
-- Keep functions under ~30 lines. Extract helpers when a function exceeds this.
-- Name extracted helpers to describe WHAT they compute, not WHERE they're called from.
-- Pure computation (no side effects) should be separate from display (buffer mutation).
-- Interactive commands should be thin wrappers: validate input, call internal function, show feedback.
-
-## Workflow Change Discipline
-
-- For any change that alters a primary entry point, default action, or action menu, write a short design note before implementing. The note can be brief, but it must state the intended entry point, the default action, and which commands are only wrappers.
-- Keep object resolution, action definition, and action presentation separate. Embark and Transient are presentation layers; they must not become independent business logic systems.
-- Do not let the interaction model drift mid-implementation. If the intended workflow changes, update the design note or postmortem before continuing.
-
-## Completion
-
-- Always use standard `completing-read`. This works with vertico, ivy, helm, default, etc.
-- For completion-at-point: return quickly (called often), use `:exclusive 'no` to allow fallback.
-- Add capf functions buffer-locally via `add-hook` with LOCAL=t.
-
-## Autoloads
-
-- `;;;###autoload` only on: interactive commands (`clutch-mode`, `clutch-repl`, `clutch-execute`, `clutch-dispatch`), `auto-mode-alist` entries.
-- Never autoload internal functions, defcustom, or defvar.
-- Use `declare-function` for functions from optional dependencies to silence byte-compiler.
-
-## Pre-Submit Review
-
-Before committing significant changes, step back and review the whole diff:
-
-- **No heuristic shortcuts**: If a fix feels "good enough for now", it probably isn't. Either do it correctly or explicitly document why it's deferred in a postmortem.
-- **Fix the real layer**: If the root cause sits in another layer, move the fix there instead of masking it where the symptom appears.
-- **No redundancy**: Check for duplicated logic, dead code, or overlapping abstractions introduced by the change. Remove them.
-- **Long-term correctness**: Ask whether the approach holds up under edge cases (filtered views, missing PK, concurrent buffer edits, etc.).
-- **Docs in sync**: Any change to key bindings, defaults, workflow, or data structures must update `README.org` and, where applicable, add or update a postmortem.
-- **Byte-compile clean**: `(byte-compile-file "clutch.el")` must produce zero warnings.
+- `(byte-compile-file "clutch.el")` must produce zero warnings.
+- All public functions must have docstrings.
+- Every file must start with `;;; -*- lexical-binding: t; -*-` and end with `(provide 'pkg)` / `;;; pkg.el ends here`.
+- Export features that write files must provide explicit encoding behavior and sensible defaults.
+- Document Excel compatibility guidance clearly.
+- Any export-path change must include regression tests for content correctness and at least one encoding-related path.
 
 ## Pre-Commit Checklist (Mandatory)
 
-Every commit must pass all of these steps. Do not skip any.
+Every commit must pass all of these steps.
 
 ### 1. Read the full diff
 
@@ -132,11 +106,9 @@ Every commit must pass all of these steps. Do not skip any.
 git diff HEAD
 ```
 
-Read every changed line. Do not commit changes that haven't been reviewed.
+Read every changed line before committing.
 
-### 2. Run ALL test files
-
-Both test suites must pass. Running only one is not enough.
+### 2. Run all test files
 
 ```bash
 # Main UI/logic tests
@@ -158,65 +130,8 @@ emacs -batch -L . -f batch-byte-compile clutch.el
 
 ### 4. Update tests when behavior changes
 
-When a function's behavior is intentionally changed, **search all test files** for existing tests of that function and update them before committing:
+When a function's behavior changes intentionally, search all test files for existing tests of that function and update them before committing:
 
 ```bash
 grep -n "function-name" test/clutch-test.el test/clutch-db-test.el
 ```
-
-Failing to do this leaves stale tests that assert the old (now wrong) behavior, or worse, pass for the wrong reasons.
-
-## Quality Checks
-
-Before releasing, ensure:
-- `(byte-compile-file "clutch.el")` produces no warnings.
-- All public functions have docstrings.
-- Every file starts with `;;; -*- lexical-binding: t; -*-` and ends with `(provide 'pkg)` / `;;; pkg.el ends here`.
-
-## SQL Rewrite Guardrails
-
-- Do not rewrite SQL by brittle raw string insertion of `WHERE` / `ORDER BY` / `LIMIT`.
-- Prefer top-level clause-aware transformations with safe fallback behavior.
-- For complex queries (CTE / UNION / DISTINCT / window functions), prioritize semantic correctness over aggressive rewriting.
-- Keep AST-level rewriting on the roadmap; do not force full AST complexity into small fixes.
-
-## Docs Consistency
-
-- Any change to key bindings, defaults, export behavior, or user-visible workflow must update `README.org` in the same change.
-- If code and docs diverge, treat code as source of truth and fix docs immediately.
-
-## JDBC Agent Release Discipline
-
-- `clutch-jdbc-agent-version` and `clutch-jdbc-agent-sha256` are a pair. If one changes, review whether the other must change in the same commit.
-- Do not assume a release asset is immutable just because the version string is unchanged. If the published jar bytes change, `clutch-jdbc-agent-sha256` must be updated immediately.
-- Prefer bumping the agent version for any released jar content change. Replacing a GitHub release asset in place should be treated as an exceptional repair path, not normal workflow.
-- Any release-asset change that affects JDBC startup or installation must update `README.org` and, when the tradeoff is non-obvious, add or update a postmortem.
-
-## Postmortems
-
-## Experimental Scope Discipline
-
-- Start new directions with the smallest slice that proves the workflow is worth having. Do not expand scope before the first slice has shown real user value.
-- Do not implement an object family just because another tool exposes it. Add it only when clutch has a clear, high-frequency workflow for it.
-- Keep speculative domains out of the main workflow until their default actions, object model, and user value are obvious.
-
-The `postmortem/` directory contains design decision records and lessons learned. **Read them before making significant changes.**
-
-Each file is named `NNN-topic.md` and records: background, decision, rationale, alternatives considered, and known limitations.
-
-**Write a postmortem when:**
-- Adding or changing a user-visible workflow (e.g., how mutations are committed)
-- Choosing between non-obvious architectural approaches (e.g., where to place a guard)
-- Integrating an optional dependency (e.g., Embark)
-- Reverting or abandoning an approach — especially document *why* it was wrong
-- Discovering a known limitation that is deliberately deferred
-
-**What to write:** focus on *why*, not *what*. The code already shows what was done. The record must explain why this approach was chosen over alternatives, what was tried and rejected, and what trade-offs were accepted. A record that only restates the code adds no value.
-
-**Quality bar:** if a future contributor reads the record and still has to guess why a decision was made, it is incomplete.
-
-## Export and Encoding
-
-- Export features that write files must provide explicit encoding behavior and sensible defaults.
-- Document Excel compatibility guidance clearly (prefer UTF-8 with BOM; use GBK/CP936 only for legacy workflows).
-- Any export-path change must include regression tests for content correctness, and at least one encoding-related path.

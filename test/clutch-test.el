@@ -3093,15 +3093,15 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
         (should-not marked)))))
 
-(ert-deftest clutch-test-executed-sql-overlay-clears-on-boundary-edit ()
-  "Editing at the edge of executed SQL should clear the success overlay."
+(ert-deftest clutch-test-executed-sql-overlay-marks-statement-start-line ()
+  "Executed SQL should use a start-line marker instead of a body highlight."
   (with-temp-buffer
-    (insert "SELECT 1;")
+    (insert "  SELECT 1;\n  SELECT 2;")
     (clutch--mark-executed-sql-region (point-min) (point-max))
     (should (overlayp clutch--executed-sql-overlay))
-    (goto-char (overlay-start clutch--executed-sql-overlay))
-    (insert "SELECT 0;\n")
-    (should-not (overlayp clutch--executed-sql-overlay))))
+    (should (= (overlay-start clutch--executed-sql-overlay) (point-min)))
+    (should (overlay-get clutch--executed-sql-overlay 'before-string))
+    (should-not (overlay-get clutch--executed-sql-overlay 'modification-hooks))))
 
 (ert-deftest clutch-test-execute-quit-disconnects-and-clears-connection ()
   "Test `clutch--execute' converts quit into recoverable interruption."
@@ -3386,6 +3386,37 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           (should (member "id" candidates))
           (should (member "users" candidates)))))))
 
+(ert-deftest clutch-test-completion-at-point-keeps-statement-scope-candidates-tight ()
+  "Statement-scoped column completion should not leak unrelated schema tables."
+  (with-temp-buffer
+    (insert "select us from users join posts on users.id = posts.user_id")
+    (goto-char (point-min))
+    (search-forward "us")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake))
+      (puthash "users" nil schema)
+      (puthash "posts" nil schema)
+      (puthash "logs" nil schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch--tables-in-current-statement)
+                 (lambda (_schema) '("users" "posts")))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (_conn _schema table)
+                   (pcase table
+                     ("users" '("user_id" "user_name"))
+                     ("posts" '("post_id" "user_id"))
+                     (_ nil)))))
+        (let* ((capf (clutch-completion-at-point))
+               (candidates (nth 2 capf)))
+          (should capf)
+          (should (member "users" candidates))
+          (should (member "posts" candidates))
+          (should (member "user_id" candidates))
+          (should-not (member "logs" candidates)))))))
+
 (ert-deftest clutch-test-completion-at-point-uses-direct-table-candidates-without-schema-cache ()
   "Direct backend table completion should work without a schema cache."
   (with-temp-buffer
@@ -3489,6 +3520,47 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           (should capf)
           (should (member "PARA_ID" candidates))
           (should (member "PARA_NAME" candidates)))))))
+
+(ert-deftest clutch-test-sql-keyword-completion-honors-lowercase-style ()
+  "Keyword completion should honor `clutch-sql-completion-case-style'."
+  (let ((clutch-sql-completion-case-style 'lower))
+    (with-temp-buffer
+      (insert "sel")
+      (let* ((result (clutch-sql-keyword-completion-at-point))
+             (candidates (nth 2 result)))
+        (should result)
+        (should (member "select" candidates))
+        (should-not (member "SELECT" candidates))))))
+
+(ert-deftest clutch-test-completion-at-point-lowercases-identifiers-when-configured ()
+  "Identifier completion should honor lowercase case style."
+  (let ((clutch-sql-completion-case-style 'lower))
+    (with-temp-buffer
+      (insert "select pa from ZJ_SYS_PARA")
+      (goto-char (point-min))
+      (search-forward "pa")
+      (let ((schema (make-hash-table :test 'equal))
+            (clutch-connection 'fake))
+        (puthash "ZJ_SYS_PARA" nil schema)
+        (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                   (lambda () schema))
+                  ((symbol-function 'clutch-db-busy-p)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'clutch--tables-in-current-statement)
+                   (lambda (_schema) '("ZJ_SYS_PARA")))
+                  ((symbol-function 'clutch-db-completion-sync-columns-p)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'clutch-db-complete-columns)
+                   (lambda (_conn table prefix)
+                     (should (equal table "ZJ_SYS_PARA"))
+                     (should (equal prefix "pa"))
+                     '("PARA_ID" "PARA_NAME"))))
+          (let* ((capf (clutch-completion-at-point))
+                 (candidates (nth 2 capf)))
+            (should capf)
+            (should (member "zj_sys_para" candidates))
+            (should (member "para_id" candidates))
+            (should-not (member "ZJ_SYS_PARA" candidates))))))))
 
 (ert-deftest clutch-test-completion-at-point-swallows-oracle-i18n-completion-errors ()
   "Oracle completion should fail soft when orai18n.jar is missing."
@@ -3894,11 +3966,12 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
 
 (ert-deftest clutch-test-jump-resolves-then-runs-default-action ()
   "Jump should resolve the object once and run the shared default action."
-  (let (resolved-prompt resolved-category action-call presented-entry)
+  (let (resolved-prompt resolved-category resolved-types action-call presented-entry)
     (cl-letf (((symbol-function 'clutch--resolve-object-dwim)
-               (lambda (prompt &optional _table-like-only category)
+               (lambda (prompt &optional _table-like-only category allowed-types)
                  (setq resolved-prompt prompt)
                  (setq resolved-category category)
+                 (setq resolved-types allowed-types)
                  '(:name "ORDERS" :type "TABLE")))
               ((symbol-function 'clutch--run-object-action)
                (lambda (entry action-id)
@@ -3908,8 +3981,9 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                  (setq presented-entry entry)
                  t)))
       (clutch-jump)
-      (should (equal resolved-prompt "Open object: "))
+      (should (equal resolved-prompt "Jump to object: "))
       (should-not resolved-category)
+      (should (equal resolved-types clutch-primary-object-types))
       (should (equal action-call
                      '((:name "ORDERS" :type "TABLE") browse)))
       (should-not presented-entry))))
@@ -3918,17 +3992,37 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   "Jump should still run the default action when no action UI is available."
   (let (resolved-prompt action-call)
     (cl-letf (((symbol-function 'clutch--resolve-object-dwim)
-               (lambda (prompt &optional _table-like-only _category)
+               (lambda (prompt &optional _table-like-only _category _allowed-types)
                  (setq resolved-prompt prompt)
                  '(:name "PROCESS_ORDER" :type "PROCEDURE")))
               ((symbol-function 'clutch--run-object-action)
                  (lambda (entry action-id)
                    (setq action-call (list entry action-id)))))
       (clutch-jump)
-      (should (equal resolved-prompt "Open object: "))
+      (should (equal resolved-prompt "Jump to object: "))
       (should (equal action-call
                      '((:name "PROCESS_ORDER" :type "PROCEDURE")
                        show-definition))))))
+
+(ert-deftest clutch-test-object-read-filters-by-allowed-types ()
+  "Object reader should honor an explicit allowed type set."
+  (let (captured)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
+              ((symbol-function 'clutch--warn-schema-cache-state) (lambda (&rest _) nil))
+              ((symbol-function 'clutch--object-entries)
+               (lambda (_conn)
+                 '((:name "ORDERS" :type "TABLE")
+                   (:name "ORDER_IDX" :type "INDEX")
+                   (:name "PROCESS_ORDER" :type "PROCEDURE"))))
+              ((symbol-function 'clutch--object-entry-reader)
+               (lambda (_conn _prompt entries &optional _initial _category)
+                 (setq captured entries)
+                 (car entries))))
+      (with-temp-buffer
+        (setq-local clutch-connection 'fake-conn)
+        (should (equal (clutch-object-read "Object: " nil nil nil '("TABLE" "VIEW"))
+                       '(:name "ORDERS" :type "TABLE"))))
+      (should (equal captured '((:name "ORDERS" :type "TABLE")))))))
 
 (ert-deftest clutch-test-object-at-point-prefers-table-over-public-synonym ()
   "Symbol resolution should prefer concrete schema objects over PUBLIC synonyms."
@@ -4145,7 +4239,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should (equal switched "CJH_TEST"))
         (should (equal clutch--connection-params '(:driver oracle :schema "CJH_TEST")))
         (should (equal refresh-called '(cleared t)))
-        (should (equal message-text "Switched schema to CJH_TEST"))))))
+        (should (equal message-text "Current schema: CJH_TEST"))))))
 
 (ert-deftest clutch-test-switch-schema-updates-mysql-database-param ()
   "MySQL schema switching should persist the selected database in buffer params."

@@ -64,7 +64,7 @@ The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded 
   - =mode-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, no-PK guidance, and active filters (with =nerd-icons=, Unicode fallback)
   - =header-line=: column names with =│= borders and underlined labels
 - After execution, focus stays in the SQL buffer while results refresh below
-- Last successfully executed SQL region is highlighted in the editor
+- Last successfully executed SQL is marked at the statement start gutter in the editor
 - Row numbers as a table column; sort/pin indicators via =nerd-icons= (with Unicode fallback)
 - Right-aligned numeric columns
 - Record buffer for single-row detail view
@@ -75,7 +75,7 @@ The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 - Pin/unpin columns, adjust column widths
 - CSV/Org export, copy as INSERT
 - Object picker and actions for =Tables= / =Views= / =Synonyms= / =Indexes= / =Sequences= / =Procedures= / =Functions= / =Triggers=, with annotated minibuffer candidates, type-grouped completion, optional prefix filtering, and a no-Embark transient fallback
-- SQL completion: table/column names scoped to the current statement, with synchronous column loading kept conservative for large schemas, plus keywords
+- SQL completion: table/column names scoped to the current statement, with synchronous column loading kept conservative for large schemas, plus keywords; completion case can be customized via =clutch-sql-completion-case-style=
 - Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
@@ -269,9 +269,9 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-r=   | Execute selected region          |
 | =C-c C-b=   | Execute entire buffer      |
 | =C-c C-e=   | Connect / reconnect        |
-| =C-c C-j=   | Jump to object and run its default action |
+| =C-c C-j=   | Jump to configured primary object types and run the default action |
 | =C-c C-d=   | Describe object at point, or prompt |
-| =C-c C-o=   | Show object actions at point, or prompt |
+| =C-c C-o=   | Show object actions for the current object, or prompt |
 | =C-c C-p=   | Preview execution (dry-run) |
 | =C-c C-l=   | Switch current schema/database on the active connection |
 | =C-c C-s=   | Refresh schema for current connection |
@@ -528,12 +528,14 @@ Suggested global bindings:
 #+begin_src
 C-c C-j                     ;; Main object entrypoint
 C-c C-d                     ;; Describe object at point, or prompt
-C-c C-o                     ;; Show object actions at point, or prompt
+C-c C-o                     ;; Show object actions for the current object, or prompt
 #+end_src
 
 The main navigation path is object-centric rather than tree-centric.  =C-c C-j=
 is the single conceptual object entrypoint.  It resolves an object at point
-when possible; otherwise it opens a flat annotated object picker.  The picker
+when possible; otherwise it opens a flat annotated object picker.  By default
+the primary set is =TABLE= / =VIEW= / =SYNONYM=, configurable via
+=clutch-primary-object-types=.  The picker
 returns quickly with schema snapshot objects and any already-warmed metadata,
 then keeps warming slower categories such as indexes, sequences, and routines
 in the background after schema refreshes.  Once an object is resolved, =RET=
@@ -617,14 +619,11 @@ metadata.
 ** JDBC Backend (clutch-db-jdbc.el)
 
 =clutch-db-jdbc.el= adds support for databases that have no pure Elisp wire
-protocol implementation.  It delegates SQL execution and metadata queries to
-=clutch-jdbc-agent=, a minimal JVM sidecar process that speaks a
-one-JSON-object-per-line protocol on stdin/stdout.  The agent maintains
-separate primary and metadata JDBC sessions for each logical clutch connection,
-so background introspection does not contend with foreground SQL execution.
-Java 17+ is required.  If the configured =java= is too old for the current
-=clutch-jdbc-agent= jar, clutch reports a startup error instead of a generic
-connection-loss timeout.
+protocol implementation.  It delegates JDBC work to =clutch-jdbc-agent=, a
+small JVM sidecar.  Java 17+ is required.
+
+For the wire protocol, RPC inventory, runtime session model, and startup/error
+semantics, see [[file:docs/jdbc-agent-protocol.md][docs/jdbc-agent-protocol.md]].
 
 *** Supported Databases
 
@@ -825,7 +824,7 @@ Pass arbitrary JDBC connection properties via =:props=:
 
 Requires the =transient= package (built-in since Emacs 28.1).
 
-Press =C-c ?= to open the transient menu.  The *Objects* group contains =Jump object=, =Describe object=, =Object actions=, and =Refresh schema=.
+Press =C-c ?= to open the transient menu.  The *Objects* group contains =Jump to object=, =Describe object=, =Object actions=, and =Refresh schema=.
 
 In the result buffer, the *Edit* group in the transient menu provides the unified staged-commit workflow: =i= stages an insert, =d= stages a deletion, =C-c C-k= discards a pending change at point, and =C-c C-c= commits all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
 

@@ -170,6 +170,11 @@ Underlined to indicate clickable (RET to follow)."
   "Face for the last successfully executed SQL text."
   :group 'clutch)
 
+(defface clutch-executed-sql-marker-face
+  '((t :inherit success))
+  "Face for the executed SQL gutter marker."
+  :group 'clutch)
+
 (defface clutch-pending-delete-face
   '((((class color) (background light))
      :background "#fde8e8" :foreground "#9b1c1c" :strike-through t)
@@ -324,6 +329,22 @@ background object discovery starts."
   :type 'number
   :group 'clutch)
 
+(defcustom clutch-primary-object-types '("TABLE" "VIEW" "SYNONYM")
+  "Object types preferred by clutch's primary object entrypoint.
+When nil, the primary entrypoint includes all schema object types."
+  :type '(repeat string)
+  :group 'clutch)
+
+(defcustom clutch-sql-completion-case-style 'preserve
+  "How SQL completion inserts keywords and identifiers.
+`preserve' keeps backend-provided identifier case and uppercase SQL keywords.
+`lower' inserts lowercase keywords and lowercases completion identifiers.
+`upper' inserts uppercase keywords and uppercases completion identifiers."
+  :type '(choice (const :tag "Preserve backend / default keyword case" preserve)
+                 (const :tag "Lowercase keywords and identifiers" lower)
+                 (const :tag "Uppercase keywords and identifiers" upper))
+  :group 'clutch)
+
 (defcustom clutch-schema-cache-install-batch-size 500
   "Maximum number of schema entries to install per idle slice.
 Large schema snapshots are installed incrementally to keep Emacs responsive
@@ -349,7 +370,7 @@ after async metadata refreshes."
 Used to update the mode-line with a spinner during execution.")
 
 (defvar-local clutch--executed-sql-overlay nil
-  "Overlay highlighting the last successfully executed SQL region.")
+  "Overlay marking the last successfully executed SQL statement.")
 
 (defvar-local clutch--error-position-overlay nil
   "Overlay marking the error position in the last failed query, or nil.")
@@ -2700,22 +2721,33 @@ Prompts for confirmation on destructive operations."
       (setq clutch--executed-sql-overlay nil)
       (delete-overlay overlay))))
 
+(defun clutch--executed-sql-marker-before-string ()
+  "Return the before-string used to mark executed SQL."
+  (if (display-graphic-p)
+      (propertize " "
+                  'display
+                  '(left-fringe right-triangle clutch-executed-sql-marker-face))
+    (propertize "✓ " 'face 'clutch-executed-sql-marker-face)))
+
 (defun clutch--mark-executed-sql-region (beg end)
-  "Highlight the last successfully executed SQL region BEG..END."
+  "Mark the last successfully executed SQL region BEG..END."
   (when-let* ((trimmed (clutch--trim-sql-bounds beg end))
               (tbeg (car trimmed))
               (tend (cdr trimmed)))
     (clutch--clear-executed-sql-overlay)
-    (setq clutch--executed-sql-overlay (make-overlay tbeg tend nil t t))
-    (overlay-put clutch--executed-sql-overlay 'face 'clutch-executed-sql-face)
-    (overlay-put clutch--executed-sql-overlay 'priority 1000)
-    (overlay-put clutch--executed-sql-overlay 'evaporate t)
-    (overlay-put clutch--executed-sql-overlay 'modification-hooks
-                 '(clutch--clear-executed-sql-overlay))
-    (overlay-put clutch--executed-sql-overlay 'insert-in-front-hooks
-                 '(clutch--clear-executed-sql-overlay))
-    (overlay-put clutch--executed-sql-overlay 'insert-behind-hooks
-                 '(clutch--clear-executed-sql-overlay))))
+    (setq clutch--executed-sql-overlay
+          (make-overlay (save-excursion
+                          (goto-char tbeg)
+                          (line-beginning-position))
+                        (save-excursion
+                          (goto-char tbeg)
+                          (line-beginning-position))
+                        nil nil nil))
+    (overlay-put clutch--executed-sql-overlay 'before-string
+                 (clutch--executed-sql-marker-before-string))
+    (overlay-put clutch--executed-sql-overlay 'help-echo
+                 (format "Last executed SQL (%d chars)" (- tend tbeg)))
+    (overlay-put clutch--executed-sql-overlay 'priority 1000)))
 
 (defun clutch--sql-line-column-to-position (sql line column)
   "Return 1-based character position in SQL for LINE and COLUMN."
@@ -3411,12 +3443,12 @@ executed outside clutch that would otherwise leave stale completions."
       (user-error "Runtime schema switching is not available for this connection"))
     (let ((schema (completing-read
                    (if current
-                       (format "Switch schema (current %s): " current)
-                     "Switch schema: ")
+                       (format "Switch to schema (current %s): " current)
+                     "Switch to schema: ")
                    schemas nil t nil nil current)))
       (unless (string-empty-p schema)
         (if (and current (string-equal-ignore-case schema current))
-            (message "Already using schema %s" current)
+            (message "Already on schema %s" current)
           (clutch-db-set-current-schema conn schema)
           (clutch--update-connection-params-for-buffers
            conn
@@ -3427,7 +3459,7 @@ executed outside clutch that would otherwise leave stale completions."
           (clutch--clear-connection-metadata-caches conn old-key)
           (clutch--clear-connection-metadata-caches conn)
           (clutch--refresh-current-schema t)
-          (message "Switched schema to %s" schema))))))
+          (message "Current schema: %s" schema))))))
 
 (defun clutch--ensure-columns (conn schema table)
   "Ensure column info for TABLE is loaded in SCHEMA.
@@ -4233,6 +4265,39 @@ Returns nil when SYM is not a known built-in on this server."
   "Return non-nil when completion STATUS means candidate was accepted."
   (memq status '(finished exact sole)))
 
+(defun clutch--apply-sql-completion-case-style (text)
+  "Return TEXT transformed by `clutch-sql-completion-case-style'."
+  (pcase clutch-sql-completion-case-style
+    ('lower (downcase text))
+    ('upper (upcase text))
+    (_ text)))
+
+(defun clutch--sql-keyword-completion-candidates ()
+  "Return SQL keyword completion candidates honoring case style."
+  (mapcar #'clutch--apply-sql-completion-case-style clutch--sql-keywords))
+
+(defun clutch--sql-identifier-completion-candidates (candidates)
+  "Return completion CANDIDATES honoring identifier case style."
+  (delete-dups
+   (mapcar #'clutch--apply-sql-completion-case-style candidates)))
+
+(defun clutch--object-type-allowed-p (entry allowed-types)
+  "Return non-nil when ENTRY is permitted by ALLOWED-TYPES.
+When ALLOWED-TYPES is nil, allow all entries."
+  (or (null allowed-types)
+      (member (upcase (or (plist-get entry :type) ""))
+              allowed-types)))
+
+(defun clutch--filter-object-entries-by-types (entries allowed-types)
+  "Return ENTRIES filtered by ALLOWED-TYPES.
+When ALLOWED-TYPES is nil, return ENTRIES unchanged."
+  (if (null allowed-types)
+      entries
+    (seq-filter
+     (lambda (entry)
+       (clutch--object-type-allowed-p entry allowed-types))
+     entries)))
+
 (defun clutch--sql-keyword-prefix-p (prefix)
   "Return non-nil when PREFIX matches the start of any SQL keyword."
   (let ((upcase-prefix (upcase prefix)))
@@ -4246,7 +4311,7 @@ Returns nil when SYM is not a known built-in on this server."
 Works without a database connection."
   (when-let* ((bounds (bounds-of-thing-at-point 'symbol)))
     (list (car bounds) (cdr bounds)
-          clutch--sql-keywords
+          (clutch--sql-keyword-completion-candidates)
           :exclusive 'no
           :exit-function (lambda (_str status)
                            (when (and (clutch--completion-finished-status-p status)
@@ -4303,8 +4368,7 @@ when completion triggers during an in-flight query)."
             (if prefer-keyword-p
                 nil
               (if context-tables
-                (let ((all (copy-sequence (or (and schema (hash-table-keys schema))
-                                              '()))))
+                (let ((all (copy-sequence context-tables)))
                   (dolist (tbl context-tables)
                     (let ((cols
                            (if sync-columns-p
@@ -4315,9 +4379,10 @@ when completion triggers during an in-flight query)."
                                     (clutch-db-complete-columns conn tbl prefix)))))))
                       (when cols
                         (setq all (nconc all (copy-sequence cols))))))
-                  (delete-dups all))
-                (delete-dups (append direct-table-candidates
-                                     (and schema (hash-table-keys schema)))))))
+                  (clutch--sql-identifier-completion-candidates all))
+                (clutch--sql-identifier-completion-candidates
+                 (append direct-table-candidates
+                         (and schema (hash-table-keys schema)))))))
       (when candidates
         (list beg end candidates
               :exclusive 'no
@@ -4803,11 +4868,14 @@ When TABLE-LIKE-ONLY is non-nil, only consider table-like matches."
      ((= (length candidates) 1) (car candidates))
      (t nil))))
 
-(defun clutch--object-matches-by-name (conn name &optional table-like-only)
+(defun clutch--object-matches-by-name (conn name &optional table-like-only allowed-types)
   "Return object entries on CONN whose name matches NAME."
-  (let ((entries (if table-like-only
-                     (clutch--browseable-object-entries conn)
-                   (clutch--object-entries conn))))
+  (let ((entries
+         (clutch--filter-object-entries-by-types
+          (if table-like-only
+              (clutch--browseable-object-entries conn)
+            (clutch--object-entries conn))
+          allowed-types)))
     (seq-filter
      (lambda (entry)
        (and (or (not table-like-only)
@@ -4817,12 +4885,12 @@ When TABLE-LIKE-ONLY is non-nil, only consider table-like matches."
              (or (plist-get entry :name) ""))))
      entries)))
 
-(defun clutch--object-matches-at-point (&optional table-like-only)
+(defun clutch--object-matches-at-point (&optional table-like-only allowed-types)
   "Return matching object entries for the symbol at point."
   (when-let* ((conn clutch-connection)
               ((ignore-errors (clutch--connection-alive-p conn)))
               (sym (thing-at-point 'symbol t)))
-    (clutch--object-matches-by-name conn sym table-like-only)))
+    (clutch--object-matches-by-name conn sym table-like-only allowed-types)))
 
 (defun clutch--remember-current-object (entry)
   "Store ENTRY as the current object for the active buffer."
@@ -4848,15 +4916,17 @@ When TABLE-LIKE-ONLY is non-nil, only consider table-like matches."
   "Return the uniquely identified object entry at point, or nil."
   (clutch--preferred-object-match (clutch--object-matches-at-point)))
 
-(defun clutch-object-read (&optional prompt table-like-only initial-input category)
+(defun clutch-object-read (&optional prompt table-like-only initial-input category allowed-types)
   "Read and return a database object entry for the current connection.
 When TABLE-LIKE-ONLY is non-nil, only include table-like objects."
   (clutch--ensure-connection)
   (clutch--warn-schema-cache-state clutch-connection)
   (let* ((entries
-          (if table-like-only
-              (clutch--browseable-object-entries clutch-connection)
-            (clutch--object-entries clutch-connection))))
+          (clutch--filter-object-entries-by-types
+           (if table-like-only
+               (clutch--browseable-object-entries clutch-connection)
+             (clutch--object-entries clutch-connection))
+           allowed-types)))
     (clutch--remember-current-object
      (clutch--object-entry-reader
       clutch-connection
@@ -4865,7 +4935,7 @@ When TABLE-LIKE-ONLY is non-nil, only include table-like objects."
       initial-input
       (or category 'clutch-object)))))
 
-(defun clutch--buffer-current-object (&optional table-like-only)
+(defun clutch--buffer-current-object (&optional table-like-only allowed-types)
   "Return the current object associated with the command context buffer.
 When TABLE-LIKE-ONLY is non-nil, only return table-like objects."
   (let* ((buf (clutch--command-context-buffer))
@@ -4874,14 +4944,15 @@ When TABLE-LIKE-ONLY is non-nil, only return table-like objects."
     (when (and entry
                (or (not table-like-only)
                    (clutch--table-like-entry-p entry))
+               (clutch--object-type-allowed-p entry allowed-types)
                (not (with-current-buffer buf
                       (derived-mode-p 'clutch-mode 'clutch-repl-mode))))
       entry)))
 
-(defun clutch--resolve-object-entry (prompt &optional table-like-only category)
+(defun clutch--resolve-object-entry (prompt &optional table-like-only category allowed-types)
   "Return the object entry for PROMPT in the current buffer context."
-  (let ((current-object (clutch--buffer-current-object table-like-only))
-        (matches (clutch--object-matches-at-point table-like-only)))
+  (let ((current-object (clutch--buffer-current-object table-like-only allowed-types))
+        (matches (clutch--object-matches-at-point table-like-only allowed-types)))
     (clutch--remember-current-object
      (cond
       (current-object
@@ -4896,7 +4967,8 @@ When TABLE-LIKE-ONLY is non-nil, only return table-like objects."
       (t
        (clutch-object-read prompt table-like-only
                            (thing-at-point 'symbol t)
-                           category))))))
+                           category
+                           allowed-types))))))
 
 (defun clutch--read-table-name (prompt tables)
   "Read a table name from TABLES with PROMPT.
@@ -5336,7 +5408,7 @@ selection can surface objects from different Oracle sources and types."
     (setq-local clutch-browser-current-object entry
                 clutch--describe-object-entry entry
                 header-line-format
-                (format " %s  [s: definition  C-c C-o: actions  g: refresh]"
+                (format " %s  [s: show definition  C-c C-o: object actions  g: refresh]"
                         (clutch--object-fqname entry))
                 revert-buffer-function #'clutch-describe-refresh)
     (erase-buffer)
@@ -5507,13 +5579,14 @@ selection can surface objects from different Oracle sources and types."
                    (clutch--resolve-object-entry "Object: "))))
     (clutch--run-object-action entry (clutch--object-default-action-id entry))))
 
-(defun clutch--resolve-object-dwim (&optional prompt table-like-only category)
+(defun clutch--resolve-object-dwim (&optional prompt table-like-only category allowed-types)
   "Resolve a clutch object from point or prompt.
 PROMPT is passed to the fallback reader.  When TABLE-LIKE-ONLY is non-nil,
 only resolve table-like objects."
   (clutch--resolve-object-entry (or prompt "Object: ")
                                 table-like-only
-                                category))
+                                category
+                                allowed-types))
 
 (defun clutch-copy-object-name (&optional entry)
   "Copy the object name from ENTRY to the kill ring."
@@ -9249,7 +9322,7 @@ Accumulates input until a semicolon is found, then executes."
    ["Edit"
     ("'" "Indirect edit"  clutch-edit-indirect)]
    ["Objects"
-    ("j" "Jump object"        clutch-jump)
+    ("j" "Jump to object"     clutch-jump)
     ("D" "Describe object"    clutch-describe-dwim)
     ("o" "Object actions"     clutch-act-dwim)
     ("l" "Switch schema"      clutch-switch-schema)
@@ -9381,7 +9454,7 @@ Accumulates input until a semicolon is found, then executes."
   "Return the current object action target, prompting when needed."
   (or clutch--object-action-entry
       (setq clutch--object-action-entry
-            (clutch--resolve-object-dwim "Object actions: "))))
+            (clutch--resolve-object-dwim "Object actions for: "))))
 
 (defun clutch--object-act-jump-target-inapt-p ()
   "Return non-nil when forward jumps are unavailable for the action target."
@@ -9447,7 +9520,7 @@ Accumulates input until a semicolon is found, then executes."
   "Resolve an object and present its action UI."
   (interactive)
   (let ((entry (or entry
-                   (clutch--resolve-object-dwim "Object actions: "))))
+                   (clutch--resolve-object-dwim "Object actions for: "))))
     (unless (clutch--present-object-actions-natively entry)
       (user-error "No object action UI is available"))))
 
@@ -9455,7 +9528,9 @@ Accumulates input until a semicolon is found, then executes."
   "Resolve an object and run its default action."
   (interactive)
   (let ((entry (or entry
-                   (clutch--resolve-object-dwim "Open object: " nil nil))))
+                   (clutch--resolve-object-dwim "Jump to object: "
+                                                nil nil
+                                                clutch-primary-object-types))))
     (clutch--run-object-action entry (clutch--object-default-action-id entry))))
 
 (defun clutch-describe-dwim (&optional entry)
