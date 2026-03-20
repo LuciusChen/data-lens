@@ -74,7 +74,7 @@ The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 - WHERE filtering (=W=), client-side fuzzy filter (=/=), SQL =ORDER BY= sorting (=s=)
 - Pin/unpin columns, adjust column widths
 - CSV/Org export, copy as INSERT
-- Schema browser with expandable column details (=TAB= to expand/collapse)
+- Object picker and actions for =Tables= / =Views= / =Synonyms= / =Indexes= / =Sequences= / =Procedures= / =Functions= / =Triggers=, with annotated minibuffer candidates, type-grouped completion, optional prefix filtering, and a no-Embark transient fallback
 - SQL completion: table/column names scoped to the current statement, with synchronous column loading kept conservative for large schemas, plus keywords
 - Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
@@ -82,7 +82,6 @@ The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded 
 - Schema refresh state is explicit: eager backends refresh on connect, lazy backends start stale, query console buffer names surface =schema...= / =schema~= / =schema!= / =schema 42t= style state markers; here =Nt= means "the current schema-cache snapshot contains N browseable table/object names". =schema 0t= is therefore a successful empty snapshot, not an error. Schema errors also appear in the console header-line (see below)
 - Console header-line shows live connection context: database-type icon (with brand color) + backend name + connection key, plus =schema~= / =schema!= warnings when the schema cache needs attention, and =Tx: Auto= / =Tx: Manual= / =Tx: Manual*= for the current commit mode; header text is indented to align with the buffer text area (respects =display-line-numbers-mode=)
 - Cache-backed schema actions also warn when the schema cache is stale, failed, or still refreshing, so completion / table prompts do not silently pretend cached metadata is current
-- The schema browser now surfaces the same recovery state at the top of the buffer, so =stale= / =failed= / =refreshing= remain visible even after you leave the console
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
 - Value viewer (=v=): auto-detects JSON (pretty-printed with =json-ts-mode=), XML (formatted via =xmllint= if available, rendered with =nxml-mode=), or BLOB (concise text/hex preview); XML/BLOB size is shown in viewer header-line (without polluting content highlighting)
 - REPL mode (comint-based)
@@ -270,9 +269,9 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-r=   | Execute selected region          |
 | =C-c C-b=   | Execute entire buffer      |
 | =C-c C-e=   | Connect / reconnect        |
-| =C-c C-t=   | List all tables            |
-| =C-c C-j=   | Browse object              |
-| =C-c C-d=   | DESCRIBE table at point (errors if not on a table name) |
+| =C-c C-j=   | Jump to object and run its default action |
+| =C-c C-d=   | Describe object at point, or prompt |
+| =C-c C-o=   | Show object actions at point, or prompt |
 | =C-c C-p=   | Preview execution (dry-run) |
 | =C-c C-s=   | Refresh schema for current connection |
 | =C-c C-m=   | Commit transaction (manual-commit connections only) |
@@ -523,17 +522,43 @@ Suggested global bindings:
 (global-set-key (kbd "C-c D") #'clutch-switch-console)
 #+end_src
 
-** Schema Browser
+** Object Workflow
 
 #+begin_src
-C-c C-t                     ;; List all tables
-C-c C-j                     ;; Browse object (select object, insert SELECT into console)
-TAB                          ;; Expand/collapse table columns (type, PK, FK)
-E / C                        ;; Expand all / Collapse all
-RET                          ;; Show DDL for table at point
-v                            ;; Browse object at point (insert SELECT into console)
-g                            ;; Refresh
+C-c C-j                     ;; Main object entrypoint
+C-c C-d                     ;; Describe object at point, or prompt
+C-c C-o                     ;; Show object actions at point, or prompt
 #+end_src
+
+The main navigation path is object-centric rather than tree-centric.  =C-c C-j=
+is the single conceptual object entrypoint.  It resolves an object at point
+when possible; otherwise it opens a flat annotated object picker.  The picker
+returns quickly with schema snapshot objects and any already-warmed metadata,
+then keeps warming slower categories such as indexes, sequences, and routines
+in the background after schema refreshes.  Once an object is resolved, =RET=
+runs the object's default action.
+
+=C-c C-d= is a convenience wrapper over the same resolution logic.  It resolves
+the object at point when possible; otherwise it prompts with the same flat
+picker.  It opens the shared describe buffer for the target object.
+
+=C-c C-o= is the direct “show me actions” wrapper over the same object model.
+It resolves the object at point when possible; otherwise it prompts, then opens
+the shared action UI.  The action set is
+intentionally small and shared across Embark and Transient:
+
+- =d=: describe object
+- =s=: show DDL / source
+- =j=: jump to the target object for objects with explicit target metadata
+  such as indexes, triggers, and synonyms
+- =n=: copy object name
+- =f=: copy fully-qualified object name
+
+Default actions only depend on the object type:
+
+- tables / views / synonyms: insert =SELECT *= into a query console
+- procedures / functions / triggers: show source
+- indexes / sequences: show DDL
 
 For JDBC/Oracle connections, =C-c C-j= shows annotated object candidates in the
 minibuffer.  The object name remains the primary candidate text; source/type is
@@ -546,23 +571,34 @@ If you use [[https://github.com/oantolin/orderless][orderless]], annotation sear
 
 ** Embark Integration (optional)
 
-If [[https://github.com/oantolin/embark][embark]] is installed, clutch registers a =clutch-table= target type so table
-names can be acted on with a consistent action map:
+If [[https://github.com/oantolin/embark][embark]] is installed, clutch registers a =clutch-object= target type so objects
+can be acted on with the same shared action set used by the native =transient=
+fallback:
 
 | Key | Action |
 |-----+--------|
-| =b= | Browse object (=SELECT *=) |
-| =d= | Describe table (show DDL) |
-| =w= | Copy table name to kill ring |
+| =d= | Describe object |
+| =j= | Jump to target object (only for target-capable objects such as synonyms, indexes, and triggers) |
+| =n= | Copy object name |
+| =f= | Copy fully-qualified object name |
 
-Table names are recognised as targets in three contexts:
+Objects are recognised as targets in four contexts:
 
-- *=clutch-schema-mode= buffer* — table name on the current line
-- *=clutch-mode= (SQL buffer)* — symbol at point, validated against the schema cache
-- *=completing-read= minibuffer* — current candidate in =clutch-browse-table= or =clutch-describe-table=
+- *=clutch-mode= (SQL buffer)* — symbol at point, resolved against known objects
+- *=clutch-repl-mode=* — symbol at point
+- *=completing-read= minibuffer* — current candidate in =C-c C-d= / =C-c C-o=
+- *describe / definition buffers* — the object currently shown in that buffer
 
-Example: invoke =C-c C-j= (browse object), navigate to a candidate, then press
-the Embark key and =d= to describe it instead — without cancelling and re-running.
+Without Embark, =C-c C-o= opens a =transient= menu with the same object-driven
+actions from the current SQL, REPL, minibuffer, describe buffer, or definition
+buffer context.  Object-specific actions are marked unavailable in the
+transient when the current object type cannot support them.
+
+Embark only exposes secondary object actions.  Default actions such as
+=C-c C-j= itself and table-like row browsing stay on =RET= rather than being
+duplicated in the Embark menu.  Actions that depend on object capabilities, such
+as =jump target=, only appear for objects that actually carry explicit target
+metadata.
 
 ** JDBC Backend (clutch-db-jdbc.el)
 
@@ -714,14 +750,14 @@ backends.  See [[*Password Management]] for details.
   owner" setups.
 - Dictionary objects exposed only through =PUBLIC SYNONYM= (for example
   =USER_TABLES=) participate in completion, but they are not added to the schema
-  cache / schema browser snapshot.  That keeps Oracle system objects from
-  flooding =C-c C-j= and the schema browser for ordinary query-console use.
+  cache / object discovery snapshot.  That keeps Oracle system objects from
+  flooding =C-c C-j= for ordinary query-console use.
 - The Oracle search path filters common system owners in SQL for both
   =get-tables= and =search-tables=, while still keeping =PUBLIC SYNONYM=
   dictionary objects available to completion.
 - After connect (and after schema-affecting DDL), Oracle/JDBC also starts a
   background full table refresh.  Completion stays responsive because it keeps
-  using the prefix fast path, while =C-c C-j= / the schema browser / the
+  using the prefix fast path, while =C-c C-j= / the object discovery cache / the
   console's =schema~= state are backfilled from the same low-privilege-aware
   table snapshot once loading finishes.
 - Pagination uses =ROWNUM= subquery, compatible with all Oracle versions (9i+).
@@ -770,7 +806,7 @@ Pass arbitrary JDBC connection properties via =:props=:
 
 Requires the =transient= package (built-in since Emacs 28.1).
 
-Press =C-c ?= to open the transient menu.  The *Schema* group contains =List tables=, =Describe table=, and =Browse object=.
+Press =C-c ?= to open the transient menu.  The *Objects* group contains =Jump object=, =Describe object=, =Object actions=, and =Refresh schema=.
 
 In the result buffer, the *Edit* group in the transient menu provides the unified staged-commit workflow: =i= stages an insert, =d= stages a deletion, =C-c C-k= discards a pending change at point, and =C-c C-c= commits all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
 
@@ -1071,10 +1107,19 @@ docker run --rm -e MYSQL_ROOT_PASSWORD=testpass -e MYSQL_USER=testuser \
 
 mysql -h 127.0.0.1 -P 3307 -u testuser -ptestpass testdb < test/test-wide-table.sql
 emacs -batch -L . -l ert -l mysql -l test/mysql-test.el \
+  --eval '(setq mysql-tls-verify-server nil)' \
   --eval '(setq mysql-test-password "testpass")' \
   --eval '(setq mysql-test-port 3307)' \
   -f ert-run-tests-batch-and-exit
 #+end_src
+
+For local MySQL 8 containers, this =mysql.el= client may need TLS for
+=caching_sha2_password= authentication.  Container certificates are usually
+self-signed, so either bind =mysql-tls-verify-server= to =nil= for local live
+tests as above, or install the container CA in =mysql-tls-trustfiles=.
+
+The same caveat applies to clutch's backend live tests in
+=test/clutch-db-test.el= when they target a local MySQL 8 container.
 
 ** PostgreSQL live tests (require a running PostgreSQL)
 

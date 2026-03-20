@@ -204,13 +204,15 @@ the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
   "Return a list of table name strings for CONN's current database.")
 
 (cl-defgeneric clutch-db-list-table-entries (conn)
-  "Return table entry plists for CONN's current database.
-Each plist should include at least :name, and may also include metadata such as
-:type, :schema, and :source-schema.")
+  "Return browseable table-like object entries for CONN.
+Each entry is a plist containing at least :name and :type, and may also
+include :schema, :source-schema, :target-schema, and :target-name.")
 
 (cl-defmethod clutch-db-list-table-entries ((conn t))
-  "Default table entry listing derived from `clutch-db-list-tables'."
-  (mapcar (lambda (name) (list :name name))
+  "Default table-entry implementation derived from `clutch-db-list-tables'."
+  (mapcar (lambda (table)
+            (list :name table
+                  :type "TABLE"))
           (clutch-db-list-tables conn)))
 
 (cl-defgeneric clutch-db-list-columns (conn table)
@@ -228,8 +230,18 @@ Each plist should include at least :name, and may also include metadata such as
 
 (cl-defmethod clutch-db-search-table-entries ((conn t) prefix)
   "Default table entry search derived from `clutch-db-complete-tables'."
-  (mapcar (lambda (name) (list :name name))
+  (mapcar (lambda (name) (list :name name :type "TABLE"))
           (or (clutch-db-complete-tables conn prefix) '())))
+
+(cl-defgeneric clutch-db-browseable-object-entries (conn)
+  "Return the base browseable object entry list for CONN.
+This is the fast object-discovery snapshot used by clutch's object picker.")
+
+(cl-defmethod clutch-db-browseable-object-entries ((conn t))
+  "Default browseable-object snapshot.
+Merges direct table-like entries with empty-prefix search-discovered entries."
+  (append (clutch-db-list-table-entries conn)
+          (clutch-db-search-table-entries conn "")))
 
 (cl-defgeneric clutch-db-complete-columns (conn table prefix)
   "Return column candidates for TABLE and PREFIX on CONN.
@@ -242,6 +254,37 @@ Return nil when the backend does not support direct column completion.")
 (cl-defgeneric clutch-db-show-create-table (conn table)
   "Return the DDL string for TABLE on CONN.")
 
+(cl-defgeneric clutch-db-list-objects (conn category)
+  "Return object entry plists for CATEGORY on CONN.
+CATEGORY is one of: indexes, sequences, procedures, functions, triggers.")
+
+(cl-defmethod clutch-db-list-objects ((_conn t) _category)
+  "Default: return nil when CATEGORY is unsupported."
+  nil)
+
+(cl-defgeneric clutch-db-object-details (conn entry)
+  "Return detail data for object ENTRY on CONN.
+ENTRY is the full entry plist so the backend can use :identity or
+other backend-specific keys as needed.")
+
+(cl-defmethod clutch-db-object-details ((_conn t) _entry)
+  "Default: return nil when no detail loader is available."
+  nil)
+
+(cl-defgeneric clutch-db-object-source (conn entry)
+  "Return source text for source-bearing object ENTRY on CONN.")
+
+(cl-defmethod clutch-db-object-source ((_conn t) _entry)
+  "Default: return nil when source is unavailable."
+  nil)
+
+(cl-defgeneric clutch-db-show-create-object (conn entry)
+  "Return DDL text for non-table object ENTRY on CONN.")
+
+(cl-defmethod clutch-db-show-create-object ((_conn t) _entry)
+  "Default: return nil when DDL is unavailable."
+  nil)
+
 (cl-defgeneric clutch-db-table-comment (conn table)
   "Return the comment string for TABLE on CONN, or nil if none.")
 
@@ -251,6 +294,15 @@ Return nil when the backend does not support direct column completion.")
 (cl-defgeneric clutch-db-foreign-keys (conn table)
   "Return foreign key info for TABLE on CONN.
 Returns an alist of (COLUMN-NAME . (:ref-table T :ref-column C)).")
+
+(cl-defgeneric clutch-db-referencing-objects (conn table)
+  "Return objects that reference TABLE on CONN.
+Each element is an entry plist suitable for object navigation, typically
+including at least :name and :type, and optionally :schema / :source-schema.")
+
+(cl-defmethod clutch-db-referencing-objects ((_conn t) _table)
+  "Default: return nil when reverse-reference lookup is unsupported."
+  nil)
 
 (cl-defgeneric clutch-db-column-details (conn table)
   "Return detailed column info for TABLE on CONN.

@@ -9,6 +9,12 @@
 ;;   docker run -d -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql:8
 ;;   docker run -d -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16
 ;;
+;; Note: MySQL 8 defaults to `caching_sha2_password'.  The native mysql.el
+;; client retries with TLS when the server requires a secure channel; local
+;; container certificates are typically self-signed, so the MySQL live helpers
+;; bind `mysql-tls-verify-server' to nil unless the test environment installs a
+;; trusted CA.
+;;
 ;; Run unit tests:
 ;;   emacs -batch -L .. -l ert -l clutch-db-test \
 ;;     -f ert-run-tests-batch-and-exit
@@ -30,6 +36,9 @@
 ;; in the cache-based completion tests create dynamic (not lexical) bindings
 ;; that the bytecode in clutch-db-jdbc.el can see.
 (defvar clutch--schema-cache (make-hash-table :test 'equal))
+;; `mysql-tls-verify-server' is defined in mysql.el; declare it special here so
+;; local test bindings remain dynamic even before the backend requires mysql.el.
+(defvar mysql-tls-verify-server)
 
 ;;;; Test configuration
 
@@ -44,6 +53,14 @@
 (defvar clutch-db-test-pg-user "postgres")
 (defvar clutch-db-test-pg-password nil)
 (defvar clutch-db-test-pg-database "postgres")
+
+(defmacro clutch-db-test--with-local-mysql-tls (&rest body)
+  "Run BODY with MySQL TLS verification disabled for local self-signed certs."
+  (declare (indent 0))
+  `(progn
+     (require 'mysql)
+     (cl-letf (((symbol-value 'mysql-tls-verify-server) nil))
+       ,@body)))
 
 ;;;; Unit tests — clutch-db-result struct
 
@@ -90,6 +107,26 @@
                  (pop batches))))
       (should (equal (clutch-jdbc--fetch-all conn 9)
                      '((3) (4) (5)))))))
+
+(ert-deftest clutch-db-test-jdbc-referencing-objects-maps-rpc-response ()
+  "JDBC reverse-reference lookup should map RPC rows to object entries."
+  (let (captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout-seconds)
+                 (setq captured-op op
+                       captured-params params)
+                 '(:objects ((:name "ORDERS" :schema "APP")
+                             (:name "PAYMENTS" :schema "APP"))))))
+      (should (equal
+               (clutch-db-referencing-objects
+                (make-clutch-jdbc-conn :conn-id 7 :params '(:backend oracle :schema "APP"))
+                "CUSTOMERS")
+               '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP")
+                 (:name "PAYMENTS" :type "TABLE" :schema "APP" :source-schema "APP"))))
+      (should (equal captured-op "get-referencing-objects"))
+      (should (= (alist-get 'conn-id captured-params) 7))
+      (should (equal (alist-get 'table captured-params) "CUSTOMERS"))
+      (should (equal (alist-get 'schema captured-params) "APP")))))
 
 (ert-deftest clutch-db-test-jdbc-connect-maps-timeouts ()
   "JDBC connect should map explicit timeout phases to the agent call."
@@ -394,42 +431,57 @@
       (should (clutch-db-refresh-schema-async conn #'ignore))
       (should (= captured-timeout 7)))))
 
-;;;; Unit tests — clutch-jdbc--collect-table-rows
+;;;; Unit tests — clutch-jdbc--collect-table-entries
 
-(ert-deftest clutch-db-test-jdbc-collect-table-rows-done ()
-  "When :done is t, collect-table-rows returns :rows directly without fetching."
+(ert-deftest clutch-db-test-jdbc-collect-table-entries-direct ()
+  "When :tables is present, collect-table-entries returns it directly."
   (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott")))
         fetch-called)
     (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
                (lambda (_conn _cursor-id)
                  (setq fetch-called t)
                  '())))
-      (let ((rows (clutch-jdbc--collect-table-rows
-                   conn
-                   '(:rows (("USERS" "TABLE" "SCOTT")
-                            ("ORDERS" "TABLE" "SCOTT"))
-                     :cursor-id nil
-                     :done t))))
-        (should (equal rows '(("USERS" "TABLE" "SCOTT")
-                              ("ORDERS" "TABLE" "SCOTT"))))
+      (let ((entries (clutch-jdbc--collect-table-entries
+                      conn
+                      '(:tables ((:name "USERS" :type "TABLE" :schema "SCOTT")
+                                 (:name "ORDERS" :type "TABLE" :schema "SCOTT"))))))
+        (should (equal entries '((:name "USERS" :type "TABLE" :schema "SCOTT")
+                                 (:name "ORDERS" :type "TABLE" :schema "SCOTT"))))
         (should-not fetch-called)))))
 
-(ert-deftest clutch-db-test-jdbc-collect-table-rows-paged ()
-  "When :done is nil, collect-table-rows fetches remaining pages."
+(ert-deftest clutch-db-test-jdbc-collect-table-entries-legacy-cursor ()
+  "Legacy cursor-format results are normalized to entry plists."
   (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott")))
         fetch-cursor-id)
     (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
                (lambda (_conn cursor-id)
                  (setq fetch-cursor-id cursor-id)
                  '(("PRODUCTS" "TABLE" "SCOTT")))))
-      (let ((rows (clutch-jdbc--collect-table-rows
-                   conn
-                   '(:rows (("USERS" "TABLE" "SCOTT"))
-                     :cursor-id 42
-                     :done nil))))
-        (should (equal rows '(("USERS" "TABLE" "SCOTT")
-                              ("PRODUCTS" "TABLE" "SCOTT"))))
+      (let ((entries (clutch-jdbc--collect-table-entries
+                      conn
+                      '(:rows (("USERS" "TABLE" "SCOTT"))
+                        :cursor-id 42
+                        :done nil))))
+        (should (equal entries '((:name "USERS" :type "TABLE" :schema "SCOTT" :source-schema "SCOTT")
+                                 (:name "PRODUCTS" :type "TABLE" :schema "SCOTT" :source-schema "SCOTT"))))
         (should (= fetch-cursor-id 42))))))
+
+(ert-deftest clutch-db-test-jdbc-list-table-entries-keeps-object-types ()
+  "JDBC list-table-entries should preserve view and synonym metadata."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver oracle :user "scott"))))
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op _params &optional _timeout)
+                 '(:tables ((:name "USERS" :type "TABLE" :schema "SCOTT")
+                            (:name "USER_VIEW" :type "VIEW" :schema "SCOTT")
+                            (:name "USER_SYM" :type "SYNONYM" :schema "SCOTT"
+                                    :target-schema "APP" :target-name "USERS"))))))
+      (should
+       (equal (clutch-db-list-table-entries conn)
+              '((:name "USERS" :type "TABLE" :schema "SCOTT")
+                (:name "USER_VIEW" :type "VIEW" :schema "SCOTT")
+                (:name "USER_SYM" :type "SYNONYM" :schema "SCOTT"
+                        :target-schema "APP" :target-name "USERS")))))))
 
 ;;;; Unit tests — clutch-db-complete-tables (Oracle, cache-first)
 
@@ -1025,16 +1077,21 @@ Skips if `clutch-db-test-mysql-password' is nil."
   (declare (indent 1))
   `(if (null clutch-db-test-mysql-password)
        (ert-skip "Set clutch-db-test-mysql-password to enable MySQL live tests")
-     (let ((,var (clutch-db-connect
-                  'mysql
-                  (list :host clutch-db-test-mysql-host
-                        :port clutch-db-test-mysql-port
-                        :user clutch-db-test-mysql-user
-                        :password clutch-db-test-mysql-password
-                        :database clutch-db-test-mysql-database))))
-       (unwind-protect
-           (progn ,@body)
-         (clutch-db-disconnect ,var)))))
+     ;; Local MySQL 8 containers usually present self-signed certs.  The native
+     ;; client auto-upgrades to TLS for `caching_sha2_password', so disable
+     ;; certificate verification here unless the caller has installed a trust
+     ;; chain explicitly.
+     (clutch-db-test--with-local-mysql-tls
+       (let ((,var (clutch-db-connect
+                    'mysql
+                    (list :host clutch-db-test-mysql-host
+                          :port clutch-db-test-mysql-port
+                          :user clutch-db-test-mysql-user
+                          :password clutch-db-test-mysql-password
+                          :database clutch-db-test-mysql-database))))
+         (unwind-protect
+             (progn ,@body)
+           (clutch-db-disconnect ,var))))))
 
 (ert-deftest clutch-db-test-mysql-live-connect ()
   :tags '(:db-live :mysql-live)
@@ -1377,35 +1434,36 @@ Skips if `clutch-db-test-jdbc-oracle-password' is nil."
              (null clutch-db-test-pg-password))
     (ert-skip "Need both MySQL and PostgreSQL for cross-backend tests"))
   ;; Test numeric
-  (let ((mysql-conn (when clutch-db-test-mysql-password
-                      (clutch-db-connect
-                       'mysql
-                       (list :host clutch-db-test-mysql-host
-                             :port clutch-db-test-mysql-port
-                             :user clutch-db-test-mysql-user
-                             :password clutch-db-test-mysql-password
-                             :database clutch-db-test-mysql-database))))
-        (pg-conn (when clutch-db-test-pg-password
-                   (clutch-db-connect
-                    'pg
-                    (list :host clutch-db-test-pg-host
-                          :port clutch-db-test-pg-port
-                          :user clutch-db-test-pg-user
-                          :password clutch-db-test-pg-password
-                          :database clutch-db-test-pg-database)))))
-    (unwind-protect
-        (progn
-          ;; Both should return numeric type-category for integers
-          (when mysql-conn
-            (let* ((result (clutch-db-query mysql-conn "SELECT 42 AS n"))
-                   (cols (clutch-db-result-columns result)))
-              (should (eq (plist-get (car cols) :type-category) 'numeric))))
-          (when pg-conn
-            (let* ((result (clutch-db-query pg-conn "SELECT 42 AS n"))
-                   (cols (clutch-db-result-columns result)))
-              (should (eq (plist-get (car cols) :type-category) 'numeric)))))
-      (when mysql-conn (clutch-db-disconnect mysql-conn))
-      (when pg-conn (clutch-db-disconnect pg-conn)))))
+  (clutch-db-test--with-local-mysql-tls
+    (let ((mysql-conn (when clutch-db-test-mysql-password
+                        (clutch-db-connect
+                         'mysql
+                         (list :host clutch-db-test-mysql-host
+                               :port clutch-db-test-mysql-port
+                               :user clutch-db-test-mysql-user
+                               :password clutch-db-test-mysql-password
+                               :database clutch-db-test-mysql-database))))
+          (pg-conn (when clutch-db-test-pg-password
+                     (clutch-db-connect
+                      'pg
+                      (list :host clutch-db-test-pg-host
+                            :port clutch-db-test-pg-port
+                            :user clutch-db-test-pg-user
+                            :password clutch-db-test-pg-password
+                            :database clutch-db-test-pg-database)))))
+      (unwind-protect
+          (progn
+            ;; Both should return numeric type-category for integers
+            (when mysql-conn
+              (let* ((result (clutch-db-query mysql-conn "SELECT 42 AS n"))
+                     (cols (clutch-db-result-columns result)))
+                (should (eq (plist-get (car cols) :type-category) 'numeric))))
+            (when pg-conn
+              (let* ((result (clutch-db-query pg-conn "SELECT 42 AS n"))
+                     (cols (clutch-db-result-columns result)))
+                (should (eq (plist-get (car cols) :type-category) 'numeric)))))
+        (when mysql-conn (clutch-db-disconnect mysql-conn))
+        (when pg-conn (clutch-db-disconnect pg-conn))))))
 
 (ert-deftest clutch-db-test-cross-null-handling ()
   :tags '(:db-live :mysql-live :pg-live)
@@ -1413,25 +1471,26 @@ Skips if `clutch-db-test-jdbc-oracle-password' is nil."
   (when (and (null clutch-db-test-mysql-password)
              (null clutch-db-test-pg-password))
     (ert-skip "Need both MySQL and PostgreSQL for cross-backend tests"))
-  (dolist (backend-spec (list (cons 'mysql
-                                    (list :host clutch-db-test-mysql-host
-                                          :port clutch-db-test-mysql-port
-                                          :user clutch-db-test-mysql-user
-                                          :password clutch-db-test-mysql-password
-                                          :database clutch-db-test-mysql-database))
-                              (cons 'pg
-                                    (list :host clutch-db-test-pg-host
-                                          :port clutch-db-test-pg-port
-                                          :user clutch-db-test-pg-user
-                                          :password clutch-db-test-pg-password
-                                          :database clutch-db-test-pg-database))))
-    (when (plist-get (cdr backend-spec) :password)
-      (let ((conn (clutch-db-connect (car backend-spec) (cdr backend-spec))))
-        (unwind-protect
-            (let* ((result (clutch-db-query conn "SELECT NULL AS n"))
-                   (row (car (clutch-db-result-rows result))))
-              (should (null (car row))))
-          (clutch-db-disconnect conn))))))
+  (clutch-db-test--with-local-mysql-tls
+    (dolist (backend-spec (list (cons 'mysql
+                                      (list :host clutch-db-test-mysql-host
+                                            :port clutch-db-test-mysql-port
+                                            :user clutch-db-test-mysql-user
+                                            :password clutch-db-test-mysql-password
+                                            :database clutch-db-test-mysql-database))
+                                (cons 'pg
+                                      (list :host clutch-db-test-pg-host
+                                            :port clutch-db-test-pg-port
+                                            :user clutch-db-test-pg-user
+                                            :password clutch-db-test-pg-password
+                                            :database clutch-db-test-pg-database))))
+      (when (plist-get (cdr backend-spec) :password)
+        (let ((conn (clutch-db-connect (car backend-spec) (cdr backend-spec))))
+          (unwind-protect
+              (let* ((result (clutch-db-query conn "SELECT NULL AS n"))
+                     (row (car (clutch-db-result-rows result))))
+                (should (null (car row))))
+            (clutch-db-disconnect conn)))))))
 
 ;;;; Unit tests — clutch-db-live-p (JDBC identity check)
 

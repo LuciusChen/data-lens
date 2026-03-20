@@ -158,6 +158,34 @@ ORDER BY tablename")))
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
+(cl-defmethod clutch-db-list-table-entries ((conn pg-conn))
+  "Return table/view entry plists for the current PostgreSQL schema."
+  (condition-case err
+      (let ((result (pg-query
+                     conn
+                     "SELECT name, type
+FROM (
+  SELECT tablename AS name, 'TABLE' AS type
+  FROM pg_tables
+  WHERE schemaname = current_schema()
+  UNION ALL
+  SELECT viewname AS name, 'VIEW' AS type
+  FROM pg_views
+  WHERE schemaname = current_schema()
+) objects
+ORDER BY name")))
+        (mapcar
+         (lambda (row)
+           (pcase-let ((`(,name ,type) row))
+             (list :name name
+                   :type type
+                   :schema "current_schema"
+                   :source-schema "current_schema")))
+         (pg-result-rows result)))
+    (pg-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
 (cl-defmethod clutch-db-list-columns ((conn pg-conn) table)
   "Return column names for TABLE on PostgreSQL CONN."
   (condition-case err
@@ -202,6 +230,236 @@ ORDER BY ordinal_position"
         (format "CREATE TABLE %s (\n%s\n);"
                 (pg-escape-identifier table)
                 (mapconcat #'identity lines ",\n")))
+    (pg-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-list-objects ((conn pg-conn) category)
+  "Return object entry plists for CATEGORY on PostgreSQL CONN."
+  (condition-case err
+      (pcase category
+        ('indexes
+         (let ((result
+                (pg-query
+                 conn
+                 "SELECT i.indexname, i.tablename, ix.indisunique
+FROM pg_indexes i
+JOIN pg_class c ON c.relname = i.indexname
+JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = i.schemaname
+JOIN pg_index ix ON ix.indexrelid = c.oid
+WHERE i.schemaname = current_schema()
+ORDER BY i.tablename, i.indexname")))
+           (mapcar
+            (lambda (row)
+              (pcase-let ((`(,name ,table-name ,unique) row))
+                (list :name name :type "INDEX" :schema "current_schema"
+                      :source-schema "current_schema"
+                      :target-table table-name :unique unique)))
+            (pg-result-rows result))))
+        ('sequences
+         (let ((result
+                (pg-query
+                 conn
+                 "SELECT sequencename, min_value, max_value, increment_by, last_value
+FROM pg_sequences
+WHERE schemaname = current_schema()
+ORDER BY sequencename")))
+           (mapcar
+            (lambda (row)
+              (pcase-let ((`(,name ,min ,max ,increment ,last) row))
+                (list :name name :type "SEQUENCE" :schema "current_schema"
+                      :source-schema "current_schema"
+                      :min min :max max :increment increment :last last)))
+            (pg-result-rows result))))
+        ('procedures
+         (let ((result
+                (pg-query
+                 conn
+                 "SELECT p.proname, p.oid
+FROM pg_proc p
+JOIN pg_namespace n ON p.pronamespace = n.oid
+WHERE n.nspname = current_schema()
+  AND p.prokind = 'p'
+ORDER BY p.proname")))
+           (mapcar
+            (lambda (row)
+              (pcase-let ((`(,name ,oid) row))
+                (list :name name :type "PROCEDURE" :schema "current_schema"
+                      :source-schema "current_schema"
+                      :identity (format "OID:%s" oid))))
+            (pg-result-rows result))))
+        ('functions
+         (let ((result
+                (pg-query
+                 conn
+                 "SELECT p.proname, p.oid
+FROM pg_proc p
+JOIN pg_namespace n ON p.pronamespace = n.oid
+WHERE n.nspname = current_schema()
+  AND p.prokind = 'f'
+ORDER BY p.proname")))
+           (mapcar
+            (lambda (row)
+              (pcase-let ((`(,name ,oid) row))
+                (list :name name :type "FUNCTION" :schema "current_schema"
+                      :source-schema "current_schema"
+                      :identity (format "OID:%s" oid))))
+            (pg-result-rows result))))
+        ('triggers
+         (let ((result
+                (pg-query
+                 conn
+                 "SELECT t.trigger_name, t.event_object_table, t.event_manipulation,
+        t.action_timing, pg_t.oid
+FROM information_schema.triggers t
+JOIN pg_class c ON c.relname = t.event_object_table
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_trigger pg_t ON pg_t.tgrelid = c.oid
+                    AND pg_t.tgname = t.trigger_name
+WHERE t.trigger_schema = current_schema()
+  AND NOT pg_t.tgisinternal
+ORDER BY t.event_object_table, t.trigger_name")))
+           (let ((rows (pg-result-rows result))
+                 grouped)
+             (dolist (row rows (nreverse grouped))
+               (pcase-let ((`(,name ,table-name ,event ,timing ,oid) row))
+                 (if-let* ((existing (cl-find-if
+                                      (lambda (entry)
+                                        (and (string= (plist-get entry :name) name)
+                                             (string= (plist-get entry :target-table) table-name)))
+                                      grouped)))
+                     (unless (string-match-p (regexp-quote event)
+                                             (or (plist-get existing :event) ""))
+                       (setf (plist-get existing :event)
+                             (concat (plist-get existing :event) " OR " event)))
+                   (push (list :name name :type "TRIGGER" :schema "current_schema"
+                               :source-schema "current_schema"
+                               :target-table table-name :event event :timing timing
+                               :status "ENABLED"
+                               :identity (format "OID:%s" oid))
+                         grouped)))))))
+        (_ nil))
+    (pg-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-object-details ((conn pg-conn) entry)
+  "Return detail plists for PostgreSQL object ENTRY."
+  (condition-case _err
+      (pcase (upcase (or (plist-get entry :type) ""))
+        ("INDEX"
+         (let* ((result
+                 (pg-query
+                  conn
+                  (format "SELECT a.attname, k.ordinality,
+       CASE WHEN ((pi.indoption::int2[])[k.ordinality] & 1) = 1
+            THEN 'DESC' ELSE 'ASC' END AS descend
+FROM pg_class idx
+JOIN pg_namespace n ON n.oid = idx.relnamespace
+JOIN pg_index pi ON pi.indexrelid = idx.oid
+JOIN LATERAL unnest(pi.indkey) WITH ORDINALITY AS k(attnum, ordinality) ON true
+JOIN pg_attribute a ON a.attrelid = pi.indrelid AND a.attnum = k.attnum
+WHERE idx.relkind = 'i'
+  AND idx.relname = %s
+  AND n.nspname = current_schema()
+ORDER BY k.ordinality"
+                          (pg-escape-literal (plist-get entry :name))))))
+           (mapcar
+            (lambda (row)
+              (pcase-let ((`(,name ,position ,descend) row))
+                (list :name name :position position :descend descend)))
+            (pg-result-rows result))))
+        ((or "PROCEDURE" "FUNCTION")
+         (let* ((oid (substring (plist-get entry :identity) 4))
+                (sql (concat
+                      "SELECT name, type, mode, position FROM ("
+                      (if (string= (upcase (plist-get entry :type)) "FUNCTION")
+                          (format "SELECT NULL::text AS name,
+       pg_catalog.format_type(p.prorettype, NULL) AS type,
+       'RETURN' AS mode, 0 AS position
+FROM pg_proc p
+WHERE p.oid = %s
+UNION ALL " oid)
+                        "")
+                      (format "SELECT (p.proargnames::text[])[s.n] AS name,
+       pg_catalog.format_type(COALESCE((p.proallargtypes)[s.n],
+                                       (p.proargtypes::oid[])[s.n]), NULL) AS type,
+       CASE COALESCE((p.proargmodes::text[])[s.n], 'i')
+         WHEN 'i' THEN 'IN'
+         WHEN 'o' THEN 'OUT'
+         WHEN 'b' THEN 'INOUT'
+         WHEN 'v' THEN 'VARIADIC'
+         WHEN 't' THEN 'TABLE'
+         ELSE 'IN'
+       END AS mode,
+       s.n AS position
+FROM pg_proc p
+JOIN LATERAL generate_subscripts(COALESCE(p.proallargtypes,
+                                          p.proargtypes::oid[]), 1) AS s(n) ON true
+WHERE p.oid = %s) args
+ORDER BY position" oid)))
+                (result (pg-query conn sql)))
+           (mapcar
+            (lambda (row)
+              (pcase-let ((`(,name ,type ,mode ,position) row))
+                (list :name name :type type :mode mode :position position)))
+            (pg-result-rows result))))
+        (_ nil))
+    (pg-error nil)))
+
+(cl-defmethod clutch-db-object-source ((conn pg-conn) entry)
+  "Return source text for PostgreSQL object ENTRY."
+  (condition-case err
+      (let ((oid (substring (plist-get entry :identity) 4)))
+        (pcase (upcase (or (plist-get entry :type) ""))
+          ((or "PROCEDURE" "FUNCTION")
+           (caar (pg-result-rows
+                  (pg-query conn (format "SELECT pg_get_functiondef(%s::oid)" oid)))))
+          ("TRIGGER"
+           (caar (pg-result-rows
+                  (pg-query conn (format "SELECT pg_get_triggerdef(%s::oid, true)" oid)))))
+          (_ nil)))
+    (pg-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-show-create-object ((conn pg-conn) entry)
+  "Return DDL text for PostgreSQL non-table ENTRY."
+  (condition-case err
+      (pcase (upcase (or (plist-get entry :type) ""))
+        ("INDEX"
+         (caar (pg-result-rows
+                (pg-query
+                 conn
+                 (format "SELECT pg_get_indexdef(idx.oid)
+FROM pg_class idx
+JOIN pg_namespace n ON n.oid = idx.relnamespace
+WHERE idx.relkind = 'i'
+  AND idx.relname = %s
+  AND n.nspname = current_schema()"
+                         (pg-escape-literal (plist-get entry :name)))))))
+        ("VIEW"
+         (caar (pg-result-rows
+                (pg-query
+                 conn
+                 (format "SELECT 'CREATE OR REPLACE VIEW ' || quote_ident(viewname) || E' AS\n' ||
+       pg_get_viewdef((quote_ident(schemaname) || '.' || quote_ident(viewname))::regclass, true)
+FROM pg_views
+WHERE schemaname = current_schema()
+  AND viewname = %s"
+                         (pg-escape-literal (plist-get entry :name)))))))
+        ("SEQUENCE"
+         (caar (pg-result-rows
+                (pg-query
+                 conn
+                 (format "SELECT format(
+  'CREATE SEQUENCE %%I.%%I INCREMENT BY %%s MINVALUE %%s MAXVALUE %%s START WITH %%s;',
+  schemaname, sequencename, increment_by, min_value, max_value, start_value)
+FROM pg_sequences
+WHERE schemaname = current_schema()
+  AND sequencename = %s"
+                         (pg-escape-literal (plist-get entry :name)))))))
+        (_ nil))
     (pg-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
@@ -260,6 +518,26 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
                            (cons col-name
                                  (list :ref-table ref-table
                                        :ref-column ref-column)))))
+    (pg-error nil)))
+
+(cl-defmethod clutch-db-referencing-objects ((conn pg-conn) table)
+  "Return table entries that reference TABLE on PostgreSQL CONN."
+  (condition-case _err
+      (let* ((sql (format "SELECT DISTINCT tc.table_name
+FROM information_schema.table_constraints tc
+JOIN information_schema.constraint_column_usage ccu
+  ON ccu.constraint_name = tc.constraint_name
+ AND ccu.table_schema = tc.table_schema
+WHERE tc.constraint_type = 'FOREIGN KEY'
+  AND tc.table_schema = current_schema()
+  AND ccu.table_schema = current_schema()
+  AND ccu.table_name = %s"
+                          (pg-escape-literal table)))
+             (result (pg-query conn sql)))
+        (mapcar (lambda (row)
+                  (pcase-let ((`(,name) row))
+                    (list :name name :type "TABLE")))
+                (pg-result-rows result)))
     (pg-error nil)))
 
 ;;;; Column details

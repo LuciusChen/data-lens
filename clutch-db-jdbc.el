@@ -64,7 +64,7 @@
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "aa9075f0ba2682cc3b588d51b6ef85967fc1a5b8932f813bdd5385c64bd2624e"
+  "7da1e8e486b4873b922af7cbf9a15d928290945a3732bd9454f19c7170661e80"
   "Expected SHA-256 for the bundled clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -592,16 +592,23 @@ commits any pending transaction per the JDBC specification."
         (setq done (eq t (plist-get result :done)))))
     (apply #'nconc (nreverse batches))))
 
-(defun clutch-jdbc--collect-table-rows (conn result)
-  "Drain all rows from a cursor-format get-tables RESULT on CONN.
-Returns the flat list of rows; each row is a list of column values.
-If RESULT already has :done t, returns its :rows directly.
-Otherwise fetches remaining cursor pages via `clutch-jdbc--fetch-all'."
-  (let* ((first-rows (plist-get result :rows))
-         (cursor-id  (plist-get result :cursor-id)))
-    (if (eq t (plist-get result :done))
-        first-rows
-      (nconc first-rows (clutch-jdbc--fetch-all conn cursor-id)))))
+(defun clutch-jdbc--collect-table-entries (conn result)
+  "Return normalized table entry plists from get-tables RESULT on CONN.
+Supports both the current plist-list payload under :tables and the older
+cursor-style :rows format used in tests."
+  (or (plist-get result :tables)
+      (mapcar
+       #'clutch-jdbc--table-entry-from-row
+       (let* ((first-rows (plist-get result :rows))
+              (cursor-id  (plist-get result :cursor-id)))
+         (if (eq t (plist-get result :done))
+             first-rows
+           (nconc first-rows (clutch-jdbc--fetch-all conn cursor-id)))))))
+
+(defun clutch-jdbc--entry-type= (entry type)
+  "Return non-nil when ENTRY has TYPE, case-insensitively."
+  (string-equal (upcase (or (plist-get entry :type) ""))
+                (upcase type)))
 
 (defun clutch-jdbc--table-entry-from-row (row)
   "Convert a get-tables ROW into a table entry plist."
@@ -654,6 +661,21 @@ Clob plists become their :preview string."
               (plist-get val :preview))
              (t val)))
           row))
+
+(defun clutch-jdbc--json-bool (value)
+  "Normalize VALUE decoded from JSON into an Elisp boolean."
+  (and value (not (eq value clutch-jdbc--json-false))))
+
+(defun clutch-jdbc--normalize-object-entry (entry)
+  "Normalize agent ENTRY field names for the generic clutch object schema."
+  (let ((normalized (copy-sequence entry)))
+    (when-let* ((table (plist-get normalized :table)))
+      (setq normalized (plist-put normalized :target-table table)))
+    (when (plist-member normalized :unique)
+      (setq normalized
+            (plist-put normalized :unique
+                       (clutch-jdbc--json-bool (plist-get normalized :unique)))))
+    normalized))
 
 (cl-defmethod clutch-db-query ((conn clutch-jdbc-conn) sql)
   "Execute SQL on JDBC CONN and return a `clutch-db-result'."
@@ -810,8 +832,14 @@ returning tables from SYS/SYSTEM and other visible schemas."
                    "get-tables"
                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                      ,@(when schema `((schema . ,schema))))))
-         (all-rows (clutch-jdbc--collect-table-rows conn result)))
-    (mapcar #'clutch-jdbc--table-entry-from-row all-rows)))
+         (entries (clutch-jdbc--collect-table-entries conn result)))
+    entries))
+
+(cl-defmethod clutch-db-browseable-object-entries ((conn clutch-jdbc-conn))
+  "Return the fast browseable object snapshot for JDBC CONN.
+Oracle/JDBC already surfaces synonym-aware entries through `get-tables', so do
+not issue an additional empty-prefix `search-tables' scan here."
+  (clutch-db-list-table-entries conn))
 
 (cl-defmethod clutch-db-refresh-schema-async ((conn clutch-jdbc-conn) callback
                                               &optional errback)
@@ -825,7 +853,10 @@ returning tables from SYS/SYSTEM and other visible schemas."
      (lambda (result)
        (when callback
          (funcall callback
-                  (mapcar #'car (clutch-jdbc--collect-table-rows conn result)))))
+                  (mapcar (lambda (entry) (plist-get entry :name))
+                          (seq-filter (lambda (entry)
+                                        (clutch-jdbc--entry-type= entry "TABLE"))
+                                      (clutch-jdbc--collect-table-entries conn result))))))
      errback
      rpc-timeout)
     t))
@@ -939,9 +970,90 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
                (format "    %s %s%s"
                        (funcall display-ident (plist-get col :name))
                        (plist-get col :type)
-                       (if (plist-get col :nullable) "" " NOT NULL")))
+                       (if (clutch-jdbc--json-bool (plist-get col :nullable))
+                           ""
+                         " NOT NULL")))
              cols
              ",\n"))))
+
+(cl-defmethod clutch-db-list-objects ((conn clutch-jdbc-conn) category)
+  "Return object entry plists for CATEGORY on JDBC CONN."
+  (let* ((schema (clutch-jdbc--conn-schema conn))
+         (op (pcase category
+               ('indexes "get-indexes")
+               ('sequences "get-sequences")
+               ('procedures "get-procedures")
+               ('functions "get-functions")
+               ('triggers "get-triggers")
+               (_ nil))))
+    (when op
+      (let* ((result (clutch-jdbc--rpc
+                      op
+                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                        ,@(when schema `((schema . ,schema))))))
+             (key (pcase category
+                    ('indexes :indexes)
+                    ('sequences :sequences)
+                    ('procedures :procedures)
+                    ('functions :functions)
+                    ('triggers :triggers))))
+        (mapcar #'clutch-jdbc--normalize-object-entry
+                (plist-get result key))))))
+
+(cl-defmethod clutch-db-object-details ((conn clutch-jdbc-conn) entry)
+  "Return detail plists for JDBC object ENTRY."
+  (let* ((schema (clutch-jdbc--conn-schema conn))
+         (type (upcase (or (plist-get entry :type) ""))))
+    (pcase type
+      ("INDEX"
+       (let ((result
+              (clutch-jdbc--rpc
+               "get-index-columns"
+               `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                 (index   . ,(plist-get entry :name))
+                 ,@(when (plist-get entry :target-table)
+                     `((table . ,(plist-get entry :target-table))))
+                 ,@(when schema `((schema . ,schema)))))))
+         (plist-get result :columns)))
+      ((or "PROCEDURE" "FUNCTION")
+       (let ((result
+              (clutch-jdbc--rpc
+               (if (string= type "PROCEDURE")
+                   "get-procedure-params"
+                 "get-function-params")
+               `((conn-id  . ,(clutch-jdbc-conn-conn-id conn))
+                 (name     . ,(plist-get entry :name))
+                 ,@(when (plist-get entry :identity)
+                     `((identity . ,(plist-get entry :identity))))
+                 ,@(when schema `((schema . ,schema)))))))
+         (plist-get result :params)))
+      (_ nil))))
+
+(cl-defmethod clutch-db-object-source ((conn clutch-jdbc-conn) entry)
+  "Return source text for JDBC object ENTRY."
+  (let* ((schema (clutch-jdbc--conn-schema conn))
+         (result (clutch-jdbc--rpc
+                  "get-object-source"
+                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                    (name    . ,(plist-get entry :name))
+                    (type    . ,(plist-get entry :type))
+                    ,@(when (plist-get entry :identity)
+                        `((identity . ,(plist-get entry :identity))))
+                    ,@(when schema `((schema . ,schema)))))))
+    (plist-get result :source)))
+
+(cl-defmethod clutch-db-show-create-object ((conn clutch-jdbc-conn) entry)
+  "Return DDL text for JDBC non-table ENTRY."
+  (let* ((schema (clutch-jdbc--conn-schema conn))
+         (result (clutch-jdbc--rpc
+                  "get-object-ddl"
+                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                    (name    . ,(plist-get entry :name))
+                    (type    . ,(plist-get entry :type))
+                    ,@(when (plist-get entry :identity)
+                        `((identity . ,(plist-get entry :identity))))
+                    ,@(when schema `((schema . ,schema)))))))
+    (plist-get result :ddl)))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-jdbc-conn) _table)
   "Return nil — table comments are not available via standard DatabaseMetaData."
@@ -971,6 +1083,22 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
                           :ref-column (plist-get fk :pk-column))))
             (plist-get result :foreign-keys))))
 
+(cl-defmethod clutch-db-referencing-objects ((conn clutch-jdbc-conn) table)
+  "Return objects that reference TABLE on JDBC CONN."
+  (let* ((schema (clutch-jdbc--conn-schema conn))
+         (result (clutch-jdbc--rpc
+                  "get-referencing-objects"
+                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                    (table   . ,table)
+                    ,@(when schema `((schema . ,schema)))))))
+    (mapcar (lambda (entry)
+              (list :name (plist-get entry :name)
+                    :type "TABLE"
+                    :schema (plist-get entry :schema)
+                    :source-schema (or (plist-get entry :source-schema)
+                                       (plist-get entry :schema))))
+            (plist-get result :objects))))
+
 (cl-defmethod clutch-db-column-details ((conn clutch-jdbc-conn) table)
   "Return detailed column info for TABLE on JDBC CONN."
   (let* ((schema  (clutch-jdbc--conn-schema conn))
@@ -986,7 +1114,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
               (let ((name (plist-get col :name)))
                 (list :name        name
                       :type        (plist-get col :type)
-                      :nullable    (plist-get col :nullable)
+                      :nullable    (clutch-jdbc--json-bool (plist-get col :nullable))
                       :primary-key (and (member name pk-cols) t)
                       :foreign-key (cdr (assoc name fks))
                       :comment     nil)))

@@ -1680,23 +1680,6 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (puthash "dev-key" '(:state ready :tables 2) clutch--schema-status-cache)
       (should-not (clutch--schema-cache-guidance 'fake-conn)))))
 
-(ert-deftest clutch-test-schema-browser-status-line-reflects-recovery-state ()
-  "Schema browser status line should surface stale/failed/refreshing states."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal)))
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "dev-key")))
-      (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
-      (should (equal (clutch--schema-browser-status-line 'fake-conn)
-                     "-- schema cache stale · refresh with g or C-c C-s\n"))
-      (puthash "dev-key" '(:state failed) clutch--schema-status-cache)
-      (should (equal (clutch--schema-browser-status-line 'fake-conn)
-                     "-- schema refresh failed · retry with g or C-c C-s\n"))
-      (puthash "dev-key" '(:state refreshing) clutch--schema-status-cache)
-      (should (equal (clutch--schema-browser-status-line 'fake-conn)
-                     "-- schema refresh in progress\n"))
-      (puthash "dev-key" '(:state ready :tables 2) clutch--schema-status-cache)
-      (should-not (clutch--schema-browser-status-line 'fake-conn)))))
-
 (ert-deftest clutch-test-refresh-current-schema-avoids-duplicate-refresh ()
   "Refreshing state should block duplicate schema refresh attempts."
   (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
@@ -3579,229 +3562,567 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should (string-match-p "1 row" output))
         (should (string-match-p "db> $" output))))))
 
-;;;; Unit tests - schema/table browse helpers
+;;;; Unit tests - object picker and actions
 
-(ert-deftest clutch-test-schema-browse-at-point-errors-without-console ()
-  "Schema browse should error when no matching query console is open."
+(ert-deftest clutch-test-object-browse-errors-without-console ()
+  "Object browse should error when no matching query console is open."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
-    (cl-letf (((symbol-function 'clutch-schema--table-at-point)
-               (lambda () "users"))
+    (cl-letf (((symbol-function 'clutch--find-console-for-conn)
+               (lambda (_conn) nil))
               ((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn tbl) tbl))
-              ((symbol-function 'clutch--find-console-for-conn)
-               (lambda (_conn) nil)))
-      (should-error (clutch-schema-browse-at-point) :type 'user-error))))
+               (lambda (_conn name) name)))
+      (should-error (clutch-object-browse '(:name "users" :type "TABLE"))
+                    :type 'user-error))))
 
-(ert-deftest clutch-test-schema-browse-at-point-inserts-sql-into-console ()
-  "Schema browse should insert escaped SELECT in the target console buffer."
+(ert-deftest clutch-test-object-browse-errors-on-non-table-like-type ()
+  "Browse should reject object types that do not expose rows."
+  (should-error
+   (clutch-object-browse '(:name "order_idx" :type "INDEX"))
+   :type 'user-error
+   :exclude-subtypes nil))
+
+(ert-deftest clutch-test-object-browse-inserts-sql-into-console ()
+  "Object browse should insert escaped SELECT in the target console buffer."
   (let ((console (generate-new-buffer " *clutch-test-console*")))
     (unwind-protect
         (with-current-buffer console
           (insert "SELECT 1;")
           (setq-local clutch-connection 'fake-conn)
-          (cl-letf (((symbol-function 'clutch-schema--table-at-point)
-                     (lambda () "order-items"))
+          (cl-letf (((symbol-function 'derived-mode-p)
+                     (lambda (&rest modes) (memq 'clutch-mode modes)))
                     ((symbol-function 'clutch-db-escape-identifier)
-                     (lambda (_conn tbl) (format "\"%s\"" tbl)))
-                    ((symbol-function 'clutch--find-console-for-conn)
-                     (lambda (_conn) console))
+                     (lambda (_conn name) (format "\"%s\"" name)))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args)
                        (set-buffer buf)
                        buf)))
-            (with-temp-buffer
-              (setq-local clutch-connection 'fake-conn)
-              (clutch-schema-browse-at-point)))
+            (clutch-object-browse '(:name "order-items" :type "TABLE")))
           (should (string-suffix-p
                    "\n\nSELECT * FROM \"order-items\";"
                    (buffer-string))))
       (kill-buffer console))))
 
-(ert-deftest clutch-test-schema-toggle-expand-keeps-point-on-table-header ()
-  "Toggling expand from a column line should keep point on that table header."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal)))
-    (with-temp-buffer
-      (clutch-schema-mode)
-      (setq-local clutch-connection 'fake-conn
-                  clutch-schema--tables '("a" "b")
-                  clutch-schema--expanded-tables '("a"))
-      (cl-letf (((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "dev-key"))
-                ((symbol-function 'clutch-db-database)
-                 (lambda (_conn) "db"))
-                ((symbol-function 'clutch-db-column-details)
-                 (lambda (_conn tbl)
-                   (if (equal tbl "a")
-                       (list (list :name "c1" :type "int")
-                             (list :name "c2" :type "int")
-                             (list :name "c3" :type "int"))
-                     nil))))
-        (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
-        (clutch-schema--render)
-        (goto-char (point-min))
-        (should (search-forward "-- Tables in db (2)" nil t))
-        (should (search-forward "-- schema cache stale · refresh with g or C-c C-s" nil t))
-        (goto-char (point-min))
-        (search-forward "c2")
-        (beginning-of-line)
-        (should (equal (clutch-schema--table-at-point) "a"))
-        (clutch-schema-toggle-expand)
-        (should (equal (clutch-schema--table-at-point) "a"))
-        (should (looking-at-p "▸ a"))))))
+(ert-deftest clutch-test-object-browse-inserts-at-first-line-in-empty-console ()
+  "Object browse should insert at line 1 when the console has no content."
+  (let ((console (generate-new-buffer " *clutch-test-console-empty*")))
+    (unwind-protect
+        (with-current-buffer console
+          (insert "\n\n")
+          (setq-local clutch-connection 'fake-conn)
+          (cl-letf (((symbol-function 'derived-mode-p)
+                     (lambda (&rest modes) (memq 'clutch-mode modes)))
+                    ((symbol-function 'clutch-db-escape-identifier)
+                     (lambda (_conn name) (format "\"%s\"" name)))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (set-buffer buf)
+                       buf)))
+            (clutch-object-browse '(:name "order-items" :type "TABLE")))
+          (should (equal (buffer-string)
+                         "SELECT * FROM \"order-items\";")))
+      (kill-buffer console))))
 
-(ert-deftest clutch-test-list-tables-lazy-backend-opens-without-sync-table-load ()
-  "Lazy schema browser should not synchronously load table names on open."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
-        (started nil)
-        opened-buf)
-    (cl-letf (((symbol-function 'clutch-db-eager-schema-refresh-p)
-               (lambda (_conn) nil))
-              ((symbol-function 'clutch--ensure-connection)
-               (lambda () t))
-              ((symbol-function 'clutch--schema-for-connection)
-               (lambda () nil))
-              ((symbol-function 'clutch-db-list-tables)
-               (lambda (_conn)
-                 (ert-fail "lazy schema browser should not call clutch-db-list-tables")))
-              ((symbol-function 'clutch--refresh-current-schema)
-               (lambda (&optional _quiet)
-                 (setq started t)
-                 t))
-              ((symbol-function 'clutch-db-database)
-               (lambda (_conn) "db"))
+(ert-deftest clutch-test-object-browse-inserts-around-current-point-in-console ()
+  "Object browse should insert around point with one blank line on each side."
+  (let ((console (generate-new-buffer " *clutch-test-console-middle*")))
+    (unwind-protect
+        (with-current-buffer console
+          (insert "SELECT 1;\nSELECT 2;")
+          (goto-char (point-min))
+          (forward-line 1)
+          (setq-local clutch-connection 'fake-conn)
+          (cl-letf (((symbol-function 'derived-mode-p)
+                     (lambda (&rest modes) (memq 'clutch-mode modes)))
+                    ((symbol-function 'clutch-db-escape-identifier)
+                     (lambda (_conn name) (format "\"%s\"" name)))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (set-buffer buf)
+                       buf)))
+            (clutch-object-browse '(:name "order-items" :type "TABLE")))
+          (should (equal (buffer-string)
+                         (concat "SELECT 1;\n\n"
+                                 "SELECT * FROM \"order-items\";\n\n"
+                                 "SELECT 2;"))))
+      (kill-buffer console))))
+
+(ert-deftest clutch-test-object-browse-does-not-add-extra-blank-lines ()
+  "Object browse should reuse an existing blank-line separator."
+  (let ((console (generate-new-buffer " *clutch-test-console-spacing*")))
+    (unwind-protect
+        (with-current-buffer console
+          (insert "SELECT 1;\n\n")
+          (setq-local clutch-connection 'fake-conn)
+          (cl-letf (((symbol-function 'derived-mode-p)
+                     (lambda (&rest modes) (memq 'clutch-mode modes)))
+                    ((symbol-function 'clutch-db-escape-identifier)
+                     (lambda (_conn name) (format "\"%s\"" name)))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (set-buffer buf)
+                       buf)))
+            (clutch-object-browse '(:name "order-items" :type "TABLE")))
+          (should (equal (buffer-string)
+                         "SELECT 1;\n\nSELECT * FROM \"order-items\";")))
+      (kill-buffer console))))
+
+(ert-deftest clutch-test-object-default-action-routes-table-like-types-to-browse ()
+  "Default action should browse rows for table-like objects."
+  (let (browse-entry show-entry)
+    (cl-letf (((symbol-function 'clutch-object-browse)
+               (lambda (entry) (setq browse-entry entry)))
+              ((symbol-function 'clutch-object-show-ddl-or-source)
+               (lambda (entry) (setq show-entry entry))))
+      (clutch-object-default-action '(:name "orders" :type "TABLE"))
+      (should (equal browse-entry '(:name "orders" :type "TABLE")))
+      (should-not show-entry))))
+
+(ert-deftest clutch-test-object-default-action-routes-non-table-types-to-definition ()
+  "Default action should show DDL/source for non-table objects."
+  (let (browse-entry show-entry)
+    (cl-letf (((symbol-function 'clutch-object-browse)
+               (lambda (entry) (setq browse-entry entry)))
+              ((symbol-function 'clutch-object-show-ddl-or-source)
+               (lambda (entry) (setq show-entry entry))))
+      (clutch-object-default-action '(:name "process_order" :type "PROCEDURE"))
+      (should-not browse-entry)
+      (should (equal show-entry '(:name "process_order" :type "PROCEDURE"))))))
+
+(ert-deftest clutch-test-object-jump-target-resolves-index-table ()
+  "Jump target should follow index target-table metadata."
+  (let (described)
+    (with-temp-buffer
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--object-matches-by-name)
+                 (lambda (_conn name &optional table-like-only)
+                   (should table-like-only)
+                   (should (equal name "ORDERS"))
+                   '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP"))))
+                ((symbol-function 'clutch-object-describe)
+                 (lambda (entry) (setq described entry))))
+        (clutch-object-jump-target
+         '(:name "ORDER_IDX" :type "INDEX"
+           :schema "APP" :source-schema "APP"
+           :target-table "ORDERS"))
+        (should (equal described
+                       '(:name "ORDERS" :type "TABLE"
+                         :schema "APP" :source-schema "APP")))))))
+
+(ert-deftest clutch-test-object-jump-target-prefers-synonym-target-schema ()
+  "Jump target should prefer synonym matches in the declared target schema."
+  (let (described)
+    (with-temp-buffer
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--object-matches-by-name)
+                 (lambda (_conn name &optional _table-like-only)
+                   (should (equal name "ORDERS"))
+                   '((:name "ORDERS" :type "TABLE"
+                      :schema "ARCHIVE" :source-schema "ARCHIVE")
+                     (:name "ORDERS" :type "TABLE"
+                      :schema "APP" :source-schema "APP"))))
+                ((symbol-function 'clutch-object-describe)
+                 (lambda (entry) (setq described entry))))
+        (clutch-object-jump-target
+         '(:name "ORDERS_SYM" :type "SYNONYM"
+           :target-name "ORDERS" :target-schema "APP"))
+        (should (equal described
+                       '(:name "ORDERS" :type "TABLE"
+                         :schema "APP" :source-schema "APP")))))))
+
+(ert-deftest clutch-test-object-jump-target-errors-on-unsupported-type ()
+  "Forward jump should reject object types without target semantics."
+  (should-error
+   (clutch-object-jump-target '(:name "ORDER_SEQ" :type "SEQUENCE"))
+   :type 'user-error
+   :exclude-subtypes nil))
+
+(ert-deftest clutch-test-object-read-annotates-mixed-object-types ()
+  "Object reader should expose warmed non-table metadata in the flat picker."
+  (let ((clutch--object-cache (make-hash-table :test 'equal))
+        captured)
+    (let ((by-type (make-hash-table :test 'equal)))
+      (puthash "INDEX"
+               '((:name "ORDER_IDX" :type "INDEX"
+                  :schema "APP" :source-schema "APP"))
+               by-type)
+      (puthash "PROCEDURE"
+               '((:name "PROCESS_ORDER" :type "PROCEDURE"
+                  :schema "APP" :source-schema "APP"
+                  :status "VALID"))
+               by-type)
+      (puthash "fake-key"
+               (list :entries '((:name "ORDER_IDX" :type "INDEX"
+                                 :schema "APP" :source-schema "APP")
+                                (:name "PROCESS_ORDER" :type "PROCEDURE"
+                                 :schema "APP" :source-schema "APP"
+                                 :status "VALID"))
+                     :by-type by-type
+                     :loaded-categories '(indexes procedures))
+               clutch--object-cache))
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch--warn-schema-cache-state) #'ignore)
               ((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "dev-key"))
-              ((symbol-function 'pop-to-buffer)
-               (lambda (buf &rest _args)
-                 (setq opened-buf buf)
-                 buf)))
+               (lambda (_conn) "fake-key"))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-list-table-entries)
+               (lambda (_conn)
+                 '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP")
+                   (:name "V_ORDERS" :type "VIEW" :schema "APP" :source-schema "APP"))))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (_conn _prefix)
+                 '((:name "USER_TABLES" :type "PUBLIC SYNONYM"
+                    :schema "SYS" :source-schema "PUBLIC"))))
+              ((symbol-function 'clutch-db-list-objects)
+               (lambda (&rest _args)
+                 (ert-fail "default flat picker should not synchronously fetch uncached object categories")))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (&rest _args) 'fake-timer))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _args)
+                 (let* ((metadata (funcall collection "" nil 'metadata))
+                        (meta-alist (cdr metadata))
+                        (annotation-fn (alist-get 'annotation-function meta-alist))
+                        (group-fn (alist-get 'group-function meta-alist))
+                        (base (all-completions "" collection nil)))
+                   (setq captured
+                         (list :category (alist-get 'category meta-alist)
+                               :base base
+                               :orders-group (funcall group-fn "ORDERS" nil)
+                               :proc-group (funcall group-fn "PROCESS_ORDER" nil)
+                               :proc-ann (funcall annotation-fn "PROCESS_ORDER")))
+                   "PROCESS_ORDER"))))
       (with-temp-buffer
         (setq-local clutch-connection 'fake-conn)
-        (clutch-list-tables))
-      (should started)
-      (with-current-buffer opened-buf
-        (should (equal clutch-schema--tables nil)))
-      (when (buffer-live-p opened-buf)
-        (kill-buffer opened-buf)))))
+        (should (equal (clutch-object-read "Object: ")
+                       '(:name "PROCESS_ORDER" :type "PROCEDURE"
+                         :schema "APP" :source-schema "APP" :status "VALID"))))
+      (should (eq (plist-get captured :category) 'clutch-object))
+      (should (equal (plist-get captured :base)
+                     '("ORDERS" "V_ORDERS" "USER_TABLES" "ORDER_IDX" "PROCESS_ORDER")))
+      (should (equal (plist-get captured :orders-group) "Tables"))
+      (should (equal (plist-get captured :proc-group) "Procedures"))
+      (should (equal (plist-get captured :proc-ann) "  APP/procedure")))))
 
-(ert-deftest clutch-test-schema-toggle-expand-lazy-backend-loads-details-async ()
-  "Lazy schema browser should not synchronously fetch column details."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
-        (clutch--column-details-cache (make-hash-table :test 'equal))
-        (clutch--column-details-status-cache (make-hash-table :test 'equal))
-        async-callback)
+(ert-deftest clutch-test-jump-resolves-then-runs-default-action ()
+  "Jump should resolve the object once and run the shared default action."
+  (let (resolved-prompt resolved-category action-call presented-entry)
+    (cl-letf (((symbol-function 'clutch--resolve-object-dwim)
+               (lambda (prompt &optional _table-like-only category)
+                 (setq resolved-prompt prompt)
+                 (setq resolved-category category)
+                 '(:name "ORDERS" :type "TABLE")))
+              ((symbol-function 'clutch--run-object-action)
+               (lambda (entry action-id)
+                 (setq action-call (list entry action-id))))
+              ((symbol-function 'clutch--present-object-actions-natively)
+               (lambda (entry)
+                 (setq presented-entry entry)
+                 t)))
+      (clutch-jump)
+      (should (equal resolved-prompt "Open object: "))
+      (should-not resolved-category)
+      (should (equal action-call
+                     '((:name "ORDERS" :type "TABLE") browse)))
+      (should-not presented-entry))))
+
+(ert-deftest clutch-test-jump-falls-back-to-default-action-when-ui-is-unavailable ()
+  "Jump should still run the default action when no action UI is available."
+  (let (resolved-prompt action-call)
+    (cl-letf (((symbol-function 'clutch--resolve-object-dwim)
+               (lambda (prompt &optional _table-like-only _category)
+                 (setq resolved-prompt prompt)
+                 '(:name "PROCESS_ORDER" :type "PROCEDURE")))
+              ((symbol-function 'clutch--run-object-action)
+                 (lambda (entry action-id)
+                   (setq action-call (list entry action-id)))))
+      (clutch-jump)
+      (should (equal resolved-prompt "Open object: "))
+      (should (equal action-call
+                     '((:name "PROCESS_ORDER" :type "PROCEDURE")
+                       show-definition))))))
+
+(ert-deftest clutch-test-object-at-point-prefers-table-over-public-synonym ()
+  "Symbol resolution should prefer concrete schema objects over PUBLIC synonyms."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t))
+              ((symbol-function 'thing-at-point)
+               (lambda (&rest _) "BQS_BERTH_QUEUE"))
+              ((symbol-function 'clutch--object-matches-by-name)
+               (lambda (_conn name &optional _table-like-only)
+                 (should (equal name "BQS_BERTH_QUEUE"))
+                 '((:name "BQS_BERTH_QUEUE" :type "PUBLIC SYNONYM"
+                    :schema "SYS" :source-schema "PUBLIC")
+                   (:name "BQS_BERTH_QUEUE" :type "TABLE"
+                    :schema "zj_test" :source-schema "zj_test")))))
+      (should (equal (clutch-object-at-point)
+                     '(:name "BQS_BERTH_QUEUE" :type "TABLE"
+                       :schema "zj_test" :source-schema "zj_test"))))))
+
+(ert-deftest clutch-test-object-entries-use-fast-partial-cache-on-first-open ()
+  "Unified object entries should avoid synchronous full metadata scans."
+  (let ((clutch--object-cache (make-hash-table :test 'equal))
+        scheduled)
+    (let ((by-type (make-hash-table :test 'equal)))
+      (puthash "PROCEDURE"
+               '((:name "PROCESS_ORDER" :type "PROCEDURE"
+                  :schema "APP" :source-schema "APP"))
+               by-type)
+      (puthash "fake-key"
+               (list :entries '((:name "PROCESS_ORDER" :type "PROCEDURE"
+                                 :schema "APP" :source-schema "APP"))
+                     :by-type by-type
+                     :loaded-categories '(procedures))
+               clutch--object-cache))
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "fake-key"))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--browseable-object-entries)
+               (lambda (_conn)
+                 '((:name "ORDERS" :type "TABLE"
+                    :schema "APP" :source-schema "APP"))))
+              ((symbol-function 'clutch-db-list-objects)
+               (lambda (&rest _args)
+                 (ert-fail "should not synchronously load uncached object categories")))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (secs repeat fn)
+                 (setq scheduled (list secs repeat fn))
+                 'fake-timer)))
+      (should (equal (clutch--object-entries 'fake-conn)
+                     '((:name "ORDERS" :type "TABLE"
+                        :schema "APP" :source-schema "APP")
+                       (:name "PROCESS_ORDER" :type "PROCEDURE"
+                        :schema "APP" :source-schema "APP"))))
+      (should scheduled))))
+
+(ert-deftest clutch-test-browseable-object-entries-skip-empty-search-for-oracle-jdbc ()
+  "Oracle JDBC browseable entries should not issue an extra empty-prefix search."
+  (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
+             (lambda (_conn)
+               '((:name "ORDERS" :type "TABLE")))))
+    (should (equal (clutch--browseable-object-entries 'fake-conn)
+                   '((:name "ORDERS" :type "TABLE"))))))
+
+(ert-deftest clutch-test-act-dwim-opens-transient-with-current-entry ()
+  "Act-dwim should resolve the current object and open the shared action UI."
+  (let (setup-command)
     (with-temp-buffer
-      (clutch-schema-mode)
-      (setq-local clutch-connection 'fake-conn
-                  clutch-schema--tables '("a")
-                  clutch-schema--expanded-tables nil)
-      (cl-letf (((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "dev-key"))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--schema-for-connection)
-                 (lambda () nil))
-                ((symbol-function 'clutch-db-database)
-                 (lambda (_conn) "db"))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-column-details)
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--resolve-object-dwim)
                  (lambda (&rest _)
-                   (ert-fail "lazy schema browser should not synchronously fetch column details")))
-                ((symbol-function 'clutch-db-column-details-async)
-                 (lambda (_conn table callback &optional _errback)
-                   (should (equal table "a"))
-                   (setq async-callback callback)
-                   t))
-                ((symbol-function 'clutch--refresh-schema-status-ui)
-                 (lambda (_conn)
-                   (clutch-schema--refresh-view))))
-        (clutch-schema--render)
-        (goto-char (point-min))
-        (search-forward "▸ a")
-        (beginning-of-line)
-        (clutch-schema-toggle-expand)
-        (should (search-forward "loading column details..." nil t))
-        (should async-callback)
-        (funcall async-callback (list (list :name "c1" :type "int")))
-        (goto-char (point-min))
-        (should (search-forward "c1" nil t))))))
+                   '(:name "PROCESS_ORDER" :type "PROCEDURE")))
+                ((symbol-function 'transient-setup)
+                 (lambda (command &rest _args)
+                   (setq setup-command command))))
+        (let ((clutch--object-action-entry nil))
+          (clutch-act-dwim)
+          (should (eq setup-command 'clutch-object-actions-menu))
+          (should (equal clutch--object-action-entry
+                         '(:name "PROCESS_ORDER" :type "PROCEDURE"))))))))
 
-(ert-deftest clutch-test-schema-toggle-expand-sync-backend-shows-detail-failure ()
-  "Sync schema browser should surface cached detail-load failures."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
-        (clutch--column-details-cache (make-hash-table :test 'equal))
-        (clutch--column-details-status-cache (make-hash-table :test 'equal)))
-    (with-temp-buffer
-      (clutch-schema-mode)
-      (setq-local clutch-connection 'fake-conn
-                  clutch-schema--tables '("a")
-                  clutch-schema--expanded-tables '("a"))
-      (cl-letf (((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "dev-key"))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--schema-for-connection)
-                 (lambda () nil))
-                ((symbol-function 'clutch-db-database)
-                 (lambda (_conn) "db"))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch-db-column-details)
-                 (lambda (_conn _tbl)
-                   (signal 'clutch-db-error '("detail load failed")))))
-        (clutch-schema--render)
-        (goto-char (point-min))
-        (should (search-forward "column details unavailable" nil t))
-        (should (eq (plist-get (clutch--column-details-status 'fake-conn "a")
-                               :state)
-                    'failed))))))
+(ert-deftest clutch-test-act-dwim-errors-without-action-ui ()
+  "Act-dwim should not silently run the default action when no UI exists."
+  (cl-letf (((symbol-function 'clutch--resolve-object-dwim)
+             (lambda (&rest _)
+               '(:name "ORDERS" :type "TABLE")))
+            ((symbol-function 'clutch--present-object-actions-natively)
+             (lambda (_entry) nil)))
+    (should-error (clutch-act-dwim) :type 'user-error)))
 
-(ert-deftest clutch-test-schema-expand-all-lazy-backend-queues-detail-fetches ()
-  "Expand-all on lazy backends should serialize async detail fetches."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
-        (clutch--column-details-cache (make-hash-table :test 'equal))
-        (clutch--column-details-status-cache (make-hash-table :test 'equal))
-        (clutch--column-details-queue-cache (make-hash-table :test 'equal))
-        (clutch--column-details-active-cache (make-hash-table :test 'equal))
-        started callbacks)
+(ert-deftest clutch-test-object-entry-reader-keeps-overloaded-object-names ()
+  "Object reader should keep duplicate names distinct when identity differs."
+  (let (captured)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _args)
+                 (setq captured (funcall collection "" nil t))
+                 (car captured))))
+      (should (equal (clutch--object-entry-reader
+                      'fake-conn
+                      "Object: "
+                      '((:name "process_order" :type "FUNCTION"
+                         :schema "public" :source-schema "public"
+                         :identity "OID:1")
+                        (:name "process_order" :type "FUNCTION"
+                         :schema "public" :source-schema "public"
+                         :identity "OID:2")))
+                     '(:name "process_order" :type "FUNCTION"
+                       :schema "public" :source-schema "public"
+                       :identity "OID:1")))
+      (should (= (length captured) 2))
+      (should-not (equal (car captured) (cadr captured))))))
+
+(ert-deftest clutch-test-object-entry-annotation-shows-detail-only-for-duplicates ()
+  "Object entry detail should only appear when duplicate names need disambiguation."
+  (let ((duplicate-counts (make-hash-table :test 'equal)))
+    (puthash "ORDERS" 1 duplicate-counts)
+    (should (equal (substring-no-properties
+                    (clutch--object-entry-annotation
+                     '(:name "ORDERS" :type "SYNONYM"
+                       :schema "DATA_OWNER" :source-schema "APP")
+                     duplicate-counts))
+                   "  APP/synonym"))
+    (puthash "ORDERS" 2 duplicate-counts)
+    (should (equal (substring-no-properties
+                    (clutch--object-entry-annotation
+                     '(:name "ORDERS" :type "SYNONYM"
+                       :schema "DATA_OWNER" :source-schema "APP")
+                     duplicate-counts))
+                   "  APP/synonym  DATA_OWNER"))))
+
+(ert-deftest clutch-test-describe-dwim-prompts-when-point-has-no-object ()
+  "Describe-dwim should resolve an object and then open its describe view."
+  (let (resolved-prompt captured)
     (with-temp-buffer
-      (clutch-schema-mode)
-      (setq-local clutch-connection 'fake-conn
-                  clutch-schema--tables '("a" "b" "c")
-                  clutch-schema--expanded-tables nil)
-      (cl-letf (((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "dev-key"))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--schema-for-connection)
-                 (lambda () nil))
-                ((symbol-function 'clutch-db-database)
-                 (lambda (_conn) "db"))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-column-details-async)
-                 (lambda (_conn table callback &optional _errback)
-                   (push table started)
-                   (push (cons table callback) callbacks)
-                   t))
-                ((symbol-function 'clutch--refresh-schema-status-ui)
-                 (lambda (_conn)
-                   (clutch-schema--refresh-view))))
-        (clutch-schema-expand-all)
-        (should (equal (reverse started) '("a")))
-        (funcall (cdr (assoc "a" callbacks)) (list (list :name "c1" :type "int")))
-        (should (equal (reverse started) '("a" "b")))
-        (funcall (cdr (assoc "b" callbacks)) (list (list :name "c2" :type "int")))
-        (should (equal (reverse started) '("a" "b" "c")))))))
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'thing-at-point) (lambda (&rest _) nil))
+                ((symbol-function 'clutch--resolve-object-dwim)
+                 (lambda (prompt &rest _args)
+                   (setq resolved-prompt prompt)
+                   '(:name "IDX_A" :type "INDEX")))
+                ((symbol-function 'clutch-object-describe)
+                 (lambda (entry)
+                   (setq captured entry))))
+        (clutch-describe-dwim)
+        (should (equal resolved-prompt "Describe object: "))
+        (should (equal captured '(:name "IDX_A" :type "INDEX")))))))
+
+(ert-deftest clutch-test-object-resolve-prefers-definition-buffer-object-over-symbol-at-point ()
+  "Definition buffers should use the displayed object before symbol-at-point."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch-browser-current-object '(:name "BQS_BERTH" :type "TABLE"))
+    (cl-letf (((symbol-function 'thing-at-point)
+               (lambda (&rest _) "BQS_BERTH_0807"))
+              ((symbol-function 'clutch--object-matches-by-name)
+               (lambda (_conn name &optional _table-like-only)
+                 (should (equal name "BQS_BERTH_0807"))
+                           '((:name "BQS_BERTH_0807" :type "TABLE")))))
+      (should (equal (clutch--resolve-object-entry "Referenced by: ")
+                     '(:name "BQS_BERTH" :type "TABLE"))))))
+
+(ert-deftest clutch-test-act-dwim-with-explicit-entry-opens-transient ()
+  "Act-dwim should still work when called programmatically with ENTRY."
+  (let (setup-command)
+    (with-temp-buffer
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'transient-setup)
+                 (lambda (command &rest _args)
+                   (setq setup-command command))))
+        (let ((clutch--object-action-entry nil))
+          (clutch-act-dwim '(:name "ORDERS" :type "TABLE"))
+          (should (eq setup-command 'clutch-object-actions-menu))
+          (should (equal clutch--object-action-entry
+                         '(:name "ORDERS" :type "TABLE"))))))))
+
+(ert-deftest clutch-test-object-action-inapt-flags-reflect-target-type ()
+  "Object action transient flags should reflect the current target type."
+  (let ((clutch--object-action-entry '(:name "ORDERS" :type "TABLE")))
+    (should (clutch--object-act-jump-target-inapt-p)))
+  (let ((clutch--object-action-entry '(:name "ORDER_IDX" :type "INDEX")))
+    (should-not (clutch--object-act-jump-target-inapt-p))))
+
+(ert-deftest clutch-test-describe-buffer-exposes-shared-dwim-bindings ()
+  "Describe buffers should reuse the shared action commands."
+  (let ((entry '(:name "PROCESS_ORDER" :type "PROCEDURE")))
+    (with-temp-buffer
+      (clutch--render-object-describe 'fake-conn entry nil nil)
+      (should (eq major-mode 'clutch-describe-mode))
+      (should (equal clutch-browser-current-object entry))
+      (should (equal clutch--describe-object-entry entry))
+      (should (eq (lookup-key clutch-describe-mode-map (kbd "C-c C-d"))
+                  #'clutch-describe-dwim))
+      (should (eq (lookup-key clutch-describe-mode-map (kbd "C-c C-o"))
+                  #'clutch-act-dwim)))))
+
+(ert-deftest clutch-test-copy-object-fqname-prompts-for-fqname ()
+  "Copy-fqname should use an fqname-specific prompt."
+  (let (prompt)
+    (cl-letf (((symbol-function 'clutch--resolve-object-entry)
+               (lambda (arg &rest _)
+                 (setq prompt arg)
+                 '(:name "ORDERS" :type "TABLE" :schema "APP")))
+              ((symbol-function 'kill-new) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (clutch-copy-object-fqname)
+      (should (equal prompt "Copy object fqname: ")))))
+
+(ert-deftest clutch-test-embark-object-target-uses-object-at-point ()
+  "Embark target finder should expose the object at point."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (setq-local major-mode 'clutch-mode)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-object-at-point)
+               (lambda () '(:name "orders" :type "TABLE")))
+              ((symbol-function 'bounds-of-thing-at-point)
+               (lambda (_thing) '(1 . 7))))
+      (should (equal (clutch--embark-object-target)
+                     '(clutch-object (:name "orders" :type "TABLE") 1 7))))))
+
+(ert-deftest clutch-test-embark-object-target-prefers-definition-buffer-object ()
+  "Embark target finder should use the buffer's current object in definition buffers."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (setq-local major-mode 'sql-mode)
+    (setq-local clutch-browser-current-object '(:name "PROCESS_ORDER" :type "PROCEDURE"))
+    (cl-letf (((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-object-at-point)
+               (lambda () nil)))
+      (should (equal (clutch--embark-object-target)
+                     '(clutch-object (:name "PROCESS_ORDER" :type "PROCEDURE")))))))
+
+(ert-deftest clutch-test-embark-object-target-prefers-dispatch-entry ()
+  "Embark target finder should use the explicit dispatch entry when present."
+  (let ((clutch--object-dispatch-entry '(:name "ORDERS" :type "TABLE")))
+    (with-temp-buffer
+      (setq-local clutch-connection 'fake-conn)
+      (should (equal (clutch--embark-object-target)
+                     '(clutch-object (:name "ORDERS" :type "TABLE")))))))
+
+(ert-deftest clutch-test-embark-object-target-uses-target-capable-type ()
+  "Embark target finder should expose a distinct target type for target-capable objects."
+  (let ((clutch--object-dispatch-entry
+         '(:name "ORDER_IDX" :type "INDEX" :target-table "ORDERS")))
+    (with-temp-buffer
+      (setq-local clutch-connection 'fake-conn)
+      (should (equal (clutch--embark-object-target)
+                     '(clutch-target-object
+                       (:name "ORDER_IDX" :type "INDEX" :target-table "ORDERS")))))))
+
+(ert-deftest clutch-test-embark-action-specs-hide-default-actions ()
+  "Embark menus should omit actions that duplicate `RET'."
+  (should (equal (mapcar (lambda (spec) (plist-get spec :id))
+                         (clutch--embark-action-specs
+                          (lambda (spec)
+                            (not (eq (plist-get spec :id) 'jump-target)))))
+                 '(describe copy-name copy-fqname))))
+
+(ert-deftest clutch-test-embark-target-action-specs-keep-jump-target ()
+  "Target-capable Embark menus should keep jump-target."
+  (should (equal (mapcar (lambda (spec) (plist-get spec :id))
+                         (clutch--embark-action-specs))
+                 '(describe jump-target copy-name copy-fqname))))
 
 (ert-deftest clutch-test-browse-table-inserts-escaped-select ()
-  "Browse table command should escape identifier before inserting SQL."
+  "Browse-table compatibility wrapper should still escape identifiers."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (insert "-- tail")
-    (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
+    (cl-letf (((symbol-function 'clutch-object-browse)
+               (lambda (entry)
+                 (let ((sql (format "SELECT * FROM %s;"
+                                    (clutch-db-escape-identifier
+                                     clutch-connection
+                                     (plist-get entry :name)))))
+                   (goto-char (point-max))
+                   (unless (bolp) (insert "\n"))
+                   (insert "\n" sql))))
               ((symbol-function 'clutch-db-escape-identifier)
                (lambda (_conn tbl) (format "\"%s\"" tbl))))
       (clutch-browse-table "order-items"))
@@ -3809,91 +4130,13 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
              "\n\nSELECT * FROM \"order-items\";"
              (buffer-string)))))
 
-(ert-deftest clutch-test-browse-table-entry-reader-annotates-source-groups ()
-  "Browse table reader should annotate source/type and merge dynamic Oracle hits."
-  (let (captured)
-    (cl-letf (((symbol-function 'clutch-db-list-table-entries)
-               (lambda (_conn)
-                 '((:name "ORDERS" :type "SYNONYM" :schema "DATA_OWNER" :source-schema "APP")
-                   (:name "PAYMENTS" :type "TABLE" :schema "DATA_OWNER" :source-schema "DATA_OWNER"))))
-              ((symbol-function 'clutch-db-search-table-entries)
-               (lambda (_conn prefix)
-                 (if (string-empty-p prefix)
-                     '((:name "USER_TABLES" :type "PUBLIC SYNONYM" :schema "SYS" :source-schema "PUBLIC"))
-                   nil)))
-              ((symbol-function 'completing-read)
-               (lambda (_prompt collection &rest _args)
-                 (let* ((metadata (funcall collection "" nil 'metadata))
-                        (meta-alist (cdr metadata))
-                        (annotation-fn (alist-get 'annotation-function meta-alist))
-                        (affixation-fn (alist-get 'affixation-function meta-alist))
-                        (base (all-completions "" collection nil))
-                        (dynamic (all-completions "USER_" collection nil))
-                        (user-affix (car (funcall affixation-fn dynamic))))
-                   (setq captured
-                         (list :base base
-                               :dynamic dynamic
-                               :orders-ann (funcall annotation-fn "ORDERS")
-                               :user-ann (funcall annotation-fn "USER_TABLES")
-                               :user-prefix (nth 1 user-affix)
-                               :user-suffix (nth 2 user-affix)))
-                   "USER_TABLES"))))
-      (should (equal (clutch--browse-table-entry-reader 'fake-conn "Browse table: ")
-                     "USER_TABLES"))
-      (should (equal (plist-get captured :base) '("ORDERS" "PAYMENTS" "USER_TABLES")))
-      (should (equal (plist-get captured :dynamic) '("USER_TABLES")))
-      (should (equal (plist-get captured :orders-ann) "  APP/synonym"))
-      (should (equal (plist-get captured :user-ann) "  PUBLIC/synonym"))
-      (should (equal (substring-no-properties (plist-get captured :user-prefix))
-                     ""))
-      (should (equal (substring-no-properties (plist-get captured :user-suffix))
-                     "  PUBLIC/synonym")))))
-
-(ert-deftest clutch-test-browse-table-entry-reader-keeps-duplicate-object-names ()
-  "Browse table reader should keep duplicate names from different sources."
-  (let (captured)
-    (cl-letf (((symbol-function 'clutch-db-list-table-entries)
-               (lambda (_conn)
-                 '((:name "ORDERS" :type "SYNONYM" :schema "DATA_OWNER" :source-schema "APP")
-                   (:name "ORDERS" :type "TABLE" :schema "DATA_OWNER" :source-schema "DATA_OWNER"))))
-              ((symbol-function 'clutch-db-search-table-entries)
-               (lambda (_conn _prefix) nil))
-              ((symbol-function 'completing-read)
-               (lambda (_prompt collection &rest _args)
-                 (let ((base (funcall collection "" nil t)))
-                   (setq captured base)
-                   (car base)))))
-      (should (equal (clutch--browse-table-entry-reader 'fake-conn "Browse object: ")
-                     "ORDERS"))
-      (should (= (length captured) 2))
-      (should (cl-every (lambda (cand) (string-prefix-p "ORDERS" cand)) captured))
-      (should-not (equal (car captured) (cadr captured))))))
-
-(ert-deftest clutch-test-table-entry-annotation-shows-detail-only-for-duplicates ()
-  "Target owner detail should only appear when duplicate names need disambiguation."
-  (let ((duplicate-counts (make-hash-table :test 'equal)))
-    (puthash "ORDERS" 1 duplicate-counts)
-    (should (equal (substring-no-properties
-                    (clutch--table-entry-annotation
-                     '(:name "ORDERS" :type "SYNONYM"
-                       :schema "DATA_OWNER" :source-schema "APP")
-                     duplicate-counts))
-                   "  APP/synonym"))
-    (puthash "ORDERS" 2 duplicate-counts)
-    (should (equal (substring-no-properties
-                    (clutch--table-entry-annotation
-                     '(:name "ORDERS" :type "SYNONYM"
-                       :schema "DATA_OWNER" :source-schema "APP")
-                     duplicate-counts))
-                   "  APP/synonym  DATA_OWNER"))))
-
-(ert-deftest clutch-test-table-entry-label-uses-lowercase-type ()
-  "Table-entry labels should keep schema uppercase and type lowercase."
-  (should (equal (clutch--table-entry-label
+(ert-deftest clutch-test-object-entry-label-uses-lowercase-type ()
+  "Object-entry labels should keep schema uppercase and type lowercase."
+  (should (equal (clutch--object-entry-label
                   '(:name "USER_TABLES" :type "PUBLIC SYNONYM"
                     :schema "SYS" :source-schema "PUBLIC"))
                  "PUBLIC/synonym"))
-  (should (equal (clutch--table-entry-label
+  (should (equal (clutch--object-entry-label
                   '(:name "MONTHLY_REPORT" :type "VIEW"
                     :schema "DATA_OWNER" :source-schema "DATA_OWNER"))
                  "DATA_OWNER/view")))
@@ -4627,48 +4870,11 @@ database.  Only a query re-execution should discard them."
         (clutch-refresh-schema)
         (should refresh-called)))))
 
-(ert-deftest clutch-test-schema-refresh-reuses-current-connection-refresh ()
-  "Schema browser refresh should reuse the shared connection refresh path."
-  (let ((refresh-called nil)
-        (render-called nil))
-    (with-temp-buffer
-      (clutch-schema-mode)
-      (setq-local clutch-connection 'fake-conn
-                  clutch-schema--tables '("old"))
-	(cl-letf (((symbol-function 'clutch--refresh-current-schema)
-	           (lambda (&optional quiet)
-	             (setq refresh-called quiet)
-	             t))
-	          ((symbol-function 'clutch-schema--sync-tables-from-cache)
-	           (lambda ()
-	             (setq clutch-schema--tables '("a" "b"))))
-	          ((symbol-function 'clutch-schema--refresh-view)
-	           (lambda ()
-	             (setq render-called t)
-	             (clutch-schema--sync-tables-from-cache))))
-	        (clutch-schema-refresh)
-	        (should (eq refresh-called t))
-	        (should render-called)
-	        (should (equal clutch-schema--tables '("a" "b")))))))
-
-(ert-deftest clutch-test-schema-status-ui-refreshes-schema-browser ()
-  "Schema status changes should refresh schema browser buffers for the same connection."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
-        (refreshed nil))
-    (with-temp-buffer
-      (clutch-schema-mode)
-      (setq-local clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "dev-key"))
-                ((symbol-function 'clutch-schema--refresh-view)
-                 (lambda () (setq refreshed t))))
-        (clutch--set-schema-status 'fake-conn 'ready 2)
-        (should refreshed)))))
-
 (ert-deftest clutch-test-describe-table-warns-when-schema-cache-is-stale ()
   "Cache-backed table prompts should surface stale-schema recovery hints."
   (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
-        hinted)
+        hinted
+        described)
     (cl-letf (((symbol-function 'clutch--connection-key)
                (lambda (_conn) "dev-key"))
               ((symbol-function 'clutch--schema-for-connection)
@@ -4679,12 +4885,9 @@ database.  Only a query re-execution should discard them."
               ((symbol-function 'clutch--read-table-name)
                (lambda (_prompt _tables) "users"))
               ((symbol-function 'clutch--ensure-connection) #'ignore)
-              ((symbol-function 'clutch-db-show-create-table)
-               (lambda (_conn _table) "CREATE TABLE users (id INT)"))
-              ((symbol-function 'sql-mode) #'ignore)
-              ((symbol-function 'sql-set-product) #'ignore)
-              ((symbol-function 'font-lock-ensure) #'ignore)
-              ((symbol-function 'pop-to-buffer) (lambda (&rest _args) nil))
+              ((symbol-function 'clutch-object-describe)
+               (lambda (entry)
+                 (setq described entry)))
               ((symbol-function 'message)
                (lambda (fmt &rest args)
                  (setq hinted (apply #'format fmt args)))))
@@ -4692,10 +4895,11 @@ database.  Only a query re-execution should discard them."
       (with-temp-buffer
         (setq-local clutch-connection 'fake-conn)
         (call-interactively #'clutch-describe-table))
+      (should (equal described '(:name "users" :type "TABLE")))
       (should (string-match-p "Schema cache is stale" hinted)))))
 
-(ert-deftest clutch-test-describe-table-derives-oracle-sql-product-from-backend ()
-  "Describe-table should use Oracle font-lock when backend is oracle."
+(ert-deftest clutch-test-object-show-ddl-or-source-derives-oracle-sql-product-from-backend ()
+  "Object definition buffers should use Oracle font-lock when backend is oracle."
   (let (captured-product)
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
               ((symbol-function 'clutch-db-show-create-table)
@@ -4709,7 +4913,7 @@ database.  Only a query re-execution should discard them."
         (setq-local clutch-connection 'fake-conn)
         (setq-local clutch--connection-params '(:backend oracle))
         (setq-local clutch--conn-sql-product nil)
-        (clutch-describe-table "DEMO_TASKS")))
+        (clutch-object-show-ddl-or-source '(:name "DEMO_TASKS" :type "TABLE"))))
     (should (eq captured-product 'oracle))))
 
 (ert-deftest clutch-test-result-buffer-reconnects-using-inherited-context ()
@@ -4760,29 +4964,28 @@ database.  Only a query re-execution should discard them."
       (when (buffer-live-p result-buf)
         (kill-buffer result-buf)))))
 
-(ert-deftest clutch-test-schema-buffer-reconnects-using-inherited-context ()
-  "Schema buffers should inherit reconnect params from their source buffer."
-  (let (schema-buf built)
+(ert-deftest clutch-test-object-buffer-reconnects-using-inherited-context ()
+  "Object definition buffers should inherit reconnect params from their source buffer."
+  (let (object-buf built)
     (unwind-protect
         (with-temp-buffer
           (let ((source-buf (current-buffer)))
             (setq-local clutch-connection 'old-conn
                         clutch--connection-params '(:backend mysql :database "db")
                         clutch--conn-sql-product 'mysql)
-            (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+            (cl-letf (((symbol-function 'clutch-db-show-create-table)
+                       (lambda (_conn _table) "CREATE TABLE demo (id INT)"))
+                      ((symbol-function 'sql-mode) #'ignore)
+                      ((symbol-function 'sql-set-product) #'ignore)
+                      ((symbol-function 'font-lock-ensure) #'ignore)
                       ((symbol-function 'clutch--connection-key)
                        (lambda (conn) (symbol-name conn)))
-                      ((symbol-function 'clutch-db-eager-schema-refresh-p)
-                       (lambda (_conn) nil))
-                      ((symbol-function 'clutch--schema-for-connection) (lambda () nil))
-                      ((symbol-function 'clutch--refresh-current-schema) #'ignore)
-                      ((symbol-function 'clutch-db-database) (lambda (_conn) "db"))
                       ((symbol-function 'pop-to-buffer)
                        (lambda (buf &rest _args)
-                         (setq schema-buf buf)
+                         (setq object-buf buf)
                          buf)))
-              (clutch-list-tables))
-            (with-current-buffer schema-buf
+              (clutch-object-show-ddl-or-source '(:name "demo" :type "TABLE")))
+            (with-current-buffer object-buf
               (should (equal clutch--connection-params
                              '(:backend mysql :database "db")))
               (should (eq clutch--conn-sql-product 'mysql))
@@ -4796,7 +4999,6 @@ database.  Only a query re-execution should discard them."
                         ((symbol-function 'clutch--prime-schema-cache) #'ignore)
                         ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
                         ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
-                        ((symbol-function 'clutch-schema--refresh-view) #'ignore)
                         ((symbol-function 'clutch--connection-key)
                          (lambda (conn) (symbol-name conn)))
                         ((symbol-function 'message) #'ignore))
@@ -4805,8 +5007,8 @@ database.  Only a query re-execution should discard them."
                 (should (equal built '(:backend mysql :database "db")))))
             (with-current-buffer source-buf
               (should (eq clutch-connection 'new-conn)))))
-      (when (buffer-live-p schema-buf)
-        (kill-buffer schema-buf)))))
+      (when (buffer-live-p object-buf)
+        (kill-buffer object-buf)))))
 
 (ert-deftest clutch-test-connect-failure-preserves-old-live-connection ()
   "Interactive connect should not drop the old live session on failure."

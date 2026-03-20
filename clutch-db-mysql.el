@@ -178,6 +178,29 @@ Appends LIMIT/OFFSET directly to BASE-SQL.  ORDER-BY is (COL . DIR) or nil."
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
+(cl-defmethod clutch-db-list-table-entries ((conn mysql-conn))
+  "Return table/view entry plists for the current MySQL database."
+  (condition-case err
+      (let* ((result (mysql-query
+                      conn
+                      "SELECT TABLE_NAME, TABLE_TYPE
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+ORDER BY TABLE_NAME"))
+             (schema (clutch-db-database conn)))
+        (mapcar
+         (lambda (row)
+           (pcase-let ((`(,name ,table-type) row))
+             (list :name name
+                   :type (if (string= table-type "VIEW") "VIEW" "TABLE")
+                   :schema schema
+                   :source-schema schema)))
+         (mysql-result-rows result)))
+    (mysql-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
 (cl-defmethod clutch-db-list-columns ((conn mysql-conn) table)
   "Return column names for TABLE on MySQL CONN."
   (condition-case err
@@ -203,6 +226,160 @@ Appends LIMIT/OFFSET directly to BASE-SQL.  ORDER-BY is (COL . DIR) or nil."
                   (list (format "SHOW CREATE TABLE returned no rows for %s" table))))
         (pcase-let ((`(,_ ,ddl) (car rows)))
           ddl))
+    (mysql-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-list-objects ((conn mysql-conn) category)
+  "Return object entry plists for CATEGORY on MySQL CONN."
+  (condition-case err
+      (let ((schema (clutch-db-database conn)))
+        (pcase category
+          ('indexes
+           (let ((result (mysql-query
+                          conn
+                          "SELECT DISTINCT INDEX_NAME, TABLE_NAME, NON_UNIQUE
+FROM INFORMATION_SCHEMA.STATISTICS
+WHERE TABLE_SCHEMA = DATABASE()
+ORDER BY TABLE_NAME, INDEX_NAME")))
+             (mapcar
+              (lambda (row)
+                (pcase-let ((`(,name ,table-name ,non-unique) row))
+                  (list :name name :type "INDEX" :schema schema :source-schema schema
+                        :target-table table-name :unique (equal non-unique 0))))
+              (mysql-result-rows result))))
+          ('sequences nil)
+          ((or 'procedures 'functions)
+           (let* ((routine-type (if (eq category 'procedures) "PROCEDURE" "FUNCTION"))
+                  (result (mysql-query
+                           conn
+                           (format "SELECT ROUTINE_NAME, ROUTINE_TYPE
+FROM INFORMATION_SCHEMA.ROUTINES
+WHERE ROUTINE_SCHEMA = DATABASE()
+  AND ROUTINE_TYPE = %s
+ORDER BY ROUTINE_NAME"
+                                   (mysql-escape-literal routine-type)))))
+             (mapcar
+              (lambda (row)
+                (pcase-let ((`(,name ,type) row))
+                  (list :name name :type type :schema schema :source-schema schema)))
+              (mysql-result-rows result))))
+          ('triggers
+           (let ((result (mysql-query
+                          conn
+                          "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, EVENT_MANIPULATION, ACTION_TIMING
+FROM INFORMATION_SCHEMA.TRIGGERS
+WHERE TRIGGER_SCHEMA = DATABASE()
+ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME")))
+             (mapcar
+              (lambda (row)
+                (pcase-let ((`(,name ,table-name ,event ,timing) row))
+                  (list :name name :type "TRIGGER" :schema schema :source-schema schema
+                        :target-table table-name :event event :timing timing
+                        :status "ENABLED")))
+              (mysql-result-rows result))))
+          (_ nil)))
+    (mysql-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-object-details ((conn mysql-conn) entry)
+  "Return detail plists for MySQL object ENTRY."
+  (condition-case _err
+      (let ((type (upcase (or (plist-get entry :type) ""))))
+        (pcase type
+          ("INDEX"
+           (let* ((name (plist-get entry :name))
+                  (result (mysql-query
+                           conn
+                           (format "SELECT COLUMN_NAME, SEQ_IN_INDEX, COLLATION
+FROM INFORMATION_SCHEMA.STATISTICS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND INDEX_NAME = %s
+ORDER BY SEQ_IN_INDEX"
+                                   (mysql-escape-literal name)))))
+             (mapcar
+              (lambda (row)
+                (pcase-let ((`(,column-name ,position ,collation) row))
+                  (list :name column-name
+                        :position position
+                        :descend (if (string= collation "D") "DESC" "ASC"))))
+              (mysql-result-rows result))))
+          ((or "PROCEDURE" "FUNCTION")
+           (let* ((specific-name (plist-get entry :name))
+                  (result (mysql-query
+                           conn
+                           (format "SELECT PARAMETER_NAME, DTD_IDENTIFIER,
+       COALESCE(PARAMETER_MODE, 'RETURN'), ORDINAL_POSITION
+FROM INFORMATION_SCHEMA.PARAMETERS
+WHERE SPECIFIC_SCHEMA = DATABASE()
+  AND SPECIFIC_NAME = %s
+ORDER BY ORDINAL_POSITION"
+                                   (mysql-escape-literal specific-name)))))
+             (mapcar
+              (lambda (row)
+                (pcase-let ((`(,param-name ,dtype ,mode ,position) row))
+                  (list :name param-name :type dtype :mode mode :position position)))
+              (mysql-result-rows result))))
+          (_ nil)))
+    (mysql-error nil)))
+
+(cl-defmethod clutch-db-object-source ((conn mysql-conn) entry)
+  "Return source text for MySQL object ENTRY."
+  (condition-case err
+      (pcase (upcase (or (plist-get entry :type) ""))
+        ("PROCEDURE"
+         (let* ((result (mysql-query
+                         conn
+                         (format "SHOW CREATE PROCEDURE %s"
+                                 (mysql-escape-identifier (plist-get entry :name)))))
+                (row (car (mysql-result-rows result))))
+           (nth 2 row)))
+        ("FUNCTION"
+         (let* ((result (mysql-query
+                         conn
+                         (format "SHOW CREATE FUNCTION %s"
+                                 (mysql-escape-identifier (plist-get entry :name)))))
+                (row (car (mysql-result-rows result))))
+           (nth 2 row)))
+        ("TRIGGER"
+         (let* ((result (mysql-query
+                         conn
+                         (format "SHOW CREATE TRIGGER %s"
+                                 (mysql-escape-identifier (plist-get entry :name)))))
+                (row (car (mysql-result-rows result))))
+           (nth 2 row)))
+        (_ nil))
+    (mysql-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-show-create-object ((conn mysql-conn) entry)
+  "Return DDL text for MySQL non-table ENTRY."
+  (condition-case err
+      (pcase (upcase (or (plist-get entry :type) ""))
+        ("VIEW"
+         (let* ((result (mysql-query
+                         conn
+                         (format "SHOW CREATE VIEW %s"
+                                 (mysql-escape-identifier (plist-get entry :name)))))
+                (row (car (mysql-result-rows result))))
+           (nth 1 row)))
+        ("INDEX"
+         (let* ((details (clutch-db-object-details conn entry))
+                (columns (mapconcat
+                          (lambda (col)
+                            (format "%s %s"
+                                    (mysql-escape-identifier (plist-get col :name))
+                                    (plist-get col :descend)))
+                          details
+                          ", ")))
+           (format "CREATE %sINDEX %s ON %s (%s);"
+                   (if (plist-get entry :unique) "UNIQUE " "")
+                   (mysql-escape-identifier (plist-get entry :name))
+                   (mysql-escape-identifier (plist-get entry :target-table))
+                   columns)))
+        (_ nil))
     (mysql-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
@@ -253,6 +430,22 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
                            (let ((col-name (if (stringp n) n (format "%s" n))))
                              (cons col-name (list :ref-table ref-table
                                                   :ref-column ref-column))))))
+    (mysql-error nil)))
+
+(cl-defmethod clutch-db-referencing-objects ((conn mysql-conn) table)
+  "Return table entries that reference TABLE on MySQL CONN."
+  (condition-case _err
+      (let* ((sql (format
+                   "SELECT DISTINCT TABLE_NAME \
+FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
+WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = %s"
+                   (mysql-escape-literal table)))
+             (result (mysql-query conn sql))
+             (rows (mysql-result-rows result)))
+        (mapcar (lambda (row)
+                  (pcase-let ((`(,name) row))
+                    (list :name name :type "TABLE")))
+                rows))
     (mysql-error nil)))
 
 ;;;; Column details

@@ -892,6 +892,12 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 - Advanced transaction management beyond commit/rollback
 - Multiple result sets
 - Separate configuration file for the agent
+- Multi-schema workspace / schema switching within a single connection
+  - Future direction: cache object discovery by `(connection, effective-schema)` so schema switching does not force a full cold start
+  - Not in current scope: DataGrip-style “select multiple schemas and toggle between them” explorer workflow
+- Schema object editing beyond direct SQL authoring
+  - Future direction: add explicit editing flows for schema objects, starting with routine/trigger source editing
+  - Not in current scope: editing table definitions in place and synthesizing backend-specific `ALTER` statements automatically from edited DDL
 
 ---
 
