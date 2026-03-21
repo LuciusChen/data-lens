@@ -378,13 +378,20 @@ Returns a list of propertized strings (may be empty)."
       (push (format "I-%d" (length clutch--pending-inserts))
             parts))
     (when parts
-      (concat
-       (clutch--footer-icon '(codicon . "nf-cod-diff_modified") "✎"
-                            'clutch-modified-face)
-       (propertize (mapconcat #'identity (nreverse parts) " ")
-                   'face 'clutch-modified-face)
-       (propertize "  commit:C-c C-c  discard:C-c C-k"
-                   'face 'font-lock-comment-face)))))
+      (let ((commit-icon (clutch--icon-with-face '(codicon . "nf-cod-check")
+                                                 "✓" 'font-lock-comment-face))
+            (discard-icon (clutch--icon-with-face '(codicon . "nf-cod-discard")
+                                                  "✗" 'font-lock-comment-face)))
+        (concat
+         (clutch--footer-icon '(codicon . "nf-cod-diff_modified") "✎"
+                              'clutch-modified-face)
+         (propertize (mapconcat #'identity (nreverse parts) " ")
+                     'face 'clutch-modified-face)
+         (propertize "  " 'face 'font-lock-comment-face)
+         commit-icon
+         (propertize ":C-c C-c  " 'face 'font-lock-comment-face)
+         discard-icon
+         (propertize ":C-c C-k" 'face 'font-lock-comment-face))))))
 
 (defun clutch--footer-mutation-capability-part ()
   "Build footer part describing update/delete capability for the result."

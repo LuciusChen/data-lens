@@ -19,7 +19,7 @@ sidecar (=clutch-jdbc-agent=, Java 17+).
 - =ob-clutch.el= — Org-Babel integration (mysql/postgresql/sqlite)
 
 #+CAPTION: Result browser with unified transient workflow (C-c ?), copy (c), full export (e), and column paging via [ and ].
-[[file:assets/clutch-overview.png]]
+[[file:docs/screenshots/clutch-overview.png]]
 
 *Note:* MySQL is the primary backend — thoroughly tested and used daily.
 Native MySQL support has been live-validated against MySQL 5.6, 8.0, and
@@ -310,6 +310,9 @@ the same line shows =PK missing= and =E/D off=.
 Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the
 result transient as the exact staged SQL batch.
 
+#+CAPTION: Result browser with staged edit and delete markers, compact commit/discard icons, sort state, and query timing.
+[[file:docs/screenshots/ghost-in-the-shell-result-browser.png]]
+
 *** Insert Buffer Keys
 
 The insert buffer is intentionally form-like: =TAB= moves between fields,
@@ -336,6 +339,9 @@ an on-demand child editor for more comfortable multi-line editing.  Saving that
 child editor writes compact JSON back into the insert form, so the primary flow
 remains result buffer -> insert buffer.
 
+#+CAPTION: Insert buffer with aligned read-only labels, inline metadata tags, and point placed directly in the editable value column.
+[[file:docs/screenshots/ghost-in-the-shell-insert-buffer.png]]
+
 *** Visual Refine Mode (=c -r= / =C-u A=)
 
 The copy transient (=c=) offers a =-r= switch for *refine mode*.  With an
@@ -344,39 +350,15 @@ exclude rows or columns before the copy is performed.  The mode-line at the
 bottom of the result buffer is replaced with a color-coded hint for the
 duration of the session.
 
-#+begin_example
-Step 1 — select a region, then press c.
-         The transient menu appears.
+Typical flow:
 
-Step 2 — press -r to toggle refine mode (shown in the Options section).
+1. Select a region, then press =c= to open the copy transient.
+2. Toggle =-r= and choose the target format (=t= / =c= / =i=).
+3. In refine mode, use =m= to exclude rows and =x= to exclude columns.
+4. Press =RET= to confirm and copy only the remaining rectangle.
 
-Step 3 — press t / c / i to choose the format (TSV / CSV / INSERT).
-         The rect is highlighted; mode-line shows available keys.
-
-  REFINE  m row   x col   RET confirm   C-g cancel     ← mode-line
-
-  id   name    email              joined
-  ─────────────────────────────────────────────
-  1  ░ Alice ░ alice@example.com ░ 2023-01-15  ┐
-  2  ░ Bob   ░ bob@example.com   ░ 2023-03-22  ├─ rect (highlighted)
-  3  ░ Carol ░ carol@example.com ░ 2024-07-01  ┘
-  4    Dave    dave@example.com    2024-09-10     (outside rect)
-
-Step 4 — press m on row 2 to exclude it (dim + strikethrough).
-
-  1  ░ Alice ░ alice@example.com ░ 2023-01-15
-  2    Bob     bob@example.com     2023-03-22   ← excluded
-  3  ░ Carol ░ carol@example.com ░ 2024-07-01
-
-Step 5 — press x on the email column to exclude it.
-
-  1  ░ Alice ░ ~~email~~         ░ 2023-01-15
-  3  ░ Carol ░ ~~email~~         ░ 2024-07-01
-
-Step 6 — press RET to confirm.
-         Data is copied in the chosen format.
-         Result: rows {1, 3} × cols {id, name, joined}.
-#+end_example
+#+CAPTION: Visual refine mode with manual row/column exclusion before copy.
+[[file:docs/screenshots/ghost-in-the-shell-refine-mode.png]]
 
 | Key   | Action                              |
 |-------+-------------------------------------|
@@ -536,6 +518,9 @@ action universe.
 It resolves the object at point when possible; otherwise it prompts, then opens
 the shared action UI.  The action set is
 intentionally small and shared across Embark and Transient:
+
+#+CAPTION: Object describe buffer with action hints in the header-line and detailed column metadata in the body.
+[[file:docs/screenshots/ghost-in-the-shell-object-describe.png]]
 
 - =d=: describe object
 - =s=: show DDL / source

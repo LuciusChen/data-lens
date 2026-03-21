@@ -417,8 +417,10 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should (string-match-p "Tx: Manual\\*" footer))
         (should (string-match-p "DESC\\[created_at\\]" footer))
         (should (string-match-p "E-1 D-1 I-1" footer))
-        (should (string-match-p "commit:C-c C-c" footer))
-        (should (string-match-p "discard:C-c C-k" footer))))))
+        (should (string-match-p "C-c C-c" footer))
+        (should (string-match-p "C-c C-k" footer))
+        (should-not (string-match-p "commit:" footer))
+        (should-not (string-match-p "discard:" footer))))))
 
 (ert-deftest clutch-test-render-footer-warns-when-primary-key-missing ()
   "Footer should explain when edit/delete are disabled due to missing PK."
