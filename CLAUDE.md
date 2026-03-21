@@ -24,10 +24,12 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Interface / implementation separation**: `mysql.el` and `pg.el` are pure protocol libraries with no UI. `clutch.el` depends on `clutch-db.el`, not protocol layers directly.
 - **Single responsibility per file**: Do not mix protocol code with rendering code.
 - **Keep `clutch.el` as the entry point**: External consumers should continue to load `(require 'clutch)`. When implementation moves out, `clutch.el` becomes the assembler, not a grab bag.
-- **Split by user-visible workflow boundaries**: Prefer modules such as result UI, object workflow, or staged mutation flow. Do not split by vague internal labels like `common`, `utils`, or `helpers`.
-- **Extract coherent slices, not scattered trivia**: A module move should take a real responsibility with its state, commands, and render helpers together. Do not create files that only hold leftovers.
+- **Split by stable workflow boundaries**: Prefer modules such as result UI, object workflow, staged mutation flow, or schema/cache lifecycle. Do not split by vague internal labels like `common`, `utils`, or `helpers`.
+- **Move whole responsibilities, not leftovers**: A file split must take a real slice with its state, commands, and render helpers together. If the original file still owns the behavior and the new file only adds glue, the split is not done yet.
+- **Do not split for cosmetics**: A shorter `clutch.el` is not enough reason to extract a file. Split only when ownership becomes clearer and future changes will touch fewer files.
+- **Stop splitting before glue takes over**: If a proposed extraction mostly adds `defvar`, `declare-function`, and cross-file hopping without reducing conceptual ownership, stop. That is a sign of over-modularization.
 - **Use declarations to keep modules honest**: When a module depends on shared globals or functions defined elsewhere, add explicit `defvar` / `declare-function` forms so byte-compilation stays clean.
-- **Favor incremental modularization**: First move the clearest responsibility with the smallest safe cut. After each extraction, reload, byte-compile, and rerun the focused workflow tests before moving the next slice.
+- **Favor incremental modularization**: Move the smallest coherent slice first, then reload, byte-compile, and rerun focused tests before attempting the next extraction.
 - **No side effects on load**: Loading a file must not alter Emacs behavior. Activation must be explicit.
 - **Reuse Emacs infrastructure**: Use `completing-read`, `special-mode`, `text-property-search-forward`, standard hooks, and other stock primitives.
 - **Public naming**: `clutch-` for UI, `mysql-` / `pg-` for protocol. No double dash for public API.

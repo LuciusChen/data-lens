@@ -390,6 +390,8 @@ Returns a backend-specific connection object."
           (let ((conn (funcall connect-fn params)))
             (clutch-db-init-connection conn)
             conn)
+        (clutch-db-error
+         (signal (car err) (cdr err)))
         (error
          (signal 'clutch-db-error
                  (list (format "Connection failed (%s): %s"

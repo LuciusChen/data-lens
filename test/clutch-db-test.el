@@ -1705,6 +1705,19 @@ immediately without touching the agent process."
         (clutch-db-error
          (should (string-match-p "Connection lost" (cadr err))))))))
 
+(ert-deftest clutch-db-test-jdbc-recv-response-connect-timeout-omits-reconnect-hint ()
+  "Connect timeouts should not tell users to reconnect an unestablished session."
+  (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
+            ((symbol-function 'delete-process)  #'ignore)
+            ((symbol-function 'accept-process-output) (lambda (_p _s) nil)))
+    (let ((clutch-jdbc--agent-process 'fake-proc)
+          (clutch-jdbc--response-queue nil))
+      (condition-case err
+          (progn (clutch-jdbc--recv-response 9999 0.0 "connect") (should nil))
+        (clutch-db-error
+         (should (string-match-p "Connection attempt timed out" (cadr err)))
+         (should-not (string-match-p "reconnect with C-c C-e" (cadr err))))))))
+
 (ert-deftest clutch-db-test-jdbc-recv-response-agent-exit-reports-java-version-mismatch ()
   "An early agent exit with UnsupportedClassVersionError should report Java mismatch."
   (let ((stderr (get-buffer-create "*clutch-jdbc-agent-stderr*")))

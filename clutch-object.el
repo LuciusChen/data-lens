@@ -7,13 +7,20 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'clutch-db)
+(require 'sql)
+(require 'subr-x)
 (require 'transient)
 
 (defvar clutch--conn-sql-product)
 (defvar clutch--connection-params)
-(defvar clutch--describe-object-entry)
-(defvar clutch--object-cache)
-(defvar clutch--object-warmup-timers)
+(defvar-local clutch--describe-object-entry nil
+  "Object entry currently displayed in a clutch describe buffer.")
+(defvar clutch--object-cache (make-hash-table :test 'equal)
+  "Object discovery cache keyed by connection key string.
+Each value is a plist with at least :entries and :fetched-at.")
+(defvar clutch--object-warmup-timers (make-hash-table :test 'equal)
+  "Idle timers warming object discovery caches keyed by connection key string.")
 (defvar clutch-connection)
 (defvar clutch-object-warmup-idle-delay-seconds)
 (defvar clutch-primary-object-types)
@@ -26,14 +33,14 @@
 (declare-function clutch--bind-connection-context "clutch" (conn &optional params product))
 (declare-function clutch--connection-alive-p "clutch" (conn))
 (declare-function clutch--effective-sql-product "clutch" (params))
-(declare-function clutch--ensure-column-details "clutch" (conn table))
+(declare-function clutch--ensure-column-details "clutch-schema" (conn table))
 (declare-function clutch--ensure-connection "clutch" ())
-(declare-function clutch--ensure-table-comment "clutch" (conn table))
+(declare-function clutch--ensure-table-comment "clutch-schema" (conn table))
 (declare-function clutch--icon-with-face "clutch-ui"
                   (name fallback face &rest icon-args))
-(declare-function clutch--object-cache-key "clutch" (conn))
+(declare-function clutch--connection-key "clutch" (conn))
 (declare-function clutch--refresh-current-schema "clutch" (&optional silent))
-(declare-function clutch--schema-for-connection "clutch" (&optional conn))
+(declare-function clutch--schema-for-connection "clutch-schema" (&optional conn))
 (declare-function clutch--warn-schema-cache-state "clutch" (&optional conn))
 
 (defun clutch--object-type-allowed-p (entry allowed-types)
@@ -52,6 +59,13 @@ When ALLOWED-TYPES is nil, return ENTRIES unchanged."
      (lambda (entry)
        (clutch--object-type-allowed-p entry allowed-types))
      entries)))
+
+(defun clutch--object-cache-key (conn)
+  "Return the cache key for object discovery on CONN.
+This currently matches the connection identity and is structured as a helper so
+future schema switching can widen the key without touching all call sites."
+  (or (clutch--connection-key conn)
+      (format "%S" conn)))
 
 ;;;; Object discovery
 
@@ -260,26 +274,31 @@ When ALLOWED-TYPES is nil, return ENTRIES unchanged."
         (lambda ()
           (remhash key clutch--object-warmup-timers)
           (when (and conn (ignore-errors (clutch--connection-alive-p conn)))
-            (let ((type (clutch--object-category-type next)))
-              (unless
-                  (and type
-                       (clutch-db-list-objects-async
-                        conn next
-                        (lambda (entries)
-                          (when (and conn
-                                     (ignore-errors (clutch--connection-alive-p conn)))
-                            (clutch--store-object-cache-type-entries conn type entries)
-                            (clutch--schedule-object-warmup conn)))
-                        (lambda (&rest _)
-                          (when (and conn
-                                     (ignore-errors (clutch--connection-alive-p conn)))
-                            (clutch--schedule-object-warmup conn)))))
-                (condition-case nil
-                    (progn
-                      (when type
-                        (clutch--object-type-entries conn type))
-                      (clutch--schedule-object-warmup conn))
-                  (error nil)))))))
+            (condition-case nil
+                (if (clutch-db-busy-p conn)
+                    (clutch--schedule-object-warmup conn)
+                  (let ((type (clutch--object-category-type next)))
+                    (unless
+                        (and type
+                             (clutch-db-list-objects-async
+                              conn next
+                              (lambda (entries)
+                                (when (and conn
+                                           (ignore-errors (clutch--connection-alive-p conn)))
+                                  (clutch--store-object-cache-type-entries conn type entries)
+                                  (clutch--schedule-object-warmup conn)))
+                              (lambda (&rest _)
+                                (when (and conn
+                                           (ignore-errors (clutch--connection-alive-p conn)))
+                                  (clutch--schedule-object-warmup conn)))))
+                      (progn
+                        (when type
+                          (clutch--object-type-entries conn type))
+                        (clutch--schedule-object-warmup conn)))))
+              (clutch-db-error
+               (when (and conn
+                          (ignore-errors (clutch--connection-alive-p conn)))
+                 (clutch--schedule-object-warmup conn)))))))
        clutch--object-warmup-timers)))))
 
 (defun clutch--partial-object-entries (conn)
@@ -785,12 +804,6 @@ selection can surface objects from different Oracle sources and types."
   (member (clutch--object-type-string entry)
           '("SYNONYM" "INDEX" "TRIGGER")))
 
-(defun clutch--object-safe-call (fn)
-  "Call FN and return nil when metadata lookup fails."
-  (condition-case _err
-      (funcall fn)
-    (error nil)))
-
 (defun clutch--object-summary-pairs (entry)
   "Return summary label/value pairs for object ENTRY."
   (let* ((type (clutch--object-type-string entry))
@@ -903,8 +916,7 @@ selection can surface objects from different Oracle sources and types."
 (defun clutch--object-related-entries (conn entry type)
   "Return related TYPE entries for table-like ENTRY on CONN."
   (when-let* ((name (plist-get entry :name))
-              (objects (clutch--object-safe-call
-                        (lambda () (clutch--object-entries conn)))))
+              (objects (clutch--object-entries conn)))
     (seq-filter
      (lambda (candidate)
        (and (equal (clutch--normalize-object-type (plist-get candidate :type))
@@ -921,12 +933,11 @@ selection can surface objects from different Oracle sources and types."
      (let ((name (plist-get entry :name)))
        (delq nil
              (list
-              (when-let* ((comment (and (string= (clutch--object-type-string entry) "TABLE")
+             (when-let* ((comment (and (string= (clutch--object-type-string entry) "TABLE")
                                         (clutch--ensure-table-comment conn name))))
                 (cons "Comment" (list (format "  %s" comment))))
               (when-let* ((details (or (clutch--ensure-column-details conn name)
-                                       (clutch--object-safe-call
-                                        (lambda () (clutch-db-list-columns conn name))))))
+                                       (clutch-db-list-columns conn name))))
                 (cons "Columns"
                       (mapcar (if (and details (plist-get (car-safe details) :name))
                                   #'clutch--object-format-column
@@ -952,12 +963,10 @@ selection can surface objects from different Oracle sources and types."
                                                (plist-get trigger :status)))))
                               triggers)))))))
     ("INDEX"
-     (when-let* ((details (clutch--object-safe-call
-                           (lambda () (clutch-db-object-details conn entry)))))
+     (when-let* ((details (clutch-db-object-details conn entry)))
        (list (cons "Columns" (mapcar #'clutch--object-format-index-column details)))))
     ((or "PROCEDURE" "FUNCTION")
-     (when-let* ((details (clutch--object-safe-call
-                           (lambda () (clutch-db-object-details conn entry)))))
+     (when-let* ((details (clutch-db-object-details conn entry)))
        (list (cons "Parameters" (mapcar #'clutch--object-format-routine-param details)))))
     (_ nil)))
 

@@ -63,6 +63,15 @@ CA or set `mysql-tls-verify-server` to `nil` explicitly.
 - `mysql-escape-literal`
 - `mysql-connect/uri`
 
+### Prepared Statements
+
+```elisp
+(let ((stmt (mysql-prepare conn "SELECT * FROM users WHERE id = ?")))
+  (let ((result (mysql-execute stmt 42)))
+    (mysql-result-rows result))
+  (mysql-stmt-close stmt))
+```
+
 ## PostgreSQL (`pg.el`)
 
 ### Scope
@@ -108,6 +117,14 @@ Relevant variables:
 - `pg-ping`
 - `pg-escape-identifier`
 - `pg-escape-literal`
+
+### Transaction Example
+
+```elisp
+(with-pg-transaction conn
+  (pg-query conn "INSERT INTO users (name) VALUES ('alice')")
+  (pg-query conn "INSERT INTO users (name) VALUES ('bob')"))
+```
 
 ## SQLite
 

@@ -43,7 +43,7 @@
 ;; declare them here to silence the byte-compiler without creating a hard
 ;; `require' dependency that would invert the dependency graph.
 (declare-function clutch--connection-key "clutch" (conn))
-(declare-function clutch--schema-status-entry "clutch" (conn))
+(declare-function clutch--schema-status-entry "clutch-schema" (conn))
 (defvar clutch--schema-cache)
 
 ;;;; Configuration
@@ -377,9 +377,10 @@ Defaults to 8 lines.  Return nil when stderr is empty."
     (process-send-string clutch-jdbc--agent-process (concat msg "\n"))
     id))
 
-(defun clutch-jdbc--recv-response (id &optional timeout-seconds)
+(defun clutch-jdbc--recv-response (id &optional timeout-seconds op)
   "Wait for and return the response with matching ID as a plist.
-TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'."
+TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'.
+OP, when non-nil, names the RPC for context-sensitive timeout errors."
   (let ((deadline (+ (float-time)
                      (or timeout-seconds clutch-jdbc-rpc-timeout-seconds)))
         response
@@ -419,7 +420,9 @@ TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'."
             clutch-jdbc--response-queue nil)
       (signal 'clutch-db-error
               (list (or failure-message
-                        "Connection lost — reconnect with C-c C-e"))))
+                        (if (equal op "connect")
+                            "Connection attempt timed out or JDBC agent became unresponsive"
+                          "Connection lost — reconnect with C-c C-e")))))
     response))
 
 (defun clutch-jdbc--rpc (op params &optional timeout-seconds)
@@ -427,7 +430,7 @@ TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'."
 Signals `clutch-db-error' on agent-reported errors."
   (clutch-jdbc--ensure-agent)
   (let* ((id (clutch-jdbc--send op params))
-         (response (clutch-jdbc--recv-response id timeout-seconds)))
+         (response (clutch-jdbc--recv-response id timeout-seconds op)))
     (if (eq t (plist-get response :ok))
         (plist-get response :result)
       (signal 'clutch-db-error

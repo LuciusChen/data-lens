@@ -8,38 +8,85 @@
 
 (require 'cl-lib)
 
-(defvar clutch--aggregate-summary)
+(defvar-local clutch--aggregate-summary nil
+  "Last aggregate summary plist for result footer, or nil.
+Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (defvar clutch--cached-pk-indices)
 (defvar clutch--cell-default-placeholder)
 (defvar clutch--cell-generated-placeholder)
-(defvar clutch--column-pages)
-(defvar clutch--column-widths)
+(defvar-local clutch--column-pages nil
+  "Vector of vectors containing non-pinned column indices per page.")
+(defvar-local clutch--column-widths nil
+  "Vector of display widths for each result column.")
 (defvar clutch--conn-sql-product)
 (defvar clutch--connection-params)
-(defvar clutch--current-col-page)
-(defvar clutch--dml-result)
-(defvar clutch--filter-pattern)
-(defvar clutch--fk-info)
-(defvar clutch--filtered-rows)
-(defvar clutch--header-active-col)
-(defvar clutch--last-window-width)
-(defvar clutch--marked-rows)
-(defvar clutch--order-by)
-(defvar clutch--page-current)
-(defvar clutch--page-total-rows)
-(defvar clutch--pending-deletes)
-(defvar clutch--pending-edits)
-(defvar clutch--pending-inserts)
-(defvar clutch--pinned-columns)
-(defvar clutch--query-elapsed)
-(defvar clutch--result-column-defs)
-(defvar clutch--result-columns)
-(defvar clutch--result-rows)
-(defvar clutch--row-overlay)
+(defvar-local clutch--current-col-page 0
+  "Current column page index.")
+(defvar-local clutch--dml-result nil
+  "Non-nil when this result buffer shows a DML result.")
+(defvar-local clutch--filter-pattern nil
+  "Current client-side filter string, or nil.")
+(defvar-local clutch--fk-info nil
+  "Foreign key info for the current result.")
+(defvar-local clutch--filtered-rows nil
+  "Filtered subset of `clutch--result-rows', or nil when unfiltered.")
+(defvar-local clutch--header-active-col nil
+  "Column index currently highlighted in the header, or nil.")
+(defvar-local clutch--last-window-width nil
+  "Last known window body width for the current result buffer.")
+(defvar-local clutch--marked-rows nil
+  "List of marked row indices.")
+(defvar-local clutch--order-by nil
+  "Current ORDER BY state as (COL-NAME . DIRECTION) or nil.")
+(defvar-local clutch--page-current 0
+  "Current data page number (0-based).")
+(defvar-local clutch--page-total-rows nil
+  "Total row count from COUNT(*), or nil if not yet queried.")
+(defvar-local clutch--pending-deletes nil
+  "List of pk-value vectors staged for deletion.")
+(defvar-local clutch--pending-edits nil
+  "Alist of pending edits: ((PK-VEC . COL-IDX) . NEW-VALUE).")
+(defvar-local clutch--pending-inserts nil
+  "List of field alists staged for insertion.")
+(defvar-local clutch--pinned-columns nil
+  "List of column indices pinned across all column pages.")
+(defvar-local clutch--query-elapsed nil
+  "Elapsed time in seconds for the last query execution.")
+(defvar-local clutch--result-column-defs nil
+  "Full column definition plists from the last result.")
+(defvar-local clutch--result-columns nil
+  "Column names from the last result.")
+(defvar-local clutch--result-rows nil
+  "Row data from the last result.")
+(defvar-local clutch--executed-sql-overlay nil
+  "Overlay marking the last successfully executed SQL statement.")
+(defvar-local clutch--row-overlay nil
+  "Overlay used to highlight the current row.")
 (defvar clutch--row-start-positions)
-(defvar clutch--sort-column)
-(defvar clutch--sort-descending)
-(defvar clutch--where-filter)
+(defvar-local clutch--sort-column nil
+  "Column name currently sorted by, or nil.")
+(defvar-local clutch--sort-descending nil
+  "Non-nil if the current sort is descending.")
+(defvar-local clutch--where-filter nil
+  "Current WHERE filter string, or nil if no filter is active.")
+(defvar-local clutch--refine-rect nil
+  "Rectangle (ROW-INDICES . COL-INDICES) being refined, or nil.")
+(defvar-local clutch--refine-excluded-rows nil
+  "Row indices (0-based) excluded during refine mode.")
+(defvar-local clutch--refine-excluded-cols nil
+  "Column indices (0-based) excluded during refine mode.")
+(defvar-local clutch--refine-overlays nil
+  "Overlays created during refine mode.")
+(defvar-local clutch--refine-callback nil
+  "Callback called with final rect when refine is confirmed.")
+(defvar-local clutch--refine-saved-mode-line nil
+  "Saved mode-line-format to restore after refine mode exits.")
+(defvar-local clutch-record--result-buffer nil
+  "Reference to the parent result buffer for record display.")
+(defvar-local clutch-record--row-idx nil
+  "Current row index being displayed in a record buffer.")
+(defvar-local clutch-record--expanded-fields nil
+  "List of expanded long field column indices in a record buffer.")
 (defvar clutch-column-padding)
 (defvar clutch-connection)
 (defvar clutch-result-max-rows)
@@ -50,7 +97,7 @@
 (declare-function clutch--column-names "clutch" (columns))
 (declare-function clutch--compute-column-pages "clutch" (widths pinned available-width))
 (declare-function clutch--compute-column-widths "clutch" (col-names rows columns))
-(declare-function clutch--ensure-column-details "clutch" (conn table))
+(declare-function clutch--ensure-column-details "clutch-schema" (conn table))
 (declare-function clutch--format-elapsed "clutch" (seconds))
 (declare-function clutch--format-value "clutch" (value))
 (declare-function clutch--numeric-type-p "clutch" (col-def))
@@ -61,12 +108,19 @@
 (declare-function clutch--show-result-buffer "clutch" (buf))
 (declare-function clutch--string-pad "clutch" (s width &optional pad-left numeric))
 (declare-function clutch--tx-header-line-segment "clutch" (conn))
+(declare-function clutch--trim-sql-bounds "clutch" (beg end))
 (declare-function clutch--value-placeholder "clutch" (value col-def))
 (declare-function clutch--visible-columns "clutch" ())
 (declare-function clutch-result--detect-table "clutch-edit" ())
 (declare-function clutch-result--extract-pk-vec "clutch-edit" (row pk-indices))
 (declare-function clutch-result--row-idx-at-line "clutch-edit" ())
 (declare-function clutch-result-mode "clutch" (&optional arg))
+(declare-function clutch-db-result-affected-rows "clutch-db" (result))
+(declare-function clutch-db-result-columns "clutch-db" (result))
+(declare-function clutch-db-result-connection "clutch-db" (result))
+(declare-function clutch-db-result-last-insert-id "clutch-db" (result))
+(declare-function clutch-db-result-rows "clutch-db" (result))
+(declare-function clutch-db-result-warnings "clutch-db" (result))
 
 (defun clutch--icon (name &optional fallback &rest icon-args)
   "Return a nerd-icons icon for NAME, or FALLBACK string.
@@ -122,6 +176,40 @@ the real rendered width, preventing column misalignment."
 (defun clutch--footer-icon (spec fallback face)
   "Return footer icon SPEC/FALLBACK with explicit FACE."
   (propertize (concat (clutch--icon spec fallback) " ") 'face face))
+
+(defun clutch--clear-executed-sql-overlay (&rest _)
+  "Remove the last executed SQL overlay in the current buffer."
+  (when (overlayp clutch--executed-sql-overlay)
+    (let ((overlay clutch--executed-sql-overlay))
+      (setq clutch--executed-sql-overlay nil)
+      (delete-overlay overlay))))
+
+(defun clutch--executed-sql-marker-before-string ()
+  "Return the before-string used to mark executed SQL."
+  (if (display-graphic-p)
+      (propertize " "
+                  'display
+                  '(left-fringe clutch-executed-sql-dot clutch-executed-sql-marker-face))
+    (propertize "✓ " 'face 'clutch-executed-sql-marker-face)))
+
+(defun clutch--mark-executed-sql-region (beg end)
+  "Mark the last successfully executed SQL region BEG..END."
+  (when-let* ((trimmed (clutch--trim-sql-bounds beg end))
+              (tbeg (car trimmed))
+              (tend (cdr trimmed)))
+    (clutch--clear-executed-sql-overlay)
+    (setq clutch--executed-sql-overlay
+          (make-overlay (save-excursion
+                          (goto-char tbeg)
+                          (line-beginning-position))
+                        (save-excursion
+                          (goto-char tbeg)
+                          (line-beginning-position))
+                        nil nil nil))
+    (overlay-put clutch--executed-sql-overlay 'before-string
+                 (clutch--executed-sql-marker-before-string))
+    (overlay-put clutch--executed-sql-overlay 'help-echo
+                 (format "Last executed SQL (%d chars)" (- tend tbeg)))))
 
 (defun clutch--header-label (name cidx)
   "Build the display label for column NAME at index CIDX.
@@ -417,7 +505,7 @@ Returns a list of propertized strings (may be empty)."
                    (clutch--footer-row-summary row-count total-rows))
            (concat (clutch--footer-icon '(codicon . "nf-cod-files") "⊞" hi)
                    (propertize (format "%d" (1+ page-num)) 'face hi)
-                   (propertize " / " 'face dim)
+                   (propertize "/" 'face dim)
                    (propertize (format "%d" (or total-pages 1)) 'face hi))
            (when (> col-num-pages 1)
              (concat (clutch--footer-icon '(codicon . "nf-cod-split_horizontal") "⫼" hi)

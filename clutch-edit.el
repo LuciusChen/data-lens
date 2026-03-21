@@ -9,7 +9,8 @@
 (require 'cl-lib)
 (require 'json)
 
-(defvar clutch--cached-pk-indices)
+(defvar-local clutch--cached-pk-indices nil
+  "Cached list of primary-key column indices for the current result buffer.")
 (defvar clutch--filtered-rows)
 (defvar clutch--fk-info)
 (defvar clutch--last-query)
@@ -23,7 +24,7 @@
 (defvar clutch-insert-validation-idle-delay)
 (defvar clutch-connection)
 
-(declare-function clutch--ensure-column-details "clutch" (conn table))
+(declare-function clutch--ensure-column-details "clutch-schema" (conn table))
 (declare-function clutch--execute "clutch" (sql &optional conn))
 (declare-function clutch--format-value "clutch" (value))
 (declare-function clutch--json-value-to-string "clutch" (value))
@@ -33,7 +34,12 @@
 (declare-function clutch--sql-normalize-for-rewrite "clutch" (sql))
 (declare-function clutch--string-pad "clutch" (s width &optional pad-left numeric))
 (declare-function clutch--value-to-literal "clutch" (val))
+(declare-function clutch--refresh-display "clutch" ())
 (declare-function clutch-result--selected-row-indices "clutch" ())
+(declare-function clutch-db-escape-identifier "clutch-db" (conn name))
+(declare-function clutch-db-escape-literal "clutch-db" (conn value))
+(declare-function clutch-db-foreign-keys "clutch-db" (conn table))
+(declare-function clutch-db-primary-key-columns "clutch-db" (conn table))
 
 ;;;; Cell editing (C-c ')
 
