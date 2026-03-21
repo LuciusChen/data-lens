@@ -174,7 +174,7 @@ Underlined to indicate clickable (RET to follow)."
   :group 'clutch)
 
 (define-fringe-bitmap 'clutch-executed-sql-dot
-  [0 24 60 60 24 0 0 0]
+  [0 0 24 60 126 126 60 24]
   nil nil 'center)
 
 (defface clutch-pending-delete-face
