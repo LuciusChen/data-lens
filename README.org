@@ -350,6 +350,12 @@ exclude rows or columns before the copy is performed.  The mode-line at the
 bottom of the result buffer is replaced with a color-coded hint for the
 duration of the session.
 
+The region can be set with =C-x SPC= (rectangle mark), a normal mark
+(=C-SPC=), or mouse selection — all three are accepted.  Regardless of
+how the region was set, clutch resolves the start and end cells and
+expands the selection into a full rectangle covering all rows and
+columns in that range.
+
 Typical flow:
 
 1. Select a region, then press =c= to open the copy transient.
