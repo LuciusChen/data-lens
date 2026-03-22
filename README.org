@@ -137,7 +137,7 @@ Each entry should specify =:backend= explicitly (=mysql=, =pg=, =sqlite=, or a J
 Omitting =:backend= defaults to =mysql=, but explicit is clearer.
 SQLite connections only require =:database= (the file path); no host, port, or user.
 Use =":memory:"= for a transient in-memory database (data is lost when disconnected).
-=:password= is optional for network backends — see [[*Password Management]] for auth-source integration.
+=:password= is optional for network backends — see [[#password-management][Password Management]] for auth-source integration.
 For networked backends, you can set =:connect-timeout= and
 =:read-idle-timeout= (seconds) per connection entry.  JDBC connections also
 accept =:query-timeout= and =:rpc-timeout=.
@@ -145,7 +145,7 @@ TLS can be enabled per entry with =:tls t=; see backend TLS sections above for
 verification defaults and CA trustfile configuration.
 
 JDBC backends use a driver symbol as =:backend= instead of =mysql=/=pg=.  See
-[[*JDBC Backend (clutch-db-jdbc.el)]] for the full list of supported databases and setup.
+[[#jdbc-backend-clutch-db-jdbcel][JDBC Backend (clutch-db-jdbc.el)]] for the full list of supported databases and setup.
 
 *** 2. Open a query console
 
@@ -716,7 +716,7 @@ artifact from Maven Central rather than a nonexistent plain
 #+end_src
 
 JDBC connections use the same =:pass-entry= auth-source integration as other
-backends.  See [[*Password Management]] for details.
+backends.  See [[#password-management][Password Management]] for details.
 
 *** Oracle-specific Notes
 
