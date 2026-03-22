@@ -4972,86 +4972,86 @@ Skips if `clutch-test-password' is nil."
 (require 'mysql)
 (require 'pg)
 
+(defmacro clutch-test--define-ert-cases (&rest cases)
+  "Define multiple independent ERT test CASES.
+Each case is (NAME DOCSTRING BODY...)."
+  `(progn
+     ,@(mapcar
+        (lambda (case)
+          (pcase-let ((`(,name ,doc . ,body) case))
+            `(ert-deftest ,name ()
+               ,doc
+               ,@body)))
+        cases)))
+
 ;;; Opt 1: IEEE 754 float/double decoding correctness
 
-(ert-deftest clutch-test-ieee754-double-1.0 ()
+(clutch-test--define-ert-cases
+ (clutch-test-ieee754-double-1.0
   "Double-precision: [00 00 00 00 00 00 F0 3F] -> 1.0."
   (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #xF0 #x3F)))
     (should (= (mysql--ieee754-double-to-float data 0) 1.0))))
-
-(ert-deftest clutch-test-ieee754-double-2.0 ()
+ (clutch-test-ieee754-double-2.0
   "Double-precision: [00 00 00 00 00 00 00 40] -> 2.0."
   (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x40)))
     (should (= (mysql--ieee754-double-to-float data 0) 2.0))))
-
-(ert-deftest clutch-test-ieee754-double-neg-1.5 ()
+ (clutch-test-ieee754-double-neg-1.5
   "Double-precision: -1.5 round-trip via known LE bytes."
   ;; -1.5: sign=1, exp=1023, mantissa=2^51; LE: 00 00 00 00 00 00 F8 BF
   (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #xF8 #xBF)))
     (should (= (mysql--ieee754-double-to-float data 0) -1.5))))
-
-(ert-deftest clutch-test-ieee754-double-pos-inf ()
+ (clutch-test-ieee754-double-pos-inf
   "Double-precision: [00 00 00 00 00 00 F0 7F] -> +Inf."
   (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #xF0 #x7F)))
     (should (= (mysql--ieee754-double-to-float data 0) 1.0e+INF))))
-
-(ert-deftest clutch-test-ieee754-double-neg-inf ()
+ (clutch-test-ieee754-double-neg-inf
   "Double-precision: [00 00 00 00 00 00 F0 FF] -> -Inf."
   (let ((data (unibyte-string #x00 #x00 #x00 #x00 #x00 #x00 #xF0 #xFF)))
     (should (= (mysql--ieee754-double-to-float data 0) -1.0e+INF))))
-
-(ert-deftest clutch-test-ieee754-double-nan ()
+ (clutch-test-ieee754-double-nan
   "Double-precision: exponent=0x7FF, mantissa!=0 -> NaN."
   (let ((data (unibyte-string #x01 #x00 #x00 #x00 #x00 #x00 #xF0 #x7F)))
     (should (isnan (mysql--ieee754-double-to-float data 0)))))
-
-(ert-deftest clutch-test-ieee754-double-subnormal ()
+ (clutch-test-ieee754-double-subnormal
   "Double-precision subnormal: exponent=0, mantissa!=0 -> tiny positive float."
   (let* ((data (unibyte-string #x01 #x00 #x00 #x00 #x00 #x00 #x00 #x00))
          (result (mysql--ieee754-double-to-float data 0)))
     (should (floatp result))
     (should (> result 0.0))
     (should (< result 2.3e-308))))
-
-(ert-deftest clutch-test-ieee754-double-offset ()
+ (clutch-test-ieee754-double-offset
   "Double-precision decoder respects non-zero offset within data string."
   ;; Pad with one garbage byte at offset 0; double starts at offset 1.
   (let ((data (unibyte-string #xFF #x00 #x00 #x00 #x00 #x00 #x00 #xF0 #x3F)))
     (should (= (mysql--ieee754-double-to-float data 1) 1.0))))
-
-(ert-deftest clutch-test-ieee754-single-1.0 ()
+ (clutch-test-ieee754-single-1.0
   "Single-precision: [00 00 80 3F] -> 1.0."
   (let ((data (unibyte-string #x00 #x00 #x80 #x3F)))
     (should (= (mysql--ieee754-single-to-float data 0) 1.0))))
-
-(ert-deftest clutch-test-ieee754-single-2.0 ()
+ (clutch-test-ieee754-single-2.0
   "Single-precision: [00 00 00 40] -> 2.0."
   (let ((data (unibyte-string #x00 #x00 #x00 #x40)))
     (should (= (mysql--ieee754-single-to-float data 0) 2.0))))
-
-(ert-deftest clutch-test-ieee754-single-pos-inf ()
+ (clutch-test-ieee754-single-pos-inf
   "Single-precision: [00 00 80 7F] -> +Inf."
   (let ((data (unibyte-string #x00 #x00 #x80 #x7F)))
     (should (= (mysql--ieee754-single-to-float data 0) 1.0e+INF))))
-
-(ert-deftest clutch-test-ieee754-single-neg-inf ()
+ (clutch-test-ieee754-single-neg-inf
   "Single-precision: [00 00 80 FF] -> -Inf.
 Note: [00 00 C0 FF] has mantissa bit set -> NaN, not -Inf."
   (let ((data (unibyte-string #x00 #x00 #x80 #xFF)))
     (should (= (mysql--ieee754-single-to-float data 0) -1.0e+INF))))
-
-(ert-deftest clutch-test-ieee754-single-nan ()
+ (clutch-test-ieee754-single-nan
   "Single-precision: exponent=0xFF, mantissa!=0 -> NaN."
   (let ((data (unibyte-string #x01 #x00 #x80 #x7F)))
     (should (isnan (mysql--ieee754-single-to-float data 0)))))
-
-(ert-deftest clutch-test-ieee754-single-subnormal ()
+ (clutch-test-ieee754-single-subnormal
   "Single-precision subnormal: exponent=0, mantissa!=0 -> tiny positive float."
   (let* ((data (unibyte-string #x01 #x00 #x00 #x00))
          (result (mysql--ieee754-single-to-float data 0)))
     (should (floatp result))
     (should (> result 0.0))
-    (should (< result 1.2e-38))))
+    (should (< result 1.2e-38)))))
 
 ;; Benchmark (uncomment and eval manually; not run by default):
 ;; (ert-deftest clutch-bench-ieee754-double () :tags '(benchmark)
@@ -5062,69 +5062,60 @@ Note: [00 00 C0 FF] has mantissa bit set -> NaN, not -Inf."
 
 ;;; Opt 2: PG type dispatch hash table
 
-(ert-deftest clutch-test-pg-parse-value-null ()
+(clutch-test--define-ert-cases
+ (clutch-test-pg-parse-value-null
   "nil input returns nil for any OID."
   (should (null (pg--parse-value nil pg-oid-int4)))
   (should (null (pg--parse-value nil pg-oid-bool)))
   (should (null (pg--parse-value nil 99999))))
-
-(ert-deftest clutch-test-pg-parse-value-bool ()
+ (clutch-test-pg-parse-value-bool
   "Bool OID: \"t\"->t, \"f\"->nil, other->raw string."
   (should (eq (pg--parse-value "t" pg-oid-bool) t))
   (should (null (pg--parse-value "f" pg-oid-bool)))
   (should (equal (pg--parse-value "unknown" pg-oid-bool) "unknown")))
-
-(ert-deftest clutch-test-pg-parse-value-integers ()
+ (clutch-test-pg-parse-value-integers
   "Integer OIDs: string -> number."
   (should (= (pg--parse-value "42" pg-oid-int2) 42))
   (should (= (pg--parse-value "42" pg-oid-int4) 42))
   (should (= (pg--parse-value "42" pg-oid-int8) 42)))
-
-(ert-deftest clutch-test-pg-parse-value-floats ()
+ (clutch-test-pg-parse-value-floats
   "Float/numeric OIDs: string -> number."
   (should (= (pg--parse-value "3.14" pg-oid-float4) 3.14))
   (should (= (pg--parse-value "3.14" pg-oid-float8) 3.14))
   (should (= (pg--parse-value "1.5" pg-oid-numeric) 1.5)))
-
-(ert-deftest clutch-test-pg-parse-value-date ()
+ (clutch-test-pg-parse-value-date
   "Date OID: string -> plist with :year/:month/:day."
   (let ((result (pg--parse-value "2024-01-15" pg-oid-date)))
     (should (= (plist-get result :year) 2024))
     (should (= (plist-get result :month) 1))
     (should (= (plist-get result :day) 15))))
-
-(ert-deftest clutch-test-pg-parse-value-time ()
+ (clutch-test-pg-parse-value-time
   "Time OID: string -> plist with :hours/:minutes/:seconds."
   (let ((result (pg--parse-value "13:45:30" pg-oid-time)))
     (should (= (plist-get result :hours) 13))
     (should (= (plist-get result :minutes) 45))
     (should (= (plist-get result :seconds) 30))))
-
-(ert-deftest clutch-test-pg-parse-value-timestamp ()
+ (clutch-test-pg-parse-value-timestamp
   "Timestamp OID: string -> plist with :year/:hours."
   (let ((result (pg--parse-value "2024-01-15 13:45:30" pg-oid-timestamp)))
     (should (= (plist-get result :year) 2024))
     (should (= (plist-get result :hours) 13))))
-
-(ert-deftest clutch-test-pg-parse-value-timestamptz ()
+ (clutch-test-pg-parse-value-timestamptz
   "Timestamptz OID: uses same parser as timestamp."
   (let ((result (pg--parse-value "2024-01-15 13:45:30+00" pg-oid-timestamptz)))
     (should (= (plist-get result :year) 2024))))
-
-(ert-deftest clutch-test-pg-parse-value-unknown-oid ()
+ (clutch-test-pg-parse-value-unknown-oid
   "Unknown OID: raw string passthrough."
   (should (equal (pg--parse-value "foo" 99999) "foo"))
   (should (equal (pg--parse-value "" 0) "")))
-
-(ert-deftest clutch-test-pg-parse-value-user-parser-takes-precedence ()
+ (clutch-test-pg-parse-value-user-parser-takes-precedence
   "pg-type-parsers entries override the dispatch table."
   (let ((pg-type-parsers (list (cons pg-oid-int4 (lambda (_v) :custom-result)))))
     (should (eq (pg--parse-value "42" pg-oid-int4) :custom-result))))
-
-(ert-deftest clutch-test-pg-parse-value-user-parser-unknown-oid ()
+ (clutch-test-pg-parse-value-user-parser-unknown-oid
   "pg-type-parsers can add parsers for OIDs not in the dispatch table."
   (let ((pg-type-parsers (list (cons 99999 (lambda (v) (concat "custom:" v))))))
-    (should (equal (pg--parse-value "test" 99999) "custom:test"))))
+    (should (equal (pg--parse-value "test" 99999) "custom:test")))))
 
 ;; Benchmark (uncomment and eval manually; not run by default):
 ;; (ert-deftest clutch-bench-pg-parse-value () :tags '(benchmark)

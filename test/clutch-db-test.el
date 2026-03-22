@@ -1141,35 +1141,56 @@ Skips if `clutch-db-test-mysql-password' is nil."
              (progn ,@body)
            (clutch-db-disconnect ,var))))))
 
-(ert-deftest clutch-db-test-mysql-live-connect ()
-  :tags '(:db-live :mysql-live)
-  "Test MySQL connection via clutch-db-connect."
-  (clutch-db-test--with-mysql conn
-    (should (clutch-db-live-p conn))
-    (should (equal (clutch-db-display-name conn) "MySQL"))))
+(defun clutch-db-test--assert-live-basic-query (conn)
+  "Assert the standard live smoke query against CONN."
+  (let ((result (clutch-db-query conn "SELECT 1 AS n, 'hello' AS s")))
+    (should (clutch-db-result-p result))
+    (should (= (length (clutch-db-result-columns result)) 2))
+    (should (= (length (clutch-db-result-rows result)) 1))
+    (let ((row (car (clutch-db-result-rows result))))
+      (should (= (car row) 1))
+      (should (equal (cadr row) "hello")))))
 
-(ert-deftest clutch-db-test-mysql-live-query ()
-  :tags '(:db-live :mysql-live)
-  "Test MySQL query via clutch-db-query."
-  (clutch-db-test--with-mysql conn
-    (let ((result (clutch-db-query conn "SELECT 1 AS n, 'hello' AS s")))
-      (should (clutch-db-result-p result))
-      (should (= (length (clutch-db-result-columns result)) 2))
-      (should (= (length (clutch-db-result-rows result)) 1))
-      (let ((row (car (clutch-db-result-rows result))))
-        (should (= (car row) 1))
-        (should (equal (cadr row) "hello"))))))
+(defun clutch-db-test--assert-live-basic-dml (conn)
+  "Assert the standard live DML round-trip against CONN."
+  (clutch-db-query conn "CREATE TEMPORARY TABLE _db_test (id INT, val TEXT)")
+  (let ((result (clutch-db-query conn
+                 "INSERT INTO _db_test VALUES (1, 'a'), (2, 'b')")))
+    (should (= (clutch-db-result-affected-rows result) 2)))
+  (let ((result (clutch-db-query conn "SELECT * FROM _db_test")))
+    (should (= (length (clutch-db-result-rows result)) 2))))
 
-(ert-deftest clutch-db-test-mysql-live-dml ()
-  :tags '(:db-live :mysql-live)
-  "Test MySQL DML operations."
-  (clutch-db-test--with-mysql conn
-    (clutch-db-query conn "CREATE TEMPORARY TABLE _db_test (id INT, val TEXT)")
-    (let ((result (clutch-db-query conn
-                   "INSERT INTO _db_test VALUES (1, 'a'), (2, 'b')")))
-      (should (= (clutch-db-result-affected-rows result) 2)))
-    (let ((result (clutch-db-query conn "SELECT * FROM _db_test")))
-      (should (= (length (clutch-db-result-rows result)) 2)))))
+(defmacro clutch-db-test--define-live-basic-tests (prefix with-macro tags display-name)
+  "Define shared live tests for PREFIX using WITH-MACRO and TAGS."
+  `(progn
+     (ert-deftest ,(intern (format "%s-live-connect" prefix)) ()
+       :tags ',tags
+       ,(format "Test %s connection via clutch-db-connect." display-name)
+       (,with-macro conn
+         (should (clutch-db-live-p conn))
+         (should (equal (clutch-db-display-name conn) ,display-name))))
+     (ert-deftest ,(intern (format "%s-live-query" prefix)) ()
+       :tags ',tags
+       ,(format "Test %s query via clutch-db-query." display-name)
+       (,with-macro conn
+         (clutch-db-test--assert-live-basic-query conn)))
+     (ert-deftest ,(intern (format "%s-live-dml" prefix)) ()
+       :tags ',tags
+       ,(format "Test %s DML operations." display-name)
+       (,with-macro conn
+         (clutch-db-test--assert-live-basic-dml conn)))
+     (ert-deftest ,(intern (format "%s-live-error" prefix)) ()
+       :tags ',tags
+       ,(format "Test %s error handling." display-name)
+       (,with-macro conn
+         (should-error (clutch-db-query conn "SELEC BAD")
+                       :type 'clutch-db-error)))))
+
+(clutch-db-test--define-live-basic-tests
+ clutch-db-test-mysql
+ clutch-db-test--with-mysql
+ (:db-live :mysql-live)
+ "MySQL")
 
 (ert-deftest clutch-db-test-mysql-live-schema ()
   :tags '(:db-live :mysql-live)
@@ -1187,13 +1208,6 @@ Skips if `clutch-db-test-mysql-password' is nil."
     (let ((ddl (clutch-db-show-create-table conn "user")))
       (should (stringp ddl))
       (should (string-match-p "CREATE TABLE" ddl)))))
-
-(ert-deftest clutch-db-test-mysql-live-error ()
-  :tags '(:db-live :mysql-live)
-  "Test MySQL error handling."
-  (clutch-db-test--with-mysql conn
-    (should-error (clutch-db-query conn "SELEC BAD")
-                  :type 'clutch-db-error)))
 
 (ert-deftest clutch-db-test-mysql-show-create-table-empty-rows-errors-cleanly ()
   "MySQL show-create-table should signal `clutch-db-error' on empty row sets."
@@ -1223,35 +1237,11 @@ Skips if `clutch-db-test-pg-password' is nil."
            (progn ,@body)
          (clutch-db-disconnect ,var)))))
 
-(ert-deftest clutch-db-test-pg-live-connect ()
-  :tags '(:db-live :pg-live)
-  "Test PostgreSQL connection via clutch-db-connect."
-  (clutch-db-test--with-pg conn
-    (should (clutch-db-live-p conn))
-    (should (equal (clutch-db-display-name conn) "PostgreSQL"))))
-
-(ert-deftest clutch-db-test-pg-live-query ()
-  :tags '(:db-live :pg-live)
-  "Test PostgreSQL query via clutch-db-query."
-  (clutch-db-test--with-pg conn
-    (let ((result (clutch-db-query conn "SELECT 1 AS n, 'hello' AS s")))
-      (should (clutch-db-result-p result))
-      (should (= (length (clutch-db-result-columns result)) 2))
-      (should (= (length (clutch-db-result-rows result)) 1))
-      (let ((row (car (clutch-db-result-rows result))))
-        (should (= (car row) 1))
-        (should (equal (cadr row) "hello"))))))
-
-(ert-deftest clutch-db-test-pg-live-dml ()
-  :tags '(:db-live :pg-live)
-  "Test PostgreSQL DML operations."
-  (clutch-db-test--with-pg conn
-    (clutch-db-query conn "CREATE TEMPORARY TABLE _db_test (id INT, val TEXT)")
-    (let ((result (clutch-db-query conn
-                   "INSERT INTO _db_test VALUES (1, 'a'), (2, 'b')")))
-      (should (= (clutch-db-result-affected-rows result) 2)))
-    (let ((result (clutch-db-query conn "SELECT * FROM _db_test")))
-      (should (= (length (clutch-db-result-rows result)) 2)))))
+(clutch-db-test--define-live-basic-tests
+ clutch-db-test-pg
+ clutch-db-test--with-pg
+ (:db-live :pg-live)
+ "PostgreSQL")
 
 (ert-deftest clutch-db-test-pg-live-schema ()
   :tags '(:db-live :pg-live)
@@ -1277,13 +1267,6 @@ Skips if `clutch-db-test-pg-password' is nil."
       (should (string-match-p "CREATE TABLE" ddl)))
     ;; Cleanup
     (clutch-db-query conn "DROP TABLE IF EXISTS _schema_real")))
-
-(ert-deftest clutch-db-test-pg-live-error ()
-  :tags '(:db-live :pg-live)
-  "Test PostgreSQL error handling."
-  (clutch-db-test--with-pg conn
-    (should-error (clutch-db-query conn "SELEC BAD")
-                  :type 'clutch-db-error)))
 
 ;;;; Live integration tests — JDBC / Oracle
 ;;
