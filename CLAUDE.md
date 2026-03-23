@@ -19,6 +19,14 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Stabilize workflow changes before coding**: For any change that alters a primary entry point, default action, or action menu, write a short design note first. Keep object resolution, action definition, and action presentation separate.
 - **Keep experiments narrow**: Start new directions with the smallest slice that proves the workflow is worth having. Do not expand scope before the first slice shows real user value.
 
+## Error Handling and Testing Discipline
+
+- **Errors must surface, not hide**: Do not add fallback/default returns that silently swallow failures. Let errors propagate immediately.
+- **Catch at the boundary, nowhere else**: Only the outermost API layer (process loop, top-level command handler) should catch and convert exceptions to error responses. Business logic must not `condition-case` around internal calls.
+- **Tests must fail when the code is wrong**: If deleting or breaking the function under test does not turn the test red, the test is worthless. Assert specific, distinguishable output values.
+- **No hard-coded expectations**: Use diverse inputs — multiple data sets, random values, boundary cases — so that a hard-coded return cannot satisfy all assertions.
+- **Red before green**: When fixing a bug, first write a failing test that reproduces it. Confirm it fails. Then fix the code. A test written after the fix has never been proven to catch the bug.
+
 ## Architecture and Implementation
 
 - **Interface / implementation separation**: `mysql.el` and `pg.el` are pure protocol libraries with no UI. `clutch.el` depends on `clutch-db.el`, not protocol layers directly.
