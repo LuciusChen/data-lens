@@ -785,15 +785,19 @@ Falls back to the same row (any column), then point-min."
 
 (defun clutch--refresh-display ()
   "Re-render the current result table after width-affecting changes.
-Preserves cursor position (row + column) and window scroll across the refresh."
+Preserves cursor position (row + column) and the top visible row."
   (when clutch--column-widths
     (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
                           (clutch-result--row-idx-at-line)))
            (save-cidx (get-text-property (point) 'clutch-col-idx))
            (win (get-buffer-window (current-buffer)))
            (win-width (if win (window-body-width win) 80))
-           (win-line (when (and win save-ridx)
-                       (count-lines (window-start win) (point)))))
+           (save-top-ridx
+            (when win
+              (with-selected-window win
+                (save-excursion
+                  (goto-char (window-start win))
+                  (clutch-result--row-idx-at-line))))))
       (setq clutch--last-window-width win-width)
       (setq clutch--header-active-col nil)
       (when clutch--row-overlay
@@ -802,9 +806,13 @@ Preserves cursor position (row + column) and window scroll across the refresh."
       (clutch--render-result)
       (when save-ridx
         (clutch--goto-cell save-ridx save-cidx)
-        (when (and win win-line)
+        (when (and win (integerp save-top-ridx))
           (with-selected-window win
-            (recenter win-line)))))))
+            (when-let* ((top-pos (and (vectorp clutch--row-start-positions)
+                                      (<= 0 save-top-ridx)
+                                      (< save-top-ridx (length clutch--row-start-positions))
+                                      (aref clutch--row-start-positions save-top-ridx))))
+              (set-window-start win top-pos))))))))
 
 (defun clutch--window-size-change (frame)
   "Handle window size changes for clutch display buffers in FRAME."

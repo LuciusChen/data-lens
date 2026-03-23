@@ -362,6 +362,65 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should (equal (get-text-property 0 'display rendered)
                        '(space :align-to 0)))))))
 
+(ert-deftest clutch-test-refresh-display-preserves-visible-row-position ()
+  "Refreshing the result view should not drift point downward on screen."
+  (save-window-excursion
+    (let ((buf (get-buffer-create " *clutch-refresh-display*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer buf)
+            (with-current-buffer buf
+              (clutch-result-mode)
+              (setq-local clutch--result-columns '("c1" "c2" "c3"))
+              (setq-local clutch--result-column-defs '(nil nil nil))
+              (setq-local clutch--result-rows
+                          (cl-loop for i from 1 to 40
+                                   collect (list (format "row%02d-a" i)
+                                                 (format "row%02d-b" i)
+                                                 (format "row%02d-c" i))))
+              (setq-local clutch--filtered-rows nil)
+              (setq-local clutch--pending-edits nil)
+              (setq-local clutch--pending-deletes nil)
+              (setq-local clutch--pending-inserts nil)
+              (setq-local clutch--marked-rows nil)
+              (setq-local clutch--sort-column nil)
+              (setq-local clutch--sort-descending nil)
+              (setq-local clutch--page-current 0)
+              (setq-local clutch--page-total-rows 40)
+              (setq-local clutch--column-widths [8 8 8])
+              (clutch--refresh-display)
+              (let* ((win (selected-window))
+                     (top-ridx 10)
+                     (point-ridx 15))
+                (set-window-start win (aref clutch--row-start-positions top-ridx))
+                (goto-char (aref clutch--row-start-positions point-ridx))
+                (forward-char 2)
+                (let ((before-top-ridx
+                       (save-excursion
+                         (goto-char (window-start win))
+                         (clutch-result--row-idx-at-line)))
+                      (before-line
+                       (count-screen-lines (window-start win)
+                                           (line-beginning-position))))
+                  (clutch--refresh-display)
+                  (should (= (save-excursion
+                               (goto-char (window-start win))
+                               (clutch-result--row-idx-at-line))
+                             before-top-ridx))
+                  (should (= (count-screen-lines (window-start win)
+                                                 (line-beginning-position))
+                             before-line))
+                  (clutch--refresh-display)
+                  (should (= (save-excursion
+                               (goto-char (window-start win))
+                               (clutch-result--row-idx-at-line))
+                             before-top-ridx))
+                  (should (= (count-screen-lines (window-start win)
+                                                 (line-beginning-position))
+                             before-line))))))
+        (when (buffer-live-p buf)
+          (kill-buffer buf))))))
+
 ;;;; Unit tests — SQL query detection
 
 (ert-deftest clutch-test-sql-has-limit-p ()
