@@ -2855,6 +2855,173 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                   "no primary key detected for table users"
                   (error-message-string err))))))))
 
+(ert-deftest clutch-test-build-delete-stmt-generates-where-from-pk ()
+  "DELETE statement should use primary key columns in WHERE clause."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn id) (format "\"%s\"" id)))
+              ((symbol-function 'clutch-db-escape-literal)
+               (lambda (_conn v) (format "'%s'" v))))
+      (let ((stmt (clutch-result--build-delete-stmt
+                   "orders"
+                   '(42 "alice" "2024-01-15")
+                   '("id" "customer" "created_at")
+                   '(0))))
+        (should (string-match-p "DELETE FROM \"orders\"" stmt))
+        (should (string-match-p "WHERE \"id\" = 42" stmt))
+        (should-not (string-match-p "customer" stmt))
+        (should-not (string-match-p "created_at" stmt))))))
+
+(ert-deftest clutch-test-build-delete-stmt-compound-pk ()
+  "DELETE with compound primary key should AND all PK columns."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn id) (format "\"%s\"" id)))
+              ((symbol-function 'clutch-db-escape-literal)
+               (lambda (_conn v) (format "'%s'" v))))
+      (let ((stmt (clutch-result--build-delete-stmt
+                   "order_items"
+                   '(7 99 3)
+                   '("order_id" "item_id" "qty")
+                   '(0 1))))
+        (should (string-match-p "WHERE \"order_id\" = 7 AND \"item_id\" = 99" stmt))
+        (should-not (string-match-p "qty" stmt))))))
+
+(ert-deftest clutch-test-build-delete-stmt-null-pk-uses-is-null ()
+  "DELETE should use IS NULL for NULL primary key values."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn id) (format "\"%s\"" id)))
+              ((symbol-function 'clutch-db-escape-literal)
+               (lambda (_conn v) (format "'%s'" v))))
+      (let ((stmt (clutch-result--build-delete-stmt
+                   "events"
+                   '(nil "orphan")
+                   '("parent_id" "name")
+                   '(0))))
+        (should (string-match-p "WHERE \"parent_id\" IS NULL" stmt))
+        (should-not (string-match-p "= NULL" stmt))))))
+
+(ert-deftest clutch-test-next-page-errors-on-last-page ()
+  "Next page should error when current page has fewer rows than page size."
+  (with-temp-buffer
+    (setq-local clutch--result-rows '((1) (2))
+                clutch-result-max-rows 10)
+    (should-error (clutch-result-next-page) :type 'user-error)))
+
+(ert-deftest clutch-test-next-page-advances-when-full ()
+  "Next page should advance when the page is full."
+  (with-temp-buffer
+    (setq-local clutch--result-rows (make-list 50 '(1))
+                clutch-result-max-rows 50
+                clutch--page-current 0)
+    (let (executed-page)
+      (cl-letf (((symbol-function 'clutch--execute-page)
+                 (lambda (p) (setq executed-page p))))
+        (clutch-result-next-page)
+        (should (= executed-page 1))))))
+
+(ert-deftest clutch-test-prev-page-errors-on-first-page ()
+  "Previous page should error when already on page 0."
+  (with-temp-buffer
+    (setq-local clutch--page-current 0)
+    (should-error (clutch-result-prev-page) :type 'user-error)))
+
+(ert-deftest clutch-test-prev-page-goes-back ()
+  "Previous page should decrement the page number."
+  (with-temp-buffer
+    (setq-local clutch--page-current 3)
+    (let (executed-page)
+      (cl-letf (((symbol-function 'clutch--execute-page)
+                 (lambda (p) (setq executed-page p))))
+        (clutch-result-prev-page)
+        (should (= executed-page 2))))))
+
+(ert-deftest clutch-test-first-page-errors-when-already-first ()
+  "First page should error when already on page 0."
+  (with-temp-buffer
+    (setq-local clutch--page-current 0)
+    (should-error (clutch-result-first-page) :type 'user-error)))
+
+(ert-deftest clutch-test-first-page-jumps-to-zero ()
+  "First page should go to page 0."
+  (with-temp-buffer
+    (setq-local clutch--page-current 5)
+    (let (executed-page)
+      (cl-letf (((symbol-function 'clutch--execute-page)
+                 (lambda (p) (setq executed-page p))))
+        (clutch-result-first-page)
+        (should (= executed-page 0))))))
+
+(ert-deftest clutch-test-last-page-calculates-correct-page ()
+  "Last page should calculate page number from total rows and page size."
+  (with-temp-buffer
+    (setq-local clutch--page-current 0
+                clutch--page-total-rows 237
+                clutch-result-max-rows 50)
+    (let (executed-page)
+      (cl-letf (((symbol-function 'clutch--execute-page)
+                 (lambda (p) (setq executed-page p))))
+        (clutch-result-last-page)
+        ;; 237 rows / 50 per page = 5 pages (0..4), last page = 4
+        (should (= executed-page 4))))))
+
+(ert-deftest clutch-test-last-page-errors-when-already-last ()
+  "Last page should error when already on the last page."
+  (with-temp-buffer
+    (setq-local clutch--page-current 4
+                clutch--page-total-rows 237
+                clutch-result-max-rows 50)
+    (should-error (clutch-result-last-page) :type 'user-error)))
+
+(ert-deftest clutch-test-last-page-single-page-result ()
+  "Last page should error when total rows fit in one page."
+  (with-temp-buffer
+    (setq-local clutch--page-current 0
+                clutch--page-total-rows 30
+                clutch-result-max-rows 50)
+    (should-error (clutch-result-last-page) :type 'user-error)))
+
+(ert-deftest clutch-test-sort-by-column-toggles-direction ()
+  "Sorting the same column twice should toggle ascending/descending."
+  (with-temp-buffer
+    (setq-local clutch--sort-column "name"
+                clutch--sort-descending nil)
+    (let (sort-args)
+      (cl-letf (((symbol-function 'clutch-result--read-column)
+                 (lambda () "name"))
+                ((symbol-function 'clutch-result--sort)
+                 (lambda (col desc) (setq sort-args (list col desc)))))
+        (clutch-result-sort-by-column)
+        (should (equal sort-args '("name" t)))))))
+
+(ert-deftest clutch-test-sort-by-column-new-column-defaults-ascending ()
+  "Sorting a different column should default to ascending."
+  (with-temp-buffer
+    (setq-local clutch--sort-column "name"
+                clutch--sort-descending t)
+    (let (sort-args)
+      (cl-letf (((symbol-function 'clutch-result--read-column)
+                 (lambda () "age"))
+                ((symbol-function 'clutch-result--sort)
+                 (lambda (col desc) (setq sort-args (list col desc)))))
+        (clutch-result-sort-by-column)
+        (should (equal sort-args '("age" nil)))))))
+
+(ert-deftest clutch-test-sort-by-column-desc-always-descending ()
+  "Sort descending command should always pass descending=t."
+  (with-temp-buffer
+    (let (sort-args)
+      (cl-letf (((symbol-function 'clutch-result--read-column)
+                 (lambda () "created_at"))
+                ((symbol-function 'clutch-result--sort)
+                 (lambda (col desc) (setq sort-args (list col desc)))))
+        (clutch-result-sort-by-column-desc)
+        (should (equal sort-args '("created_at" t)))))))
+
 (ert-deftest clutch-test-render-cell-uses-render-state-edits ()
   "Cell rendering should use render-state lookups instead of alist scans."
   (with-temp-buffer
