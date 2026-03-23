@@ -3500,6 +3500,51 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           (should (member "user_id" candidates))
           (should-not (member "logs" candidates)))))))
 
+(ert-deftest clutch-test-completion-at-point-uses-alias-qualified-table-for-sync-column-loading ()
+  "Alias-qualified completion should only load columns for the referenced table."
+  (with-temp-buffer
+    (insert "select u.na from users u join posts p on u.id = p.user_id")
+    (goto-char (point-min))
+    (search-forward "na")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake)
+          seen)
+      (puthash "users" nil schema)
+      (puthash "posts" nil schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (_conn _schema table)
+                   (push table seen)
+                   (pcase table
+                     ("users" '("name" "nickname"))
+                     ("posts" '("title" "body"))
+                     (_ nil)))))
+        (let* ((capf (clutch-completion-at-point))
+               (candidates (nth 2 capf)))
+          (should capf)
+          (should (equal seen '("users")))
+          (should (member "name" candidates))
+          (should (member "nickname" candidates))
+          (should-not (member "title" candidates))
+          (should-not (member "users" candidates))
+          (should-not (member "posts" candidates)))))))
+
+(ert-deftest clutch-test-table-scan-does-not-consume-join-as-previous-table-alias ()
+  "JOIN should not be consumed as the previous table's optional alias.
+Otherwise the scanner skips past the JOIN token and misses the joined table."
+  (with-temp-buffer
+    (insert "select p.title from users join posts p on users.id = p.user_id")
+    (let ((entry (clutch--compute-tables-in-query-cache nil)))
+      (should (equal (plist-get entry :statement-tables)
+                     '("users" "posts")))
+      (should (equal (plist-get entry :statement-aliases)
+                     '(("p" . "posts")))))))
+
 (ert-deftest clutch-test-completion-at-point-uses-direct-table-candidates-without-schema-cache ()
   "Direct backend table completion should work without a schema cache."
   (with-temp-buffer
@@ -3603,6 +3648,44 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           (should capf)
           (should (member "PARA_ID" candidates))
           (should (member "PARA_NAME" candidates)))))))
+
+(ert-deftest clutch-test-completion-at-point-uses-alias-qualified-table-for-direct-column-loading ()
+  "Alias-qualified completion should only query direct columns for the referenced table."
+  (with-temp-buffer
+    (insert "select u.pa from ZJ_SYS_PARA u join ZJ_LOG p on u.id = p.para_id")
+    (goto-char (point-min))
+    (search-forward "pa")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake)
+          seen)
+      (puthash "ZJ_SYS_PARA" nil schema)
+      (puthash "ZJ_LOG" nil schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (&rest _args)
+                   (error "should not synchronously load columns")))
+                ((symbol-function 'clutch-db-complete-columns)
+                 (lambda (_conn table prefix)
+                   (push table seen)
+                   (should (equal prefix "pa"))
+                   (pcase table
+                     ("ZJ_SYS_PARA" '("PARA_ID" "PARA_NAME"))
+                     ("ZJ_LOG" '("PAYLOAD"))
+                     (_ nil)))))
+        (let* ((capf (clutch-completion-at-point))
+               (candidates (nth 2 capf)))
+          (should capf)
+          (should (equal seen '("ZJ_SYS_PARA")))
+          (should (member "PARA_ID" candidates))
+          (should (member "PARA_NAME" candidates))
+          (should-not (member "PAYLOAD" candidates))
+          (should-not (member "ZJ_SYS_PARA" candidates))
+          (should-not (member "ZJ_LOG" candidates)))))))
 
 (ert-deftest clutch-test-sql-keyword-completion-honors-lowercase-style ()
   "Keyword completion should honor `clutch-sql-completion-case-style'."

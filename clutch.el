@@ -487,6 +487,7 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar clutch--result-column-defs)
 (defvar clutch--result-columns)
 (defvar clutch--result-rows)
+(defvar clutch--sql-keywords)
 (defvar clutch--sort-column)
 (defvar clutch--sort-descending)
 (defvar clutch--where-filter)
@@ -2441,24 +2442,37 @@ executed outside clutch that would otherwise leave stale completions."
            (text (buffer-substring-no-properties beg end))
            (case-fold-search t)
            found
-           (statement-tables
-            (progn
-              (maphash
-               (lambda (tbl _cols)
-                 (when (string-match-p
-                        (format "\\b\\(from\\|join\\|update\\|into\\)[ \t\n]+%s\\b"
-                                (regexp-quote tbl))
-                        text)
-                   (push tbl found)))
-               schema)
-              (nreverse found))))
-    (list :schema schema
-          :tick tick
-          :beg beg
-          :end end
-          :statement-tables statement-tables
-          :tables (or statement-tables
-                      (clutch--tables-in-buffer schema))))))
+           aliases
+           (pos 0))
+      (while (string-match
+              "\\b\\(from\\|join\\|update\\|into\\)\\s-+\\([[:alnum:]_$#.`\"]+\\)"
+              text pos)
+        (let* ((table-token (match-string 2 text))
+               (table (clutch--normalize-statement-table-token table-token))
+               (table-end (match-end 2))
+               (alias-consumed-end table-end))
+          (setq pos table-end)
+          (when (and (string-match
+                      "\\s-+\\(?:as\\s-+\\)?\\([[:alnum:]_$#`\"]+\\)"
+                      text table-end)
+                     (= (match-beginning 0) table-end))
+            (when-let* ((alias-token (match-string 1 text))
+                        (alias (clutch--normalize-statement-table-token alias-token))
+                        ((not (member (upcase alias) clutch--sql-keywords))))
+              (setq alias-consumed-end (match-end 0))
+              (push (cons alias table) aliases)))
+          (setq pos alias-consumed-end)
+          (when table
+            (push table found))))
+      (let ((statement-tables (nreverse (delete-dups found))))
+        (list :schema schema
+              :tick tick
+              :beg beg
+              :end end
+              :statement-tables statement-tables
+              :statement-aliases (nreverse aliases)
+              :tables (or statement-tables
+                          (clutch--tables-in-buffer schema)))))))
 
 (defun clutch--tables-in-query-cache-entry (schema)
   "Return the cache entry for table analysis on SCHEMA, refreshing if needed."
@@ -2477,6 +2491,10 @@ executed outside clutch that would otherwise leave stale completions."
 (defun clutch--tables-in-current-statement (schema)
   "Return known table names mentioned in the current statement only."
   (plist-get (clutch--tables-in-query-cache-entry schema) :statement-tables))
+
+(defun clutch--table-aliases-in-current-statement (schema)
+  "Return alias-to-table mappings mentioned in the current statement."
+  (plist-get (clutch--tables-in-query-cache-entry schema) :statement-aliases))
 
 (defun clutch--tables-in-query (schema)
   "Return known table names in FROM/JOIN/UPDATE clauses of current statement.
@@ -2510,6 +2528,19 @@ blank lines.  Falls back to `clutch--tables-in-buffer' when none are found."
         (when-let* ((tbl (clutch--normalize-statement-table-token (match-string 2 text))))
           (push tbl found)))
       (nreverse (delete-dups found)))))
+
+(defun clutch--qualified-identifier-qualifier (beg)
+  "Return the qualifier token immediately preceding BEG, or nil.
+For input like `u.name', returns `u' when BEG starts at `name'."
+  (save-excursion
+    (goto-char beg)
+    (when (eq (char-before) ?.)
+      (backward-char)
+      (buffer-substring-no-properties
+       (save-excursion
+         (skip-chars-backward "[:alnum:]_$#`\"")
+         (point))
+       (point)))))
 
 (defconst clutch--sql-keywords
   '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"
@@ -2953,6 +2984,8 @@ when completion triggers during an in-flight query)."
            (prefix (buffer-substring-no-properties beg end))
            (prefix-len (- end beg))
            (schema (clutch--schema-for-connection))
+           (qualifier (and schema
+                           (clutch--qualified-identifier-qualifier beg)))
            (line-before (buffer-substring-no-properties
                          (line-beginning-position) beg))
            (table-context-p
@@ -2961,15 +2994,26 @@ when completion triggers during an in-flight query)."
              (upcase line-before)))
            (busy (clutch-db-busy-p conn))
            (sync-columns-p (clutch-db-completion-sync-columns-p conn))
+           (statement-aliases
+            (and schema (clutch--table-aliases-in-current-statement schema)))
            (direct-table-candidates
             (when (and table-context-p
                        (>= prefix-len clutch--schema-inline-min-prefix-length))
               (clutch--safe-completion-call
                (lambda () (clutch-db-complete-tables conn prefix)))))
+           (qualified-table
+            (when qualifier
+              (or (cdr (assoc-string qualifier statement-aliases t))
+                  (let ((normalized (clutch--normalize-statement-table-token qualifier)))
+                    (when (member normalized
+                                  (or (and schema (clutch--tables-in-current-statement schema))
+                                      (clutch--statement-table-identifiers)))
+                      normalized)))))
            (context-tables
             (unless (or table-context-p busy
                         (< prefix-len clutch--schema-inline-min-prefix-length))
-              (let ((tables (or (and schema (clutch--tables-in-current-statement schema))
+              (let ((tables (or (and qualified-table (list qualified-table))
+                                (and schema (clutch--tables-in-current-statement schema))
                                 (clutch--statement-table-identifiers))))
                 (when (and tables
                            (<= (length tables) clutch--schema-inline-table-limit))
@@ -2983,7 +3027,8 @@ when completion triggers during an in-flight query)."
             (if prefer-keyword-p
                 nil
               (if context-tables
-                (let ((all (copy-sequence context-tables)))
+                (let ((all (unless qualified-table
+                             (copy-sequence context-tables))))
                   (dolist (tbl context-tables)
                     (let ((cols
                            (if sync-columns-p
