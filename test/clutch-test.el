@@ -4988,6 +4988,29 @@ Otherwise the scanner skips past the JOIN token and misses the joined table."
       (should (string-match-p "show definition" (format "%s" header-line-format)))
       (should-not (string-match-p "PUBLIC.orders" (format "%s" header-line-format))))))
 
+(ert-deftest clutch-test-render-object-describe-fontifies-short-standalone-index-name ()
+  "Short standalone index names in describe buffers should be highlighted."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'clutch--bind-connection-context) #'ignore)
+              ((symbol-function 'clutch--icon-with-face) (lambda (&rest _) "[desc]"))
+              ((symbol-function 'clutch--ensure-table-comment) (lambda (&rest _) nil))
+              ((symbol-function 'clutch--ensure-column-details) (lambda (&rest _) nil))
+              ((symbol-function 'clutch-db-list-columns) (lambda (&rest _) nil))
+              ((symbol-function 'clutch--object-related-entries)
+               (lambda (_conn _entry type)
+                 (pcase type
+                   ("INDEX"
+                    (list (list :name "IDX_FFP_RECEIPT_CODE" :unique nil)
+                          (list :name "idx_rcc" :unique nil)))
+                   (_ nil)))))
+      (clutch--render-object-describe
+       'fake-conn
+       '(:name "ffp_order_consign" :type "TABLE" :source-schema "zj_test"))
+      (goto-char (point-min))
+      (re-search-forward "^  \\(idx_rcc\\)")
+      (should (eq (get-text-property (match-beginning 1) 'face)
+                  'font-lock-variable-name-face)))))
+
 (ert-deftest clutch-test-browse-table-inserts-escaped-select ()
   "Browse-table compatibility wrapper should still escape identifiers."
   (with-temp-buffer

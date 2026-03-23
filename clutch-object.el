@@ -1024,7 +1024,9 @@ selection can surface objects from different Oracle sources and types."
           (add-face-text-property (match-beginning 1) (match-end 1)
                                   'font-lock-keyword-face t)))
       (goto-char (point-min))
-      (while (re-search-forward "^  \\([A-Za-z][A-Za-z /_-]+?\\)\\(?:[[:space:]]\\{2,\\}\\|:\\)" nil t)
+      (while (re-search-forward
+              "^  \\([A-Za-z][A-Za-z0-9/_-]*\\(?: [A-Za-z0-9/_-]+\\)*\\)\\(?:[[:blank:]]\\{2,\\}\\|:\\|$\\)"
+              nil t)
         (add-face-text-property (match-beginning 1) (match-end 1)
                                 'font-lock-variable-name-face t))
       (goto-char (point-min))
