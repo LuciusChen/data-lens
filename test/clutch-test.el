@@ -111,19 +111,49 @@
 
 (ert-deftest clutch-test-json-value-to-string-hash-table ()
   "JSON viewer should accept parsed JSON objects."
-  (skip-unless (fboundp 'json-serialize))
   (let ((obj (make-hash-table :test 'equal)))
     (puthash "a" 1 obj)
     (should (equal (clutch--json-value-to-string obj) "{\"a\":1}"))))
 
 (ert-deftest clutch-test-json-value-to-string-scalars ()
   "JSON scalar values should remain valid JSON when edited or viewed."
-  (skip-unless (fboundp 'json-serialize))
   (should (equal (clutch--json-value-to-string "hello") "\"hello\""))
   (should (equal (clutch--json-value-to-string nil) "null"))
   (should (equal (clutch--json-value-to-string t) "true"))
   (should (equal (clutch--json-value-to-string :false) "false"))
   (should (equal (clutch--json-value-to-string 42) "42")))
+
+(ert-deftest clutch-test-connection-oracle-jdbc-p-returns-nil-for-non-jdbc-connections ()
+  "Oracle JDBC detection should return nil for non-JDBC connections."
+  (cl-letf (((symbol-function 'clutch-jdbc-conn-p)
+             (lambda (_conn) nil)))
+    (should-not (clutch--connection-oracle-jdbc-p 'fake-conn))))
+
+(ert-deftest clutch-test-connection-oracle-jdbc-p-propagates-jdbc-param-errors ()
+  "Oracle JDBC detection should not hide JDBC parameter accessor failures."
+  (cl-letf (((symbol-function 'clutch-jdbc-conn-p)
+             (lambda (_conn) t))
+            ((symbol-function 'clutch-jdbc-conn-params)
+             (lambda (_conn)
+               (signal 'error '("jdbc param boom")))))
+    (should-error (clutch--connection-oracle-jdbc-p 'fake-conn) :type 'error)))
+
+(ert-deftest clutch-test-backend-key-from-conn-returns-nil-for-unknown-non-jdbc-backends ()
+  "Backend key detection should return nil when the connection is not JDBC."
+  (cl-letf (((symbol-function 'clutch-jdbc-conn-p)
+             (lambda (_conn) nil))
+            ((symbol-function 'clutch-db-display-name)
+             (lambda (_conn) "DuckDB")))
+    (should-not (clutch--backend-key-from-conn 'fake-conn))))
+
+(ert-deftest clutch-test-backend-key-from-conn-propagates-jdbc-param-errors ()
+  "Backend key detection should expose JDBC accessor failures."
+  (cl-letf (((symbol-function 'clutch-jdbc-conn-p)
+             (lambda (_conn) t))
+            ((symbol-function 'clutch-jdbc-conn-params)
+             (lambda (_conn)
+               (signal 'error '("backend key boom")))))
+    (should-error (clutch--backend-key-from-conn 'fake-conn) :type 'error)))
 
 
 (ert-deftest clutch-test-dispatch-view-json-category-serializes-non-string ()
@@ -1449,6 +1479,40 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
               (should (equal (buffer-string) "severity: critical\n")))))
       (kill-buffer result-buf)
       (kill-buffer insert-buf))))
+
+(ert-deftest clutch-test-edit-column-detail-propagates-metadata-errors ()
+  "Edit metadata lookup should not silently hide column-detail failures."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch-result--detect-table)
+               (lambda () "shipping_incidents"))
+              ((symbol-function 'clutch--ensure-column-details)
+               (lambda (&rest _args)
+                 (signal 'clutch-db-error '("column detail boom")))))
+      (should-error (clutch-result--column-detail (current-buffer) "severity")
+                    :type 'clutch-db-error))))
+
+(ert-deftest clutch-test-edit-complete-field-propagates-capf-errors ()
+  "Edit completion should not swallow `completion-at-point' failures."
+  (with-temp-buffer
+    (setq-local clutch-result-edit--column-name "severity")
+    (clutch-result-edit-mode 1)
+    (cl-letf (((symbol-function 'completion-at-point)
+               (lambda ()
+                 (error "capf boom"))))
+      (should-error (clutch-result-edit-complete-field) :type 'error))))
+
+(ert-deftest clutch-test-insert-complete-field-propagates-capf-errors ()
+  "Insert completion should not swallow `completion-at-point' failures."
+  (with-temp-buffer
+    (insert "severity: \n")
+    (clutch-result-insert-mode 1)
+    (cl-letf (((symbol-function 'completion-at-point)
+               (lambda ()
+                 (error "capf boom"))))
+      (goto-char (point-min))
+      (goto-char (clutch-result-insert--current-field-value-start))
+      (should-error (clutch-result-insert-complete-field) :type 'error))))
 
 (ert-deftest clutch-test-execute-select-detects-primary-key-before-first-render ()
   "Primary key cache should be ready before the first result render."
@@ -4175,7 +4239,8 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   "Warmup should reschedule when background metadata fetch hits `clutch-db-error'."
   (let ((clutch--object-cache (make-hash-table :test 'equal))
         (clutch--object-warmup-timers (make-hash-table :test 'equal))
-        timer-fns)
+        timer-fns
+        warned)
     (cl-letf (((symbol-function 'clutch--object-cache-key)
                (lambda (_conn) "fake-key"))
               ((symbol-function 'clutch--connection-alive-p)
@@ -4184,6 +4249,9 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                (lambda (_conn) nil))
               ((symbol-function 'clutch-db-busy-p)
                (lambda (_conn) nil))
+              ((symbol-function 'clutch--warn-completion-metadata-error-once)
+               (lambda (message-text)
+                 (setq warned message-text)))
               ((symbol-function 'run-with-idle-timer)
                (lambda (_secs _repeat fn)
                  (push fn timer-fns)
@@ -4197,7 +4265,32 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (clutch--schedule-object-warmup 'fake-conn)
       (should (= (length timer-fns) 1))
       (funcall (car timer-fns))
-      (should (= (length timer-fns) 2)))))
+      (should (= (length timer-fns) 2))
+      (should (string-match-p "warmup boom" warned)))))
+
+(ert-deftest clutch-test-object-warmup-warns-on-connection-liveness-errors ()
+  "Warmup should warn instead of silently hiding recoverable liveness failures."
+  (let ((clutch--object-cache (make-hash-table :test 'equal))
+        (clutch--object-warmup-timers (make-hash-table :test 'equal))
+        warned
+        scheduled)
+    (cl-letf (((symbol-function 'clutch--object-cache-key)
+               (lambda (_conn) "fake-key"))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn)
+                 (signal 'clutch-db-error '("alive boom"))))
+              ((symbol-function 'clutch--object-cache-loaded-categories)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--warn-completion-metadata-error-once)
+               (lambda (message-text)
+                 (setq warned message-text)))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (&rest _args)
+                 (setq scheduled t)
+                 'fake-timer)))
+      (clutch--schedule-object-warmup 'fake-conn)
+      (should (string-match-p "alive boom" warned))
+      (should-not scheduled))))
 
 (ert-deftest clutch-test-object-warmup-propagates-non-db-errors ()
   "Warmup should still expose programming errors that are not db-runtime races."
@@ -4506,10 +4599,12 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
                 clutch-browser-current-object '(:name "BQS_BERTH" :type "TABLE"))
-    (cl-letf (((symbol-function 'thing-at-point)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t))
+              ((symbol-function 'thing-at-point)
                (lambda (&rest _) "BQS_BERTH_0807"))
               ((symbol-function 'clutch--object-matches-by-name)
-               (lambda (_conn name &optional _table-like-only)
+               (lambda (_conn name &optional _table-like-only _allowed-types)
                  (should (equal name "BQS_BERTH_0807"))
                            '((:name "BQS_BERTH_0807" :type "TABLE")))))
       (should (equal (clutch--resolve-object-entry "Referenced by: ")

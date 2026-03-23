@@ -96,8 +96,8 @@
 
 (ert-deftest clutch-db-test-jdbc-fetch-all-preserves-row-order ()
   "JDBC fetch-all should preserve batch order while avoiding repeated tail scans."
-  (let ((batches '((:rows ((3) (4)) :done nil)
-                   (:rows ((5)) :done t)))
+  (let ((batches '((:rows (("alpha" 17) ("beta" 23)) :done nil)
+                   (:rows (("omega" -9)) :done t)))
         (conn (make-clutch-jdbc-conn :params '(:rpc-timeout 9))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
                (lambda (op params &optional timeout-seconds)
@@ -106,7 +106,7 @@
                  (should (= timeout-seconds 9))
                  (pop batches))))
       (should (equal (clutch-jdbc--fetch-all conn 9)
-                     '((3) (4) (5)))))))
+                     '(("alpha" 17) ("beta" 23) ("omega" -9)))))))
 
 (ert-deftest clutch-db-test-jdbc-referencing-objects-maps-rpc-response ()
   "JDBC reverse-reference lookup should map RPC rows to object entries."
@@ -115,14 +115,17 @@
                (lambda (op params &optional _timeout-seconds)
                  (setq captured-op op
                        captured-params params)
-                 '(:objects ((:name "ORDERS" :schema "APP")
-                             (:name "PAYMENTS" :schema "APP"))))))
+                 '(:objects ((:name "SALES_ORDERS" :schema "APP"
+                              :source-schema "APP_OWNER")
+                             (:name "INVOICE_ITEMS" :schema "BILLING"))))))
       (should (equal
                (clutch-db-referencing-objects
                 (make-clutch-jdbc-conn :conn-id 7 :params '(:backend oracle :schema "APP"))
                 "CUSTOMERS")
-               '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP")
-                 (:name "PAYMENTS" :type "TABLE" :schema "APP" :source-schema "APP"))))
+               '((:name "SALES_ORDERS" :type "TABLE"
+                  :schema "APP" :source-schema "APP_OWNER")
+                 (:name "INVOICE_ITEMS" :type "TABLE"
+                  :schema "BILLING" :source-schema "BILLING"))))
       (should (equal captured-op "get-referencing-objects"))
       (should (= (alist-get 'conn-id captured-params) 7))
       (should (equal (alist-get 'table captured-params) "CUSTOMERS"))
@@ -146,15 +149,15 @@
                      :database "svc"
                      :user "scott"
                      :password "tiger"
-                     :connect-timeout 11
-                     :read-idle-timeout 12
-                     :rpc-timeout 13))))
+                     :connect-timeout 7
+                     :read-idle-timeout 23
+                     :rpc-timeout 41))))
         (should (equal captured-op "connect"))
-        (should (= captured-timeout 11))
+        (should (= captured-timeout 7))
         (should (eq (alist-get 'auto-commit captured-params) clutch-jdbc--json-false))
-        (should (= (alist-get 'connect-timeout-seconds captured-params) 11))
-        (should (= (alist-get 'network-timeout-seconds captured-params) 12))
-        (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 13))
+        (should (= (alist-get 'connect-timeout-seconds captured-params) 7))
+        (should (= (alist-get 'network-timeout-seconds captured-params) 23))
+        (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 41))
         (should (= (clutch-jdbc-conn-conn-id conn) 7))))))
 
 (ert-deftest clutch-db-test-jdbc-connect-non-oracle-sends-autocommit-true ()

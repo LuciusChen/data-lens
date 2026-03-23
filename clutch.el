@@ -52,6 +52,7 @@
 (defvar clutch--describe-object-entry)
 
 (declare-function nerd-icons--function-name "nerd-icons" (name))
+(declare-function clutch-jdbc-conn-p "clutch-db-jdbc" (conn))
 (declare-function clutch-jdbc-conn-params "clutch-db-jdbc" (conn))
 (declare-function clutch-db-browseable-object-entries "clutch-db" (conn))
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
@@ -656,9 +657,9 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
 (defun clutch--connection-oracle-jdbc-p (conn)
   "Return non-nil when CONN is a JDBC Oracle connection."
   (and conn
-       (fboundp 'clutch-jdbc-conn-params)
-       (ignore-errors
-         (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle))))
+       (fboundp 'clutch-jdbc-conn-p)
+       (clutch-jdbc-conn-p conn)
+       (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)))
 
 (defun clutch--sql-leading-keyword (sql)
   "Return the leading SQL keyword for SQL, or nil."
@@ -913,9 +914,9 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
 
 (defun clutch--backend-key-from-conn (conn)
   "Return backend icon key for live connection CONN, or nil."
-  (or (and (fboundp 'clutch-jdbc-conn-params)
-           (ignore-errors
-             (plist-get (clutch-jdbc-conn-params conn) :driver)))
+  (or (and (fboundp 'clutch-jdbc-conn-p)
+           (clutch-jdbc-conn-p conn)
+           (plist-get (clutch-jdbc-conn-params conn) :driver))
       (pcase (clutch-db-display-name conn)
         ("MySQL" 'mysql)
         ("PostgreSQL" 'pg)

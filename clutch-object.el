@@ -41,6 +41,7 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--connection-key "clutch" (conn))
 (declare-function clutch--refresh-current-schema "clutch" (&optional silent))
 (declare-function clutch--schema-for-connection "clutch-schema" (&optional conn))
+(declare-function clutch--warn-completion-metadata-error-once "clutch" (message-text))
 (declare-function clutch--warn-schema-cache-state "clutch" (&optional conn))
 
 (defun clutch--object-type-allowed-p (entry allowed-types)
@@ -66,6 +67,16 @@ This currently matches the connection identity and is structured as a helper so
 future schema switching can widen the key without touching all call sites."
   (or (clutch--connection-key conn)
       (format "%S" conn)))
+
+(defun clutch--object-connection-alive-p (conn)
+  "Return non-nil when CONN is usable for object metadata work.
+Recoverable database liveness-check failures are warned once and treated as
+temporarily unavailable."
+  (condition-case err
+      (clutch--connection-alive-p conn)
+    (clutch-db-error
+     (clutch--warn-completion-metadata-error-once (error-message-string err))
+     nil)))
 
 ;;;; Object discovery
 
@@ -261,7 +272,7 @@ future schema switching can widen the key without touching all call sites."
                          clutch--object-categories)))
     (cond
      ((or (not conn)
-          (not (ignore-errors (clutch--connection-alive-p conn)))
+          (not (clutch--object-connection-alive-p conn))
           (null next))
       (clutch--cancel-object-warmup conn))
      ((gethash key clutch--object-warmup-timers)
@@ -273,8 +284,8 @@ future schema switching can widen the key without touching all call sites."
         clutch-object-warmup-idle-delay-seconds nil
         (lambda ()
           (remhash key clutch--object-warmup-timers)
-          (when (and conn (ignore-errors (clutch--connection-alive-p conn)))
-            (condition-case nil
+          (when (and conn (clutch--object-connection-alive-p conn))
+            (condition-case err
                 (if (clutch-db-busy-p conn)
                     (clutch--schedule-object-warmup conn)
                   (let ((type (clutch--object-category-type next)))
@@ -284,20 +295,22 @@ future schema switching can widen the key without touching all call sites."
                               conn next
                               (lambda (entries)
                                 (when (and conn
-                                           (ignore-errors (clutch--connection-alive-p conn)))
+                                           (clutch--object-connection-alive-p conn))
                                   (clutch--store-object-cache-type-entries conn type entries)
                                   (clutch--schedule-object-warmup conn)))
                               (lambda (&rest _)
                                 (when (and conn
-                                           (ignore-errors (clutch--connection-alive-p conn)))
+                                           (clutch--object-connection-alive-p conn))
                                   (clutch--schedule-object-warmup conn)))))
                       (progn
                         (when type
                           (clutch--object-type-entries conn type))
                         (clutch--schedule-object-warmup conn)))))
-              (clutch-db-error
+              (clutch-db-error err
+               (clutch--warn-completion-metadata-error-once
+                (error-message-string err))
                (when (and conn
-                          (ignore-errors (clutch--connection-alive-p conn)))
+                          (clutch--object-connection-alive-p conn))
                  (clutch--schedule-object-warmup conn)))))))
        clutch--object-warmup-timers)))))
 
@@ -519,7 +532,7 @@ When TABLE-LIKE-ONLY is non-nil, only consider table-like matches."
 (defun clutch--object-matches-at-point (&optional table-like-only allowed-types)
   "Return matching object entries for the symbol at point."
   (when-let* ((conn clutch-connection)
-              ((ignore-errors (clutch--connection-alive-p conn)))
+              ((clutch--object-connection-alive-p conn))
               (sym (thing-at-point 'symbol t)))
     (clutch--object-matches-by-name conn sym table-like-only allowed-types)))
 

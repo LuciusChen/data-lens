@@ -139,9 +139,8 @@ Scans text properties across the line."
 (defun clutch-result--column-detail (result-buf col-name)
   "Return schema detail plist for COL-NAME in RESULT-BUF, or nil."
   (with-current-buffer result-buf
-    (when-let* ((table (ignore-errors (clutch-result--detect-table)))
-                (details (ignore-errors
-                           (clutch--ensure-column-details clutch-connection table))))
+    (when-let* ((table (clutch-result--detect-table))
+                (details (clutch--ensure-column-details clutch-connection table)))
       (cl-find-if (lambda (detail)
                     (equal (plist-get detail :name) col-name))
                   details))))
@@ -195,12 +194,10 @@ Scans text properties across the line."
     (nreverse tags)))
 
 (defun clutch-result--field-validation-message (field-name value col-def detail)
-  "Return a validation message for FIELD-NAME/VALUE, or nil."
-  (condition-case err
-      (progn
-        (clutch-result--validate-field-value field-name value col-def detail)
-        nil)
-    (user-error (error-message-string err))))
+  "Validate FIELD-NAME/VALUE for COL-DEF/DETAIL.
+Return nil when validation succeeds, or signal `user-error' when invalid."
+  (clutch-result--validate-field-value field-name value col-def detail)
+  nil)
 
 (defun clutch-result-edit--field-candidates ()
   "Return completion candidates for the current edit buffer, or nil."
@@ -270,11 +267,13 @@ Scans text properties across the line."
   "Return a validation message for the current edit buffer, or nil."
   (let* ((raw-value (string-trim-right (buffer-string)))
          (value (if (string= raw-value "NULL") nil raw-value)))
-    (clutch-result--field-validation-message
-     clutch-result-edit--column-name
-     value
-     clutch-result-edit--column-def
-     clutch-result-edit--column-detail)))
+    (condition-case err
+        (clutch-result--field-validation-message
+         clutch-result-edit--column-name
+         value
+         clutch-result-edit--column-def
+         clutch-result-edit--column-detail)
+      (user-error (error-message-string err)))))
 
 (defun clutch-result-edit--validate-live ()
   "Run local validation for the current edit buffer and refresh UI."
@@ -306,9 +305,7 @@ All field types use the same delay so feedback timing is consistent."
 (defun clutch-result-edit-complete-field ()
   "Complete the current edit buffer when the column has candidates."
   (interactive)
-  (let ((handled (condition-case nil
-                     (completion-at-point)
-                   (error nil))))
+  (let ((handled (completion-at-point)))
     (unless handled
       (let* ((candidates (or (clutch-result-edit--field-candidates)
                              (user-error "No completion candidates for %s"
@@ -1046,7 +1043,9 @@ Use \\[clutch-result-commit] in the result buffer to commit."
          (col-def (or (plist-get field :column-def)
                       (clutch-result-insert--column-def name))))
     (unless (string-empty-p value)
-      (clutch-result--field-validation-message name value col-def detail))))
+      (condition-case err
+          (clutch-result--field-validation-message name value col-def detail)
+        (user-error (error-message-string err))))))
 
 (defun clutch-result-insert--validate-field-live (field)
   "Run local validation for structured FIELD and update inline UI."
@@ -1348,9 +1347,7 @@ TIME defaults to `current-time'."
 First try standard `completion-at-point' so Corfu/Company can integrate.
 If nothing handles the completion, fall back to `completing-read'."
   (interactive)
-  (let ((handled (condition-case nil
-                     (completion-at-point)
-                   (error nil))))
+  (let ((handled (completion-at-point)))
     (unless handled
       (let* ((field-name (or (clutch-result-insert--current-field-name)
                              (user-error "Point is not on an insert field")))
