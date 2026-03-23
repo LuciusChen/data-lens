@@ -14,14 +14,10 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (defvar clutch--cached-pk-indices)
 (defvar clutch--cell-default-placeholder)
 (defvar clutch--cell-generated-placeholder)
-(defvar-local clutch--column-pages nil
-  "Vector of vectors containing non-pinned column indices per page.")
 (defvar-local clutch--column-widths nil
   "Vector of display widths for each result column.")
 (defvar clutch--conn-sql-product)
 (defvar clutch--connection-params)
-(defvar-local clutch--current-col-page 0
-  "Current column page index.")
 (defvar-local clutch--dml-result nil
   "Non-nil when this result buffer shows a DML result.")
 (defvar-local clutch--filter-pattern nil
@@ -32,6 +28,8 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "Filtered subset of `clutch--result-rows', or nil when unfiltered.")
 (defvar-local clutch--header-active-col nil
   "Column index currently highlighted in the header, or nil.")
+(defvar-local clutch--header-line-string nil
+  "Full header-line string before hscroll adjustment.")
 (defvar-local clutch--last-window-width nil
   "Last known window body width for the current result buffer.")
 (defvar-local clutch--marked-rows nil
@@ -48,8 +46,6 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "Alist of pending edits: ((PK-VEC . COL-IDX) . NEW-VALUE).")
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.")
-(defvar-local clutch--pinned-columns nil
-  "List of column indices pinned across all column pages.")
 (defvar-local clutch--query-elapsed nil
   "Elapsed time in seconds for the last query execution.")
 (defvar-local clutch--result-column-defs nil
@@ -95,13 +91,11 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (declare-function clutch--cell-placeholder-value "clutch" (value))
 (declare-function clutch--center-padding-widths "clutch" (content-width total-width))
 (declare-function clutch--column-names "clutch" (columns))
-(declare-function clutch--compute-column-pages "clutch" (widths pinned available-width))
 (declare-function clutch--compute-column-widths "clutch" (col-names rows columns))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table))
 (declare-function clutch--format-elapsed "clutch" (seconds))
 (declare-function clutch--format-value "clutch" (value))
 (declare-function clutch--numeric-type-p "clutch" (col-def))
-(declare-function clutch--replace-edge-borders "clutch" (s has-prev has-next))
 (declare-function clutch--render-separator "clutch"
                   (visible-cols widths position))
 (declare-function clutch--result-buffer-name "clutch" ())
@@ -211,9 +205,9 @@ the real rendered width, preventing column misalignment."
     (overlay-put clutch--executed-sql-overlay 'help-echo
                  (format "Last executed SQL (%d chars)" (- tend tbeg)))))
 
-(defun clutch--header-label (name cidx)
-  "Build the display label for column NAME at index CIDX.
-Prepends sort indicator and pin marker before the name."
+(defun clutch--header-label (name)
+  "Build the display label for column NAME.
+Prepends the sort indicator when the column is active."
   (let* ((sort (when (and clutch--sort-column
                           (string= name clutch--sort-column))
                  (let ((s (clutch--fixed-width-icon
@@ -222,12 +216,9 @@ Prepends sort indicator and pin marker before the name."
                              '(codicon . "nf-cod-arrow_up"))
                            (if clutch--sort-descending "▼" "▲"))))
                    (when s
-                     (propertize s 'clutch-header-icon t)))))
-         (pin (when (memq cidx clutch--pinned-columns)
-                (let ((s (clutch--icon '(mdicon . "nf-md-pin") "∎")))
-                  (propertize s 'clutch-header-icon t)))))
-    (if (or sort pin)
-        (concat (or sort "") (or pin "") (if (or sort pin) " " "") name)
+                     (propertize s 'clutch-header-icon t))))))
+    (if sort
+        (concat sort " " name)
       name)))
 
 (defun clutch--render-header (visible-cols widths)
@@ -239,7 +230,7 @@ so the active-column overlay can find it."
     (dolist (cidx visible-cols)
       (let* ((name (nth cidx clutch--result-columns))
              (w (aref widths cidx))
-             (label (clutch--header-label name cidx))
+             (label (clutch--header-label name))
              (truncated (if (> (string-width label) w)
                             (truncate-string-to-width label w)
                           label))
@@ -247,9 +238,7 @@ so the active-column overlay can find it."
              (lead (make-string (car pads) ?\s))
              (trail (make-string (cdr pads) ?\s))
              (cell (concat lead truncated trail))
-             (face (if (memq cidx clutch--pinned-columns)
-                       'clutch-pinned-header-face
-                     'clutch-header-face))
+             (face 'clutch-header-face)
              (pad-str (make-string padding ?\s)))
         ;; Append base face so icon-specific face (e.g. pin color) is preserved.
         (add-face-text-property 0 (length cell) face 'append cell)
@@ -492,8 +481,7 @@ Returns a list of propertized strings (may be empty)."
                 (propertize "PK missing" 'face warn-text)
                 (propertize " E/D off" 'face warn-text))))))
 
-(defun clutch--footer-main-parts (row-count page-num page-size
-                                             total-rows col-num-pages col-cur-page)
+(defun clutch--footer-main-parts (row-count page-num page-size total-rows)
   "Return list of main footer part strings for pagination state."
   (let* ((hi 'font-lock-keyword-face)
          (dim 'font-lock-comment-face)
@@ -507,9 +495,6 @@ Returns a list of propertized strings (may be empty)."
                    (propertize (format "%d" (1+ page-num)) 'face hi)
                    (propertize "/" 'face dim)
                    (propertize (format "%d" (or total-pages 1)) 'face hi))
-           (when (> col-num-pages 1)
-             (concat (clutch--footer-icon '(codicon . "nf-cod-split_horizontal") "⫼" hi)
-                     (propertize (format "%d/%d" col-cur-page col-num-pages) 'face hi)))
            (clutch--tx-header-line-segment clutch-connection)
            (clutch--footer-sort-part)
            (clutch--footer-mutation-capability-part)
@@ -519,23 +504,22 @@ Returns a list of propertized strings (may be empty)."
                      (propertize (clutch--format-elapsed clutch--query-elapsed)
                                  'face hi)))))))
 
-(defun clutch--render-footer (row-count page-num page-size
-                                        total-rows col-num-pages col-cur-page)
+(defun clutch--render-footer (row-count page-num page-size total-rows)
   "Return the mode-line footer string for pagination state."
   (let ((sep (propertize "  •  " 'face 'font-lock-comment-face)))
     (mapconcat #'identity
                (append (clutch--footer-main-parts row-count page-num page-size
-                                                  total-rows col-num-pages col-cur-page)
+                                                  total-rows)
                        (clutch--footer-filter-parts))
                sep)))
 
 (defun clutch--effective-widths ()
   "Return column widths adjusted for header indicator icons.
-Columns with sort or pin indicators get wider to fit the label."
+Columns with sort indicators get wider to fit the label."
   (let ((widths (copy-sequence clutch--column-widths)))
     (dotimes (cidx (length widths))
       (let* ((name (nth cidx clutch--result-columns))
-             (label (clutch--header-label name cidx))
+             (label (clutch--header-label name))
              (label-w (string-width label)))
         (when (> label-w (aref widths cidx))
           (aset widths cidx label-w))))
@@ -547,7 +531,7 @@ WIDTHS is the effective width vector.
 ACTIVE-CIDX is the highlighted column index, if any."
   (let* ((name (nth cidx clutch--result-columns))
          (w (aref widths cidx))
-         (label (clutch--header-label name cidx))
+         (label (clutch--header-label name))
          (truncated (if (> (string-width label) w)
                         (truncate-string-to-width label w)
                       label))
@@ -557,8 +541,6 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (label (copy-sequence truncated))
          (face (cond
                 ((eql cidx active-cidx) 'clutch-header-active-face)
-                ((memq cidx clutch--pinned-columns)
-                 'clutch-pinned-header-face)
                 (t 'clutch-header-face)))
          (pad-str (make-string clutch-column-padding ?\s)))
     ;; Append base/underline style without overwriting icon-specific face.
@@ -580,35 +562,44 @@ ACTIVE-CIDX is the highlighted column index, if any."
             (propertize trail 'face face)
             pad-str)))
 
-(defun clutch--build-header-line (visible-cols widths nw
-                                                  has-prev has-next
-                                                  &optional active-cidx)
+(defun clutch--build-header-line (visible-cols widths nw &optional active-cidx)
   "Build the header-line-format string for the column header row.
 VISIBLE-COLS, WIDTHS describe columns.
 NW is the digit width for the row number column.
-HAS-PREV/HAS-NEXT control edge border indicators.
 ACTIVE-CIDX highlights that column when non-nil."
-  (let* ((edge (lambda (s) (clutch--replace-edge-borders s has-prev has-next)))
-         (bface 'clutch-border-face)
+  (let* ((bface 'clutch-border-face)
          (pad-str (make-string clutch-column-padding ?\s))
          (cells (mapcar (lambda (cidx)
                           (clutch--header-cell cidx widths active-cidx))
                         visible-cols))
-         (data-header (funcall edge
-                               (concat (apply #'concat cells)
-                                       (propertize "│" 'face bface)))))
+         (data-header (concat (apply #'concat cells)
+                              (propertize "│" 'face bface))))
     ;; 1 char for mark column + nw for row number + padding
     (concat (propertize "│" 'face bface)
             " " (make-string nw ?\s) pad-str
             data-header)))
 
-(defun clutch--build-separator (visible-cols widths position
-                                                   nw edge-fn)
+(defun clutch--header-line-with-hscroll ()
+  "Return the header string shifted to match `window-hscroll'.
+The header-line should track body hscroll exactly."
+  (when clutch--header-line-string
+    (let* ((hs (window-hscroll))
+           (str clutch--header-line-string)
+           (len (length str)))
+      (if (>= hs len)
+          ""
+        (substring str hs)))))
+
+(defun clutch--header-line-display ()
+  "Return the display-ready header-line string for result buffers."
+  (concat (propertize " " 'display '(space :align-to 0))
+          (or (clutch--header-line-with-hscroll) "")))
+
+(defun clutch--build-separator (visible-cols widths position nw)
   "Build a table separator line with row-number column.
 VISIBLE-COLS and WIDTHS describe data columns.
 POSITION is \\='top, \\='middle, or \\='bottom.
-NW is the row-number digit width.
-EDGE-FN applies column-page edge indicators."
+NW is the row-number digit width."
   (let* ((bface 'clutch-border-face)
          ;; +1 for the mark column char
          (rn-dash (+ 1 nw clutch-column-padding))
@@ -616,17 +607,14 @@ EDGE-FN applies column-page edge indicators."
          (cross (pcase position ('top "┬") ('bottom "┴") (_ "┼")))
          (left (pcase position ('top "┌") ('bottom "└") (_ "├")))
          (data-part (concat cross (substring raw 1)))
-         (data-edged (funcall edge-fn (propertize data-part 'face bface)))
          (rn (propertize (concat left (make-string rn-dash ?─)) 'face bface)))
-    (concat rn data-edged)))
+    (concat rn (propertize data-part 'face bface))))
 
 (defun clutch--insert-data-rows (rows visible-cols widths nw
-                                      global-first-row edge-fn row-positions
-                                      render-state)
+                                      global-first-row row-positions render-state)
   "Insert data ROWS into the current buffer.
 VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
 GLOBAL-FIRST-ROW is the 0-based offset for numbering.
-EDGE-FN applies column-page edge indicators.
 ROW-POSITIONS stores line starts keyed by rendered row index.
 RENDER-STATE contains render lookup tables for pending UI state."
   (let ((bface 'clutch-border-face)
@@ -641,9 +629,8 @@ RENDER-STATE contains render lookup tables for pending UI state."
                                   (gethash (clutch-result--extract-pk-vec row pk-indices)
                                            delete-table))
              for editedp = (clutch--row-pending-edit-p row ridx render-state)
-             for data-row = (let ((r (funcall edge-fn
-                                              (clutch--render-row
-                                               row ridx visible-cols widths render-state))))
+             for data-row = (let ((r (clutch--render-row
+                                      row ridx visible-cols widths render-state)))
                                (if deletingp
                                    (propertize r 'face 'clutch-pending-delete-face)
                                  r))
@@ -695,24 +682,20 @@ RENDER-STATE contains render lookup tables for pending UI state."
                         pad-str
                         data-row "\n"))))
 
-(defun clutch--update-result-line-formats (rows col-num-pages cur-page
-                                                has-prev has-next
-                                                visible-cols widths nw)
+(defun clutch--update-result-line-formats (rows visible-cols widths nw)
   "Set mode-line-format and header-line-format for the result buffer."
   (setq mode-line-format
         (concat (propertize " " 'display '(space :align-to 0))
                 (clutch--render-footer
                  (length rows) clutch--page-current
-                 clutch-result-max-rows clutch--page-total-rows
-                 col-num-pages (1+ cur-page))))
-  (setq header-line-format
-        (concat (propertize " " 'display '(space :align-to 0))
-                (clutch--build-header-line visible-cols widths nw
-                                           has-prev has-next
-                                           clutch--header-active-col))))
+                 clutch-result-max-rows clutch--page-total-rows)))
+  (setq clutch--header-line-string
+        (clutch--build-header-line visible-cols widths nw
+                                   clutch--header-active-col))
+  (setq header-line-format '(:eval (clutch--header-line-display))))
 
 (defun clutch--render-result ()
-  "Render the result buffer content using column paging.
+  "Render the result buffer content as one horizontally scrollable table.
 Preserves point position (row + column) across the render."
   (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
                         (clutch-result--row-idx-at-line)))
@@ -722,11 +705,6 @@ Preserves point position (row + column) across the render."
          (widths (clutch--effective-widths))
          (rows (or clutch--filtered-rows clutch--result-rows))
          (render-state (clutch--build-render-state))
-         (col-num-pages (length clutch--column-pages))
-         (cur-page clutch--current-col-page)
-         (has-prev (> cur-page 0))
-         (has-next (< cur-page (1- col-num-pages)))
-         (edge-fn (lambda (s) (clutch--replace-edge-borders s has-prev has-next)))
          (nw (clutch--row-number-digits))
          (row-positions (make-vector (+ (length rows)
                                         (length clutch--pending-inserts))
@@ -734,9 +712,8 @@ Preserves point position (row + column) across the render."
          (global-first-row (* clutch--page-current clutch-result-max-rows)))
     (erase-buffer)
     (setq clutch--row-start-positions row-positions)
-    (clutch--update-result-line-formats rows col-num-pages cur-page
-                                        has-prev has-next visible-cols widths nw)
-    (clutch--insert-data-rows rows visible-cols widths nw global-first-row edge-fn
+    (clutch--update-result-line-formats rows visible-cols widths nw)
+    (clutch--insert-data-rows rows visible-cols widths nw global-first-row
                               row-positions render-state)
     (clutch--insert-pending-insert-rows visible-cols widths nw (length rows)
                                         row-positions render-state)
@@ -747,6 +724,21 @@ Preserves point position (row + column) across the render."
 (defun clutch--col-idx-at-point ()
   "Return the column index at point, from data cells."
   (get-text-property (point) 'clutch-col-idx))
+
+(defun clutch--ensure-point-visible-horizontally ()
+  "Scroll the selected result window horizontally when point leaves view."
+  (when-let* ((win (get-buffer-window (current-buffer))))
+    (let* ((margin 2)
+           (col (current-column))
+           (hscroll (window-hscroll win))
+           (width (max 1 (window-body-width win))))
+      (cond
+       ((< col (+ hscroll margin))
+        (set-window-hscroll win (max 0 (- col margin))))
+       ((>= col (- (+ hscroll width) margin))
+        (set-window-hscroll
+         win
+         (max 0 (- col width (1- margin)))))))))
 
 (defun clutch--goto-cell (ridx cidx)
   "Move point to the cell at ROW-IDX RIDX and COL-IDX CIDX.
@@ -780,7 +772,8 @@ Falls back to the same row (any column), then point-min."
         (goto-char (point-min))
         (if-let* ((m (text-property-search-forward 'clutch-row-idx ridx #'eq)))
             (goto-char (prop-match-beginning m))
-          (goto-char (point-min)))))))
+          (goto-char (point-min)))))
+    (clutch--ensure-point-visible-horizontally)))
 
 (defun clutch--row-number-digits ()
   "Return the digit width needed for row numbers."
@@ -791,7 +784,7 @@ Falls back to the same row (any column), then point-min."
     (max 3 (length (number-to-string global-last)))))
 
 (defun clutch--refresh-display ()
-  "Recompute column pages for current window width and re-render.
+  "Re-render the current result table after width-affecting changes.
 Preserves cursor position (row + column) and window scroll across the refresh."
   (when clutch--column-widths
     (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
@@ -800,17 +793,7 @@ Preserves cursor position (row + column) and window scroll across the refresh."
            (win (get-buffer-window (current-buffer)))
            (win-width (if win (window-body-width win) 80))
            (win-line (when (and win save-ridx)
-                       (count-lines (window-start win) (point))))
-           (nw (clutch--row-number-digits))
-           (width (- win-width 1 (* 2 clutch-column-padding) nw)))
-      (setq clutch--column-pages
-            (clutch--compute-column-pages
-             (clutch--effective-widths)
-             clutch--pinned-columns
-             width))
-      (let ((max-page (1- (length clutch--column-pages))))
-        (setq clutch--current-col-page
-              (max 0 (min clutch--current-col-page max-page))))
+                       (count-lines (window-start win) (point)))))
       (setq clutch--last-window-width win-width)
       (setq clutch--header-active-col nil)
       (when clutch--row-overlay
@@ -904,8 +887,6 @@ IGNORE-BUFFER is excluded from liveness checks."
   (setq-local clutch--pending-deletes nil)
   (setq-local clutch--pending-inserts nil)
   (setq-local clutch--marked-rows nil)
-  (setq-local clutch--current-col-page 0)
-  (setq-local clutch--pinned-columns nil)
   (setq-local clutch--sort-column nil)
   (setq-local clutch--sort-descending nil)
   (setq-local clutch--page-current 0)

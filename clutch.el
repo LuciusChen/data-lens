@@ -24,7 +24,7 @@
 ;; Provides:
 ;; - `clutch-mode': SQL editing major mode (derived from `sql-mode')
 ;; - `clutch-repl': REPL via `comint-mode'
-;; - Query execution with column-paged result tables
+;; - Query execution with horizontally scrollable result tables
 ;; - Object discovery and completion
 ;;
 ;; Entry points:
@@ -55,6 +55,8 @@
 (declare-function clutch-jdbc-conn-p "clutch-db-jdbc" (conn))
 (declare-function clutch-jdbc-conn-params "clutch-db-jdbc" (conn))
 (declare-function clutch-db-browseable-object-entries "clutch-db" (conn))
+(declare-function clutch--ensure-point-visible-horizontally "clutch-ui" ())
+(declare-function clutch--header-line-display "clutch-ui" ())
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
 
 ;;;; Customization
@@ -103,11 +105,6 @@
   "Face for the active insert-buffer field prefix."
   :group 'clutch)
 
-(defface clutch-pinned-header-face
-  '((t :inherit clutch-header-face))
-  "Face for pinned column headers."
-  :group 'clutch)
-
 (defface clutch-header-active-face
   '((t :inherit hl-line :weight bold))
   "Face for the column header under the cursor."
@@ -116,11 +113,6 @@
 (defface clutch-border-face
   '((t :inherit shadow))
   "Face for table borders (pipes and separators)."
-  :group 'clutch)
-
-(defface clutch-col-page-face
-  '((t :inherit warning :weight bold))
-  "Face for column-page scroll indicators (◂ and ▸) at table edges."
   :group 'clutch)
 
 (defface clutch-object-source-face
@@ -460,14 +452,13 @@ Dynamically bound by `clutch--execute-and-mark'.")
      nil)))
 
 (defvar clutch--aggregate-summary)
-(defvar clutch--column-pages)
 (defvar clutch--column-widths)
-(defvar clutch--current-col-page)
 (defvar clutch--dml-result)
 (defvar clutch--filter-pattern)
 (defvar clutch--fk-info)
 (defvar clutch--filtered-rows)
 (defvar clutch--header-active-col)
+(defvar clutch--header-line-string)
 (defvar clutch--last-window-width)
 (defvar clutch--marked-rows)
 (defvar clutch--order-by)
@@ -476,7 +467,6 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar clutch--pending-deletes)
 (defvar clutch--pending-edits)
 (defvar clutch--pending-inserts)
-(defvar clutch--pinned-columns)
 (defvar clutch--query-elapsed)
 (defvar clutch--refine-callback)
 (defvar clutch--refine-excluded-cols)
@@ -1430,47 +1420,10 @@ Returns a vector of integers."
           (aset widths i (max 5 (min max-w (max header-w data-w)))))))
     widths))
 
-(defun clutch--compute-column-pages (widths pinned window-width)
-  "Compute column pages based on WIDTHS, PINNED columns, and WINDOW-WIDTH.
-Each column occupies width + 2*padding + 1 (pipe separator).
-PINNED columns are always shown and their width is deducted first.
-Returns a vector of vectors, each containing non-pinned column indices."
-  (let* ((padding clutch-column-padding)
-         (ncols (length widths))
-         (pinned-total (+ 1 ;; leading pipe
-                          (cl-reduce #'+ (mapcar (lambda (i)
-                                                   (+ (aref widths i) (* 2 padding) 1))
-                                                 pinned)
-                                     :initial-value 0)))
-         (available (max 10 (- window-width pinned-total)))
-         (pages nil)
-         (current-page nil)
-         (used 0))
-    (dotimes (i ncols)
-      (unless (memq i pinned)
-        (let ((col-w (+ (aref widths i) (* 2 padding) 1)))
-          (when (and current-page (> (+ used col-w) available))
-            (push (vconcat (nreverse current-page)) pages)
-            (setq current-page nil
-                  used 0))
-          (push i current-page)
-          (cl-incf used col-w))))
-    (when current-page
-      (push (vconcat (nreverse current-page)) pages))
-    (if pages
-        (vconcat (nreverse pages))
-      (vector (vector)))))
-
 (defun clutch--visible-columns ()
-  "Return list of column indices visible on the current page.
-Pinned columns come first, followed by the current page's columns."
-  (let ((page-cols (when (and clutch--column-pages
-                              (< clutch--current-col-page
-                                 (length clutch--column-pages)))
-                     (append (aref clutch--column-pages
-                                   clutch--current-col-page)
-                             nil))))
-    (append clutch--pinned-columns page-cols)))
+  "Return the column indices rendered in the result buffer."
+  (cl-loop for i below (length clutch--result-columns)
+           collect i))
 
 ;;;; Result display
 
@@ -1507,7 +1460,7 @@ Uses the full connection key so each console gets its own result buffer."
 
 (defun clutch--render-static-table (col-names rows &optional column-defs)
   "Render a table string from COL-NAMES and ROWS.
-Uses the same visual style as the column-paged result renderer.
+Uses the same visual style as the result renderer.
 COLUMN-DEFS, if provided, is used for long-field detection.
 Returns a string (with text properties)."
   (let* ((clutch--result-columns col-names)
@@ -1535,25 +1488,6 @@ Returns a string (with text properties)."
              do (push (clutch--render-row row ridx all-cols widths render-state) lines))
     (push sep-bot lines)
     (mapconcat #'identity (nreverse lines) "\n")))
-
-;;;; Column-paged renderer
-
-(defun clutch--replace-edge-borders (str has-prev has-next)
-  "Replace edge border characters in STR with page indicators.
-When HAS-PREV is non-nil, replace the first border char with `◂'.
-When HAS-NEXT is non-nil, replace the last border char with `▸'."
-  (when has-prev
-    (let ((c (aref str 0)))
-      (when (memq c '(?│ ?┌ ?├ ?└ ?┬ ?┼ ?┴))
-        (setq str (concat (propertize "◂" 'face 'clutch-col-page-face)
-                          (substring str 1))))))
-  (when has-next
-    (let* ((len (length str))
-           (c (aref str (1- len))))
-      (when (memq c '(?│ ?┐ ?┤ ?┘))
-        (setq str (concat (substring str 0 (1- len))
-                           (propertize "▸" 'face 'clutch-col-page-face))))))
-  str)
 
 (defun clutch--render-separator (visible-cols widths &optional position)
   "Render a separator line for VISIBLE-COLS with WIDTHS.
@@ -1739,8 +1673,6 @@ the result data, ELAPSED the query time.  Returns column names."
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil
                 clutch--marked-rows nil
-                clutch--current-col-page 0
-                clutch--pinned-columns nil
                 clutch--sort-column nil
                 clutch--sort-descending nil
                 clutch--page-current 0
@@ -2274,15 +2206,10 @@ to execute or \\[clutch-indirect-abort] to abort."
   "Refresh the result buffer status line without rebuilding the table body."
   (when (derived-mode-p 'clutch-result-mode)
     (let* ((rows (or clutch--filtered-rows clutch--result-rows))
-           (col-num-pages (length clutch--column-pages))
-           (cur-page clutch--current-col-page)
-           (has-prev (> cur-page 0))
-           (has-next (< cur-page (1- col-num-pages)))
            (visible-cols (clutch--visible-columns))
            (widths (clutch--effective-widths))
            (nw (clutch--row-number-digits)))
-      (clutch--update-result-line-formats rows col-num-pages cur-page
-                                          has-prev has-next visible-cols widths nw))))
+      (clutch--update-result-line-formats rows visible-cols widths nw))))
 
 (defun clutch--refresh-schema-status-ui (conn)
   "Refresh mode-line or status line in buffers attached to CONN."
@@ -3162,6 +3089,7 @@ Key bindings:
                                                (lambda (_val cur) cur))))
         (goto-char (prop-match-beginning m))
       (goto-char start)))
+  (clutch--ensure-point-visible-horizontally)
   (when (use-region-p)
     (setq deactivate-mark nil)))
 
@@ -3176,6 +3104,7 @@ Key bindings:
                                                 (lambda (_val cur) cur))))
         (goto-char (prop-match-beginning m))
       (goto-char start)))
+  (clutch--ensure-point-visible-horizontally)
   (when (use-region-p)
     (setq deactivate-mark nil)))
 
@@ -3185,6 +3114,7 @@ Key bindings:
   (when-let* ((cidx (clutch--col-idx-at-point))
               (ridx (get-text-property (point) 'clutch-row-idx)))
     (clutch--goto-cell (1+ ridx) cidx))
+  (clutch--ensure-point-visible-horizontally)
   (when (use-region-p)
     (setq deactivate-mark nil)))
 
@@ -3195,6 +3125,7 @@ Key bindings:
               (ridx (get-text-property (point) 'clutch-row-idx))
               ((> ridx 0)))
     (clutch--goto-cell (1- ridx) cidx))
+  (clutch--ensure-point-visible-horizontally)
   (when (use-region-p)
     (setq deactivate-mark nil)))
 
@@ -3271,12 +3202,10 @@ Priority: region rows > current row."
     (define-key map "v" #'clutch-result-view-value)
     (define-key map "W" #'clutch-result-apply-filter)
     (define-key map (kbd "RET") #'clutch-result-open-record)
-    (define-key map "]" #'clutch-result-next-col-page)
-    (define-key map "[" #'clutch-result-prev-col-page)
+    (define-key map "]" #'clutch-result-scroll-right)
+    (define-key map "[" #'clutch-result-scroll-left)
     (define-key map "=" #'clutch-result-widen-column)
     (define-key map "-" #'clutch-result-narrow-column)
-    (define-key map (kbd "C-c p") #'clutch-result-pin-column)
-    (define-key map (kbd "C-c P") #'clutch-result-unpin-column)
     (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
     (define-key map "f" #'clutch-result-fullscreen-toggle)
     (define-key map (kbd "C-c ?") #'clutch-result-dispatch)
@@ -3360,20 +3289,15 @@ Rebuilds `header-line-format' with the active column highlighted."
         (setq clutch--header-active-col cidx)
         (let* ((visible-cols (clutch--visible-columns))
                (widths (clutch--effective-widths))
-               (col-num-pages (length clutch--column-pages))
-               (cur-page clutch--current-col-page)
-               (has-prev (> cur-page 0))
-               (has-next (< cur-page (1- col-num-pages)))
                (nw (clutch--row-number-digits)))
+          (setq clutch--header-line-string
+                (clutch--build-header-line visible-cols widths nw cidx))
           (setq header-line-format
-                (concat (propertize " " 'display '(space :align-to 0))
-                        (clutch--build-header-line
-                         visible-cols widths nw
-                         has-prev has-next cidx))))))))
+                '(:eval (clutch--header-line-display))))))))
 
 
 (define-derived-mode clutch-result-mode special-mode "clutch-result"
-  "Mode for displaying database query results with SQL pagination.
+  "Mode for displaying database query results as one scrollable table.
 
 \\<clutch-result-mode-map>
 Navigate:
@@ -3393,8 +3317,8 @@ Navigate (row):
   \\[clutch-result-last-page]	Last data page
   \\[clutch-result-count-total]	Query total row count
   \\[clutch-result-aggregate]	Aggregate current/selected column values
-  \\[clutch-result-next-col-page]	Next column page
-  \\[clutch-result-prev-col-page]	Previous column page
+  \\[clutch-result-scroll-right]	Scroll right
+  \\[clutch-result-scroll-left]	Scroll left
 Copy:
   \\[clutch-result-copy-dispatch]	Copy… (transient: choose format, -r to refine)
   \\[clutch-result-export]	Export all rows (copy/file)
@@ -3407,8 +3331,6 @@ Edit:
   \\[clutch-result-sort-by-column-desc]	Sort descending (SQL ORDER BY)
   \\[clutch-result-widen-column]	Widen column
   \\[clutch-result-narrow-column]	Narrow column
-  \\[clutch-result-pin-column]	Pin column
-  \\[clutch-result-unpin-column]	Unpin column
   \\[clutch-result-rerun]	Re-execute the query"
   (setq truncate-lines t)
   (hl-line-mode 1)
@@ -4526,10 +4448,11 @@ Includes a header row with column names."
   "Move point to the first data cell matching COL-IDX in the buffer."
   (goto-char (point-min))
   (when-let* ((found (text-property-search-forward 'clutch-col-idx col-idx #'eq)))
-    (goto-char (prop-match-beginning found))))
+    (goto-char (prop-match-beginning found))
+    (clutch--ensure-point-visible-horizontally)))
 
 (defun clutch-result-goto-column ()
-  "Jump to the column page containing a specific column."
+  "Jump to a specific result column."
   (interactive)
   (unless clutch--result-columns
     (user-error "No result columns"))
@@ -4537,18 +4460,7 @@ Includes a header row with column names."
          (choice (completing-read "Go to column: " col-names nil t))
          (idx (cl-position choice col-names :test #'string=)))
     (when idx
-      (let ((target-page nil))
-        (if (memq idx clutch--pinned-columns)
-            (setq target-page clutch--current-col-page)
-          (cl-loop for pi from 0 below (length clutch--column-pages)
-                   when (cl-find idx (aref clutch--column-pages pi))
-                   do (setq target-page pi)))
-        (if (null target-page)
-            (user-error "Column %s not found in pages" choice)
-          (unless (= target-page clutch--current-col-page)
-            (setq clutch--current-col-page target-page)
-            (clutch--render-result))
-          (clutch-result--goto-col-idx idx))))))
+      (clutch-result--goto-col-idx idx))))
 
 (defun clutch-result-export ()
   "Export the current result.
@@ -4794,24 +4706,17 @@ When STMTS is nil, build statements from the current pending state."
              (length stmts) (if (= (length stmts) 1) "" "s")
              path)))
 
-;;;; Column page navigation and width adjustment
+;;;; Horizontal scrolling and width adjustment
 
-(defun clutch-result-next-col-page ()
-  "Switch to the next column page."
+(defun clutch-result-scroll-right ()
+  "Scroll the current result window to the right."
   (interactive)
-  (let ((max-page (1- (length clutch--column-pages))))
-    (if (>= clutch--current-col-page max-page)
-        (user-error "Already on last column page")
-      (cl-incf clutch--current-col-page)
-      (clutch--render-result))))
+  (scroll-left (max 1 (/ (window-body-width) 2))))
 
-(defun clutch-result-prev-col-page ()
-  "Switch to the previous column page."
+(defun clutch-result-scroll-left ()
+  "Scroll the current result window to the left."
   (interactive)
-  (if (<= clutch--current-col-page 0)
-      (user-error "Already on first column page")
-    (cl-decf clutch--current-col-page)
-    (clutch--render-result)))
+  (scroll-right (max 1 (/ (window-body-width) 2))))
 
 (defun clutch-result-widen-column ()
   "Widen the column at point by `clutch-column-width-step'."
@@ -4831,27 +4736,6 @@ When STMTS is nil, build statements from the current pending state."
                               clutch-column-width-step))))
         (aset clutch--column-widths cidx new-w)
         (clutch--refresh-display))
-    (user-error "No column at point")))
-
-(defun clutch-result-pin-column ()
-  "Pin the column at point so it appears on all column pages."
-  (interactive)
-  (if-let* ((cidx (clutch--col-idx-at-point)))
-      (progn
-        (cl-pushnew cidx clutch--pinned-columns)
-        (clutch--refresh-display)
-        (message "Pinned column %s" (nth cidx clutch--result-columns)))
-    (user-error "No column at point")))
-
-(defun clutch-result-unpin-column ()
-  "Unpin the column at point."
-  (interactive)
-  (if-let* ((cidx (clutch--col-idx-at-point)))
-      (progn
-        (setq clutch--pinned-columns
-              (delq cidx clutch--pinned-columns))
-        (clutch--refresh-display)
-        (message "Unpinned column %s" (nth cidx clutch--result-columns)))
     (user-error "No column at point")))
 
 ;;;; Fullscreen toggle
@@ -5228,8 +5112,8 @@ Accumulates input until a semicolon is found, then executes."
     ("P" "Prev page"         clutch-result-prev-page)
     ("M-<" "First page"      clutch-result-first-page)
     ("M->" "Last page"       clutch-result-last-page)
-    ("]" "Next col page"     clutch-result-next-col-page)
-    ("[" "Prev col page"     clutch-result-prev-col-page)]
+    ("]" "Scroll right"      clutch-result-scroll-right)
+    ("[" "Scroll left"       clutch-result-scroll-left)]
    ["Mutate"
     ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
     ("i" "Stage insert"      clutch-result-insert-row)
@@ -5239,8 +5123,6 @@ Accumulates input until a semicolon is found, then executes."
    ["Layout"
     ("=" "Widen column"      clutch-result-widen-column)
     ("-" "Narrow column"     clutch-result-narrow-column)
-    ("C-c p" "Pin column"    clutch-result-pin-column)
-    ("C-c P" "Unpin column"  clutch-result-unpin-column)
     ("f" "Fullscreen"        clutch-result-fullscreen-toggle)]]
   [["Copy / Export (region/rect: C-x SPC)"
     ("c" "Copy… (-r to refine rows/cols)" clutch-result-copy-dispatch)

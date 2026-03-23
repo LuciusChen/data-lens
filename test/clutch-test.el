@@ -307,32 +307,60 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     ;; Should be capped at max width
     (should (<= (aref widths 0) clutch-column-width-max))))
 
-;;;; Unit tests — column page computation
+;;;; Unit tests — single-page column layout
 
-(ert-deftest clutch-test-compute-column-pages-single ()
-  "Test column pages when all columns fit on one page."
-  (let ((widths [5 10 8]))  ; Total ~30 chars
-    (let ((pages (clutch--compute-column-pages widths nil 80)))
-      ;; All columns should fit on page 1
-      (should (= (length pages) 1))
-      (should (equal (append (aref pages 0) nil) '(0 1 2))))))
+(ert-deftest clutch-test-visible-columns-renders-all-result-columns ()
+  "The result buffer should render every result column into one table."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("c1" "c2" "c3" "c4"))
+    (should (equal (clutch--visible-columns) '(0 1 2 3)))))
 
-(ert-deftest clutch-test-compute-column-pages-multiple ()
-  "Test column pages when columns span multiple pages."
-  (let ((widths [30 30 30 30]))  ; Each col + borders > 30
-    (let ((pages (clutch--compute-column-pages widths nil 70)))
-      ;; Should create multiple pages
-      (should (> (length pages) 1)))))
+(ert-deftest clutch-test-render-result-includes-all-columns ()
+  "Wide tables should keep later columns searchable and reachable by TAB."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (setq-local clutch--result-columns '("c1" "c2" "c3" "c4"))
+    (setq-local clutch--result-column-defs '(nil nil nil nil))
+    (setq-local clutch--result-rows '(("a" "b" "c" "needle")))
+    (setq-local clutch--filtered-rows nil)
+    (setq-local clutch--pending-edits nil)
+    (setq-local clutch--pending-deletes nil)
+    (setq-local clutch--pending-inserts nil)
+    (setq-local clutch--marked-rows nil)
+    (setq-local clutch--sort-column nil)
+    (setq-local clutch--sort-descending nil)
+    (setq-local clutch--page-current 0)
+    (setq-local clutch--page-total-rows 1)
+    (setq-local clutch--column-widths [5 5 5 6])
+    (clutch--refresh-display)
+    (should (string-match-p "needle" (buffer-string)))
+    (goto-char (point-min))
+    (let ((first (text-property-search-forward 'clutch-col-idx 0 #'eq)))
+      (should first)
+      (goto-char (prop-match-beginning first)))
+    (clutch-result-next-cell)
+    (should (= (get-text-property (point) 'clutch-col-idx) 1))
+    (clutch-result-next-cell)
+    (should (= (get-text-property (point) 'clutch-col-idx) 2))
+    (clutch-result-next-cell)
+    (should (= (get-text-property (point) 'clutch-col-idx) 3))))
 
-(ert-deftest clutch-test-compute-column-pages-with-pinned ()
-  "Test column pages with pinned columns."
-  (let ((widths [5 30 30 30]))
-    (let ((pages (clutch--compute-column-pages widths '(0) 80)))
-      ;; Pinned column (0) should not appear in pages
-      (dolist (page (append pages nil))
-        (should-not (member 0 (append page nil))))
-      ;; Other columns should be distributed
-      (should (> (length pages) 0)))))
+(ert-deftest clutch-test-header-line-with-hscroll-matches-body-offset ()
+  "Header-line hscroll should track body hscroll exactly."
+  (with-temp-buffer
+    (setq-local clutch--header-line-string "0123456789")
+    (cl-letf (((symbol-function 'window-hscroll) (lambda (&optional _window) 3)))
+      (should (equal (clutch--header-line-with-hscroll) "3456789")))))
+
+(ert-deftest clutch-test-header-line-display-prefixes-align-to-zero ()
+  "Header-line display should remain aligned to the window's left edge."
+  (with-temp-buffer
+    (setq-local clutch--header-line-string "abc")
+    (cl-letf (((symbol-function 'window-hscroll) (lambda (&optional _window) 0)))
+      (let ((rendered (clutch--header-line-display)))
+        (should (equal (substring rendered 1) "abc"))
+        (should (equal (get-text-property 0 'display rendered)
+                       '(space :align-to 0)))))))
 
 ;;;; Unit tests — SQL query detection
 
@@ -443,7 +471,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (cl-letf (((symbol-function 'clutch--tx-header-line-segment)
                (lambda (_conn) "Tx: Manual*")))
       (let ((footer (substring-no-properties
-                     (clutch--render-footer 10 0 500 100 1 1))))
+                     (clutch--render-footer 10 0 500 100))))
         (should (string-match-p "Tx: Manual\\*" footer))
         (should (string-match-p "DESC\\[created_at\\]" footer))
         (should (string-match-p "E-1 D-1 I-1" footer))
@@ -458,7 +486,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (setq-local clutch--result-columns '("id" "name")
                 clutch--last-query "SELECT * FROM users"
                 clutch--cached-pk-indices nil)
-    (let* ((footer-prop (clutch--render-footer 10 0 500 100 1 1))
+    (let* ((footer-prop (clutch--render-footer 10 0 500 100))
            (footer (substring-no-properties footer-prop))
            (pk-start (string-match "PK missing" footer)))
       (should (string-match-p "PK missing" footer))
@@ -3045,7 +3073,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                 clutch--pending-deletes nil
                 clutch--marked-rows nil)
     (let ((row-positions (make-vector 1 nil)))
-      (clutch--insert-data-rows '((1 "before")) '(0 1) [4 8] 3 0 #'identity
+      (clutch--insert-data-rows '((1 "before")) '(0 1) [4 8] 3 0
                                 row-positions (clutch--build-render-state))
       (should (string-prefix-p "│E  1 " (buffer-string))))))
 
@@ -5081,12 +5109,8 @@ Skips if `clutch-test-password' is nil."
         (setq-local clutch--pending-edits nil)
         (setq-local clutch--fk-info nil)
         (setq-local clutch--where-filter nil)
-        (setq-local clutch--current-col-page 0)
-        (setq-local clutch--pinned-columns nil)
         (let ((widths (clutch--compute-column-widths col-names rows columns)))
-          (setq-local clutch--column-widths widths)
-          (setq-local clutch--column-pages
-                      (clutch--compute-column-pages widths nil 80)))
+          (setq-local clutch--column-widths widths))
         ;; Render
         (clutch--render-result)
         ;; Verify buffer has content

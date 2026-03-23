@@ -15,10 +15,10 @@ sidecar (=clutch-jdbc-agent=, Java 17+).
 - =clutch-db-pg.el= — PostgreSQL backend adapter
 - =clutch-db-sqlite.el= — SQLite backend adapter (uses Emacs 29+ built-in sqlite)
 - =clutch-db-jdbc.el= — JDBC backend adapter (Oracle, SQL Server, DB2, Snowflake, Redshift, and any JDBC-compatible database)
-- =clutch.el= — interactive UI layer: column-paged result browser, record view, FK navigation, editing, transient menus, REPL
+- =clutch.el= — interactive UI layer: single-page result browser, record view, FK navigation, editing, transient menus, REPL
 - =ob-clutch.el= — Org-Babel integration (mysql/postgresql/sqlite)
 
-#+CAPTION: Result browser with unified transient workflow (C-c ?), copy (c), full export (e), and column paging via [ and ].
+#+CAPTION: Result browser with unified transient workflow (C-c ?), copy (c), full export (e), and horizontal scrolling via [ and ].
 [[file:docs/screenshots/clutch-overview.png]]
 
 *Note:* MySQL is the primary backend — thoroughly tested and used daily.
@@ -44,20 +44,20 @@ For backend-specific implementation notes, see
 
 ** Interactive UI (clutch.el)
 
-- Column-paged result display (no horizontal scrolling)
+- Single-page result display with horizontal scrolling for wide tables
 - SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
   - =mode-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, no-PK guidance, and active filters (with =nerd-icons=, Unicode fallback)
   - =header-line=: column names with =│= borders and underlined labels
 - After execution, focus stays in the SQL buffer while results refresh below
 - Last successfully executed SQL is marked at the statement start gutter in the editor
-- Row numbers as a table column; sort/pin indicators via =nerd-icons= (with Unicode fallback)
+- Row numbers as a table column; sort indicators via =nerd-icons= (with Unicode fallback)
 - Right-aligned numeric columns
 - Record buffer for single-row detail view
 - Foreign key detection and navigation
 - Inline cell editing with UPDATE generation
 - Inline INSERT (=o=) and DELETE (=d=) rows with confirmation
 - WHERE filtering (=W=), client-side fuzzy filter (=/=), SQL =ORDER BY= sorting (=s=)
-- Pin/unpin columns, adjust column widths
+- Horizontal scrolling via =[= / =]=, plus column width adjustment via =-= / ===
 - CSV/Org export, copy as INSERT
 - Object picker and actions for =Tables= / =Views= / =Synonyms= / =Indexes= / =Sequences= / =Procedures= / =Functions= / =Triggers=, with annotated minibuffer candidates, type-grouped completion, optional prefix filtering, and a no-Embark transient fallback
 - SQL completion: table/column names scoped to the current statement, with synchronous column loading kept conservative for large schemas, plus keywords; completion case can be customized via =clutch-sql-completion-case-style=
@@ -277,12 +277,10 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =M->= / =M-<= | Last page / first page                       |
 | =#=            | Query total row count                         |
 | =A=            | Aggregate numeric values (region/current cell; =C-u= with region enters visual refine mode) |
-| =]=            | Next column page                              |
-| =[=            | Previous column page                          |
+| =]=            | Scroll right                                  |
+| =[=            | Scroll left                                   |
 | ===            | Widen current column                          |
 | =-=            | Narrow current column                         |
-| =C-c p=        | Pin current column                            |
-| =C-c P=        | Unpin column                                  |
 | =W=            | WHERE filter (press again to clear)           |
 | =/=            | Client-side fuzzy filter (empty to clear)     |
 | =s=            | Sort by column (toggles ASC/DESC on repeat)   |
@@ -394,8 +392,8 @@ Typical flow:
               → mode-line shows: Σ 500 of ? rows • 1 / 1 • ⏱ 42ms
 3. N / P      Next page / previous page
 4. #          Query total rows → mode-line shows "Σ 500 of 1234 rows"
-5. ] / [      Move across column pages when result has many columns
-              → pinned columns stay visible while column pages switch
+5. ] / [      Scroll horizontally when result has many columns
+              → all columns stay searchable because they remain in the buffer
 6. W          Enter filter: status = 'pending'
               → Appends WHERE clause, re-queries from page 1
 7. /          Client-side filter: type a pattern to narrow visible rows instantly
@@ -918,7 +916,7 @@ behavior, and helper APIs, see [[file:docs/native-backends.md][docs/native-backe
 ** Unit tests (no server required)
 
 =test/clutch-test.el= — UI layer, ~276 tests covering: value formatting and
-cell rendering, column width/page computation, insert and edit buffer workflow
+cell rendering, column width and single-page result layout, insert and edit buffer workflow
 (TAB navigation, local validation, JSON sub-editor, enum/temporal completion),
 staged-commit lifecycle (PK-vec based edit/insert/delete, discard, commit
 ordering), object workflow and schema refresh state, SQL keyword completion

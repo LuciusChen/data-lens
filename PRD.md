@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-**clutch** is an interactive Emacs database client designed to provide an intuitive visual interface for browsing, querying, and mutating SQL databases directly within Emacs. It eliminates the need for external GUI tools or CLI clients by providing a rich, column-paged result browser, object-centric schema workflow, and interactive REPL.
+**clutch** is an interactive Emacs database client designed to provide an intuitive visual interface for browsing, querying, and mutating SQL databases directly within Emacs. It eliminates the need for external GUI tools or CLI clients by providing a rich, single-page result browser, object-centric schema workflow, and interactive REPL.
 
 ### Problem Statement
 
@@ -181,9 +181,6 @@ Interactive result browsing with column paging, sorting, filtering, mutations.
 | `clutch--result-rows` | Row data (list of vectors) |
 | `clutch--result-column-defs` | Column definitions from query |
 | `clutch--column-widths` | Display width vector |
-| `clutch--column-pages` | Column paging structure |
-| `clutch--current-col-page` | Active column page index |
-| `clutch--pinned-columns` | Always-visible column indices |
 | `clutch--row-start-positions` | Vector of row buffer positions (O(1) goto) |
 | `clutch--pending-edits` | Staged cell modifications (PK → col → value) |
 | `clutch--pending-deletes` | Staged row deletions (list of PK vectors) |
@@ -212,8 +209,7 @@ Interactive result browsing with column paging, sorting, filtering, mutations.
 | `n` / `p` | `clutch-result-down-cell` / `clutch-result-up-cell` | Move to next/previous row in same column |
 | `N` / `P` | `clutch-result-next-page` / `clutch-result-prev-page` | Next / previous SQL page |
 | `M-<` / `M->` | `clutch-result-first-page` / `clutch-result-last-page` | First / last SQL page |
-| `]` / `[` | `clutch-result-next-col-page` / `clutch-result-prev-col-page` | Next / previous column page |
-| `C-c p` / `C-c P` | `clutch-result-pin-column` / `clutch-result-unpin-column` | Pin / unpin current column |
+| `]` / `[` | `clutch-result-scroll-right` / `clutch-result-scroll-left` | Scroll right / left |
 | `=` / `-` | `clutch-result-widen-column` / `clutch-result-narrow-column` | Adjust column width |
 | `C` | `clutch-result-goto-column` | Jump to a column by name |
 | `s` / `S` | `clutch-result-sort-by-column` / `clutch-result-sort-by-column-desc` | Sort by current column |
@@ -335,7 +331,6 @@ Line-by-line SQL evaluation with history and inline results.
 | `clutch-result-sort` | Set ORDER BY column/direction |
 | `clutch-result-where-filter` | Apply SQL WHERE clause |
 | `clutch-result-filter` | Apply client-side regex filter |
-| `clutch-result-pin-column` | Toggle pinning of a column |
 | `clutch-result-widen-column` | Increase active column display width |
 | `clutch-result-narrow-column` | Decrease active column display width |
 | `clutch-result-copy-cell` | Copy current cell value to kill ring |
@@ -343,8 +338,8 @@ Line-by-line SQL evaluation with history and inline results.
 | `clutch-result-goto-cell` | Open FK, expand BLOB/JSON, or view record |
 | `clutch-result-page-down` | Next row page |
 | `clutch-result-page-up` | Previous row page |
-| `clutch-result-next-column-page` | Next column page |
-| `clutch-result-prev-column-page` | Previous column page |
+| `clutch-result-scroll-right` | Scroll the result window right |
+| `clutch-result-scroll-left` | Scroll the result window left |
 
 ### Export
 
@@ -462,10 +457,8 @@ Connection profile plist keys:
 | Face | Inherits / Colors | Purpose |
 |------|-------------------|---------|
 | `clutch-header-face` | bold | Column headers in result tables |
-| `clutch-pinned-header-face` | `clutch-header-face` | Pinned column headers |
 | `clutch-header-active-face` | `hl-line`, bold | Column header under cursor |
 | `clutch-border-face` | shadow | Table borders (│, separators) |
-| `clutch-col-page-face` | warning, bold | Column-page indicators (◂ ▸) |
 | `clutch-null-face` | shadow, italic | NULL cell values |
 | `clutch-modified-face` | Light: #fff3cd bg / Dark: #3d2b00 bg | Pending-edit cell values |
 | `clutch-fk-face` | `font-lock-type-face`, underlined | Foreign key column values |
@@ -579,11 +572,11 @@ User types SQL in clutch-mode
 - **Navigation**: `SPC` / `S-SPC` (next/prev page)
 - **Offset**: `offset = page * page-size`
 
-### Column Paging
+### Horizontal Overflow
 
-- **Pages**: computed from window width and column widths
-- **Pinned columns**: always shown on every page (`|` to toggle)
-- **Navigation**: `]` / `[` (next/prev column page)
+- **Layout**: every result column is rendered into one buffer
+- **Navigation**: `]` / `[` scroll the window horizontally
+- **Searchability**: `isearch` and `TAB` traversal work across all columns
 - **Width adjustment**: `+` / `-` (increase/decrease by `clutch-column-width-step`)
 
 ### Cell Navigation

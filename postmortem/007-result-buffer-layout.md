@@ -1,5 +1,9 @@
 # 007 — Result Buffer Layout: Header, Footer, and Scroll Zones
 
+Superseded for horizontal overflow behavior by
+`postmortem/059-single-page-result-layout.md`. This note still records how
+the fixed header/footer zones evolved.
+
 ## Final Layout
 
 Three fixed zones above the scrollable data body:
