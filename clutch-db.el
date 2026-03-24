@@ -76,14 +76,12 @@ treated as literals.  Returns nil when POS is at normal code."
         (ch (and (< pos (length sql)) (aref sql pos))))
     (pcase ch
       (?\' ;; Single-quoted string: scan for unescaped closing quote.
-       (let ((i (1+ pos)))
-         (while (< i len)
-           (if (= (aref sql i) ?\')
-               (if (and (< (1+ i) len) (= (aref sql (1+ i)) ?\'))
-                   (setq i (+ i 2))        ; '' escape, skip both
-                 (setq i (1+ i) len 0))    ; closing quote found
-             (cl-incf i)))
-         i))
+       (cl-loop for i from (1+ pos) below len
+                when (= (aref sql i) ?\')
+                do (if (and (< (1+ i) len) (= (aref sql (1+ i)) ?\'))
+                       (cl-incf i)          ; '' escape, skip pair
+                     (cl-return (1+ i)))    ; past closing quote
+                finally return len))
       (?-  ;; Possible -- line comment.
        (if (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?-))
            (or (cl-loop for i from (+ pos 2) below len
