@@ -147,33 +147,10 @@ Use \":memory:\" for a transient in-memory database."
                                           base-sql page-num page-size
                                           &optional order-by)
   "Build a paginated SQL query for SQLite."
-  (if (clutch-db-sql-has-top-level-limit-p base-sql)
-      base-sql
-    (let* ((trimmed (string-trim-right
-                     (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
-           (sortable-sql (if order-by
-                             (clutch-db-sql-strip-top-level-order-by trimmed)
-                           trimmed))
-           (offset (* page-num page-size))
-           (order-clause
-            (when order-by
-              (format " ORDER BY \"%s\" %s"
-                      (replace-regexp-in-string "\"" "\"\"" (car order-by))
-                      (cdr order-by)))))
-      (format "%s%s LIMIT %d OFFSET %d"
-              sortable-sql (or order-clause "") page-size offset))))
+  (clutch-db--build-limit-offset-paged-sql
+   base-sql page-num page-size order-by #'clutch-db-sqlite--escape-id))
 
 ;;;; SQL dialect methods
-
-(cl-defmethod clutch-db-escape-identifier ((_conn clutch-db-sqlite-conn) name)
-  "Escape NAME as a SQLite identifier (double-quoted)."
-  (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" name)))
-
-(cl-defmethod clutch-db-escape-literal ((_conn clutch-db-sqlite-conn) value)
-  "Escape VALUE as a SQLite string literal (single-quoted)."
-  (format "'%s'" (replace-regexp-in-string "'" "''" value)))
-
-;;;; Schema helpers
 
 (defun clutch-db-sqlite--escape-id (name)
   "Double-quote SQLite identifier NAME."
@@ -182,6 +159,14 @@ Use \":memory:\" for a transient in-memory database."
 (defun clutch-db-sqlite--escape-lit (value)
   "Single-quote SQLite string literal VALUE."
   (format "'%s'" (replace-regexp-in-string "'" "''" value)))
+
+(cl-defmethod clutch-db-escape-identifier ((_conn clutch-db-sqlite-conn) name)
+  "Escape NAME as a SQLite identifier (double-quoted)."
+  (clutch-db-sqlite--escape-id name))
+
+(cl-defmethod clutch-db-escape-literal ((_conn clutch-db-sqlite-conn) value)
+  "Escape VALUE as a SQLite string literal (single-quoted)."
+  (clutch-db-sqlite--escape-lit value))
 
 (defun clutch-db-sqlite--pragma (handle pragma-sql)
   "Run PRAGMA-SQL on HANDLE; return rows (list of lists)."

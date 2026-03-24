@@ -2369,42 +2369,20 @@ executed outside clutch that would otherwise leave stale completions."
 
 (defun clutch--compute-tables-in-query-cache (schema)
   "Return a fresh cache plist for table-name analysis on SCHEMA."
-  (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
-    (let* ((tick (buffer-chars-modified-tick))
-           (text (buffer-substring-no-properties beg end))
-           (case-fold-search t)
-           found
-           aliases
-           (pos 0))
-      (while (string-match
-              "\\b\\(from\\|join\\|update\\|into\\)\\s-+\\([[:alnum:]_$#.`\"]+\\)"
-              text pos)
-        (let* ((table-token (match-string 2 text))
-               (table (clutch--normalize-statement-table-token table-token))
-               (table-end (match-end 2))
-               (alias-consumed-end table-end))
-          (setq pos table-end)
-          (when (and (string-match
-                      "\\s-+\\(?:as\\s-+\\)?\\([[:alnum:]_$#`\"]+\\)"
-                      text table-end)
-                     (= (match-beginning 0) table-end))
-            (when-let* ((alias-token (match-string 1 text))
-                        (alias (clutch--normalize-statement-table-token alias-token))
-                        ((not (member (upcase alias) clutch--sql-keywords))))
-              (setq alias-consumed-end (match-end 0))
-              (push (cons alias table) aliases)))
-          (setq pos alias-consumed-end)
-          (when table
-            (push table found))))
-      (let ((statement-tables (nreverse (delete-dups found))))
-        (list :schema schema
-              :tick tick
-              :beg beg
-              :end end
-              :statement-tables statement-tables
-              :statement-aliases (nreverse aliases)
-              :tables (or statement-tables
-                          (clutch--tables-in-buffer schema)))))))
+  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
+               (tick (buffer-chars-modified-tick))
+               (text (buffer-substring-no-properties beg end))
+               (`(,found . ,aliases)
+                (clutch--extract-tables-and-aliases text 0 (length text)))
+               (statement-tables (delete-dups found)))
+    (list :schema schema
+          :tick tick
+          :beg beg
+          :end end
+          :statement-tables statement-tables
+          :statement-aliases aliases
+          :tables (or statement-tables
+                      (clutch--tables-in-buffer schema)))))
 
 (defun clutch--tables-in-query-cache-entry (schema)
   "Return the cache entry for table analysis on SCHEMA, refreshing if needed."
@@ -2428,21 +2406,23 @@ executed outside clutch that would otherwise leave stale completions."
   "Return (BEG . END) of the innermost parenthesized block containing POINT-OFFSET.
 Returns (0 . LEN) when POINT-OFFSET is at the top level."
   (let* ((len (length text))
-         (depth 0)
          (stack nil)
-         (result (cons 0 len)))
-    (cl-loop for i below len do
-             (pcase (aref text i)
-               (?\( (push i stack)
-                    (cl-incf depth))
-               (?\) (when stack
-                      (let ((open (pop stack)))
-                        (cl-decf depth)
-                        (when (and (<= open point-offset)
-                                   (>= i point-offset))
-                          ;; Tightest enclosing pair so far.
-                          (when (< (- i open) (- (cdr result) (car result)))
-                            (setq result (cons (1+ open) i)))))))))
+         (result (cons 0 len))
+         (i 0))
+    (while (< i len)
+      (if-let* ((skip (clutch-db-sql-skip-literal/comment text i)))
+          (setq i skip)
+        (pcase (aref text i)
+          (?\( (push i stack)
+               (cl-incf i))
+          (?\) (when stack
+                 (let ((open (pop stack)))
+                   (when (and (<= open point-offset)
+                              (>= i point-offset))
+                     (when (< (- i open) (- (cdr result) (car result)))
+                       (setq result (cons (1+ open) i))))))
+               (cl-incf i))
+          (_ (cl-incf i)))))
     result))
 
 (defun clutch--union-branch-range (text point-offset)
@@ -2460,17 +2440,20 @@ UNION / UNION ALL at depth 0 within that scope."
                (i 0))
     ;; Collect positions of depth-0 UNION keywords within the scope.
     (while (< i sub-len)
-      (pcase (aref sub i)
-        (?\( (cl-incf depth))
-        (?\) (cl-decf depth))
-        (_
-         (when (and (zerop depth)
+      (if-let* ((skip (clutch-db-sql-skip-literal/comment sub i)))
+          (setq i skip)
+        (pcase (aref sub i)
+          (?\( (cl-incf depth) (cl-incf i))
+          (?\) (cl-decf depth) (cl-incf i))
+          (_
+           (if (and (zerop depth)
                     (string-match "\\bunion\\b\\(?:\\s-+all\\b\\)?" sub i)
                     (= (match-beginning 0) i))
-           (push (match-beginning 0) boundaries)
-           (push (match-end 0) boundaries)
-           (setq i (1- (match-end 0))))))
-      (cl-incf i))
+               (progn
+                 (push (match-beginning 0) boundaries)
+                 (push (match-end 0) boundaries)
+                 (setq i (match-end 0)))
+             (cl-incf i))))))
     (push sub-len boundaries)
     (setq boundaries (nreverse boundaries))
     ;; Find the segment containing sub-offset, translate back to text coords.
@@ -2483,15 +2466,19 @@ UNION / UNION ALL at depth 0 within that scope."
            (t (setq end b boundaries nil)))))
       (cons (+ scope-beg beg) (+ scope-beg end)))))
 
-(defun clutch--extract-aliases-in-range (text beg end)
-  "Extract alias-to-table mappings from TEXT between BEG and END."
+(defun clutch--extract-tables-and-aliases (text beg end)
+  "Extract tables and alias mappings from TEXT between BEG and END.
+Return (TABLES . ALIASES) where TABLES is a list of table names and
+ALIASES is an alist of (alias . table) pairs.
+String literals and comments are ignored via masking."
   (let ((case-fold-search t)
+        (masked (clutch-db-sql-mask-literal/comment text))
         (pos beg)
-        aliases)
+        tables aliases)
     (while (and (< pos end)
                 (string-match
                  "\\b\\(from\\|join\\|update\\|into\\)\\s-+\\([[:alnum:]_$#.`\"]+\\)"
-                 text pos))
+                 masked pos))
       (when (< (match-beginning 0) end)
         (let* ((table-token (match-string 2 text))
                (table (clutch--normalize-statement-table-token table-token))
@@ -2500,7 +2487,7 @@ UNION / UNION ALL at depth 0 within that scope."
           (setq pos table-end)
           (when (and (string-match
                       "\\s-+\\(?:as\\s-+\\)?\\([[:alnum:]_$#`\"]+\\)"
-                      text table-end)
+                      masked table-end)
                      (= (match-beginning 0) table-end)
                      (< (match-beginning 0) end))
             (when-let* ((alias-token (match-string 1 text))
@@ -2508,8 +2495,9 @@ UNION / UNION ALL at depth 0 within that scope."
                         ((not (member (upcase alias) clutch--sql-keywords))))
               (setq alias-consumed-end (match-end 0))
               (push (cons alias table) aliases)))
-          (setq pos alias-consumed-end))))
-    (nreverse aliases)))
+          (setq pos alias-consumed-end)
+          (when table (push table tables)))))
+    (cons (nreverse tables) (nreverse aliases))))
 
 (defun clutch--table-aliases-in-current-statement (schema)
   "Return alias-to-table mappings for the UNION branch containing point.
@@ -2523,7 +2511,7 @@ When the statement has no UNION, returns all aliases."
          (range (clutch--union-branch-range text point-offset)))
     (if (and (= (car range) 0) (= (cdr range) (length text)))
         all-aliases
-      (clutch--extract-aliases-in-range text (car range) (cdr range)))))
+      (cdr (clutch--extract-tables-and-aliases text (car range) (cdr range))))))
 
 (defun clutch--tables-in-query (schema)
   "Return known table names in FROM/JOIN/UPDATE clauses of current statement.
@@ -2546,13 +2534,14 @@ blank lines.  Falls back to `clutch--tables-in-buffer' when none are found."
 (defun clutch--statement-table-identifiers ()
   "Return raw table identifiers referenced in the current statement."
   (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
-    (let ((text (buffer-substring-no-properties beg end))
-          (case-fold-search t)
-          found
-          (pos 0))
+    (let* ((text (buffer-substring-no-properties beg end))
+           (masked (clutch-db-sql-mask-literal/comment text))
+           (case-fold-search t)
+           found
+           (pos 0))
       (while (string-match
               "\\b\\(from\\|join\\|update\\|into\\)\\s-+\\([[:alnum:]_$#.`\"]+\\)"
-              text pos)
+              masked pos)
         (setq pos (match-end 0))
         (when-let* ((tbl (clutch--normalize-statement-table-token (match-string 2 text))))
           (push tbl found)))

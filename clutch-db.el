@@ -65,6 +65,68 @@ ROWS is a list of lists (one per row).
 AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   connection columns rows affected-rows last-insert-id warnings)
 
+;;;; SQL helpers (literal/comment awareness)
+
+(defun clutch-db-sql-skip-literal/comment (sql pos)
+  "If POS in SQL starts a string literal or comment, return position past it.
+Handles single-quoted strings (with '' escape), -- line comments, and
+/* block comments */.  Double-quoted identifiers and backticks are NOT
+treated as literals.  Returns nil when POS is at normal code."
+  (let ((len (length sql))
+        (ch (and (< pos (length sql)) (aref sql pos))))
+    (pcase ch
+      (?\' ;; Single-quoted string: scan for unescaped closing quote.
+       (let ((i (1+ pos)))
+         (while (< i len)
+           (if (= (aref sql i) ?\')
+               (if (and (< (1+ i) len) (= (aref sql (1+ i)) ?\'))
+                   (setq i (+ i 2))        ; '' escape, skip both
+                 (setq i (1+ i) len 0))    ; closing quote found
+             (cl-incf i)))
+         i))
+      (?-  ;; Possible -- line comment.
+       (if (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?-))
+           (or (cl-loop for i from (+ pos 2) below len
+                        when (= (aref sql i) ?\n) return (1+ i))
+               len)
+         nil))
+      (?/  ;; Possible /* block comment */.
+       (if (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?*))
+           (let ((end (cl-loop for i from (+ pos 2) below (1- len)
+                               when (and (= (aref sql i) ?*)
+                                         (= (aref sql (1+ i)) ?/))
+                               return (+ i 2))))
+             (or end len))
+         nil)))))
+
+(defun clutch-db-sql-mask-literal/comment (sql)
+  "Return a string the same length as SQL with literals/comments blanked.
+Single-quoted content (between the quotes) and comment text become spaces.
+Quote delimiters are preserved.  Double-quoted identifiers and backticks
+are left intact.  Safe for multibyte strings (avoids `aset')."
+  (let ((pieces nil)
+        (copy-from 0)
+        (pos 0)
+        (len (length sql)))
+    (while (< pos len)
+      (if-let* ((skip (clutch-db-sql-skip-literal/comment sql pos)))
+          (if (= (aref sql pos) ?\')
+              ;; String literal: preserve quote delimiters, blank content.
+              (let* ((has-close (and (> skip (1+ pos))
+                                    (= (aref sql (1- skip)) ?\')))
+                     (content-end (if has-close (1- skip) skip)))
+                (push (substring sql copy-from (1+ pos)) pieces)
+                (push (make-string (max 0 (- content-end (1+ pos))) ?\s) pieces)
+                (when has-close (push "'" pieces))
+                (setq copy-from skip pos skip))
+            ;; Comment: blank entirely.
+            (push (substring sql copy-from pos) pieces)
+            (push (make-string (- skip pos) ?\s) pieces)
+            (setq copy-from skip pos skip))
+        (cl-incf pos)))
+    (push (substring sql copy-from) pieces)
+    (apply #'concat (nreverse pieces))))
+
 ;;;; SQL helpers (top-level clause detection)
 
 (defun clutch-db-sql-find-top-level-clause (sql pattern &optional start)
@@ -78,15 +140,17 @@ START defaults to 0."
         (re (format "\\b%s\\b" pattern))
         found)
     (while (and (< pos len) (not found))
-      (let ((ch (aref sql pos)))
-        (cond
-         ((= ch ?\() (cl-incf depth) (cl-incf pos))
-         ((= ch ?\)) (cl-decf depth) (cl-incf pos))
-         ((and (= depth 0)
-               (string-match re sql pos)
-               (= (match-beginning 0) pos))
-          (setq found pos))
-         (t (cl-incf pos)))))
+      (if-let* ((skip (clutch-db-sql-skip-literal/comment sql pos)))
+          (setq pos skip)
+        (let ((ch (aref sql pos)))
+          (cond
+           ((= ch ?\() (cl-incf depth) (cl-incf pos))
+           ((= ch ?\)) (cl-decf depth) (cl-incf pos))
+           ((and (= depth 0)
+                 (string-match re sql pos)
+                 (= (match-beginning 0) pos))
+            (setq found pos))
+           (t (cl-incf pos))))))
     found))
 
 (defun clutch-db-sql-has-top-level-clause-p (sql pattern &optional start)
@@ -107,6 +171,25 @@ Leaves nested ORDER BY clauses inside subqueries or window functions intact."
   (if-let* ((order-pos (clutch-db-sql-find-top-level-clause sql "ORDER\\s-+BY")))
       (string-trim-right (substring sql 0 order-pos))
     sql))
+
+(defun clutch-db--build-limit-offset-paged-sql (base-sql page-num page-size
+                                                         order-by escape-fn)
+  "Build a LIMIT/OFFSET paginated query from BASE-SQL.
+ORDER-BY is (COL . DIR) or nil.  ESCAPE-FN escapes the column name."
+  (if (clutch-db-sql-has-top-level-limit-p base-sql)
+      base-sql
+    (let* ((trimmed (string-trim-right
+                     (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
+           (sortable-sql (if order-by
+                             (clutch-db-sql-strip-top-level-order-by trimmed)
+                           trimmed))
+           (offset (* page-num page-size))
+           (order-clause (when order-by
+                           (format " ORDER BY %s %s"
+                                   (funcall escape-fn (car order-by))
+                                   (cdr order-by)))))
+      (format "%s%s LIMIT %d OFFSET %d"
+              sortable-sql (or order-clause "") page-size offset))))
 
 ;;;; Generic interface — 18 methods dispatched on connection type
 

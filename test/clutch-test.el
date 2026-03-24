@@ -4012,6 +4012,124 @@ branch-local table, not always the first occurrence."
           (should (member "title" candidates))
           (should-not (member "name" candidates)))))))
 
+(ert-deftest clutch-test-extract-tables-and-aliases ()
+  "clutch--extract-tables-and-aliases should return tables and aliases
+preserving order, with duplicates retained (caller deduplicates)."
+  (let* ((sql "SELECT a.id FROM users a JOIN orders b ON a.id = b.uid JOIN users c")
+         (result (clutch--extract-tables-and-aliases sql 0 (length sql)))
+         (tables (car result))
+         (aliases (cdr result)))
+    ;; Tables in order, including duplicate "users".
+    (should (equal tables '("users" "orders" "users")))
+    ;; Aliases in order.
+    (should (equal aliases '(("a" . "users") ("b" . "orders") ("c" . "users"))))
+    ;; delete-dups (as used by the cache) removes the second "users".
+    (should (equal (delete-dups (copy-sequence tables)) '("users" "orders")))))
+
+;;; String/comment awareness tests
+
+(ert-deftest clutch-test-skip-literal/comment-single-quote ()
+  "Skip a single-quoted string literal."
+  (should (= (clutch-db-sql-skip-literal/comment "'hello'" 0) 7))
+  ;; Escaped quote via ''
+  (should (= (clutch-db-sql-skip-literal/comment "'it''s'" 0) 7))
+  ;; Unterminated — return length.
+  (should (= (clutch-db-sql-skip-literal/comment "'hello" 0) 6))
+  ;; Not at a literal — return nil.
+  (should-not (clutch-db-sql-skip-literal/comment "SELECT" 0)))
+
+(ert-deftest clutch-test-skip-literal/comment-line-comment ()
+  "Skip a -- line comment."
+  (should (= (clutch-db-sql-skip-literal/comment "-- comment\ncode" 0) 11))
+  ;; Comment at end of string (no newline).
+  (should (= (clutch-db-sql-skip-literal/comment "-- comment" 0) 10)))
+
+(ert-deftest clutch-test-skip-literal/comment-block-comment ()
+  "Skip a /* block comment */."
+  (should (= (clutch-db-sql-skip-literal/comment "/* block */" 0) 11))
+  ;; Unterminated.
+  (should (= (clutch-db-sql-skip-literal/comment "/* open" 0) 7)))
+
+(ert-deftest clutch-test-skip-literal/comment-ignores-double-quote ()
+  "Double-quoted identifiers are NOT literals — should return nil."
+  (should-not (clutch-db-sql-skip-literal/comment "\"User Table\"" 0)))
+
+(ert-deftest clutch-test-skip-literal/comment-ignores-backtick ()
+  "Backtick identifiers are NOT literals — should return nil."
+  (should-not (clutch-db-sql-skip-literal/comment "`user_table`" 0)))
+
+(ert-deftest clutch-test-mask-literal/comment ()
+  "Mask string literals and comments but preserve identifiers."
+  (let ((masked (clutch-db-sql-mask-literal/comment
+                 "select 'union all' from t -- limit")))
+    (should (= (length masked) (length "select 'union all' from t -- limit")))
+    ;; String content masked.
+    (should (string-match-p "select '         ' from t" masked))
+    ;; Comment masked.
+    (should-not (string-match-p "limit" masked))
+    ;; Delimiters preserved.
+    (should (string-match-p "from t" masked)))
+  ;; Double-quoted identifiers are NOT masked.
+  (let ((masked (clutch-db-sql-mask-literal/comment
+                 "select * from \"User Table\" u")))
+    (should (string-match-p "\"User Table\"" masked)))
+  ;; Multibyte string content must not trigger aset errors.
+  (let* ((sql "select case when '全提' then '即存' end from t")
+         (masked (clutch-db-sql-mask-literal/comment sql)))
+    (should (= (length masked) (length sql)))
+    (should (string-match-p "from t" masked))
+    (should-not (string-match-p "全提" masked))
+    (should-not (string-match-p "即存" masked))))
+
+(ert-deftest clutch-test-find-top-level-clause-skips-string ()
+  "LIMIT inside a string literal should not be found."
+  (should-not (clutch-db-sql-find-top-level-clause
+               "select 'limit 10' from t" "LIMIT")))
+
+(ert-deftest clutch-test-find-top-level-clause-skips-comment ()
+  "LIMIT inside a comment should not be found, but a real one should."
+  (should (clutch-db-sql-find-top-level-clause
+           "select /* limit */ from t limit 5" "LIMIT"))
+  (should (clutch-db-sql-find-top-level-clause
+           "select -- limit\nfrom t limit 5" "LIMIT")))
+
+(ert-deftest clutch-test-extract-tables-skips-string-literal ()
+  "FROM inside a string literal should not produce a table."
+  (let* ((sql "select 'from users' from orders o")
+         (result (clutch--extract-tables-and-aliases sql 0 (length sql))))
+    (should (equal (car result) '("orders")))
+    (should (equal (cdr result) '(("o" . "orders"))))))
+
+(ert-deftest clutch-test-extract-tables-preserves-quoted-identifier ()
+  "Backtick-quoted identifiers should still be extracted.
+Double-quoted multi-word identifiers are a pre-existing regex limitation."
+  (let* ((sql "select * from `order_items` oi join \"users\" u")
+         (result (clutch--extract-tables-and-aliases sql 0 (length sql)))
+         (tables (car result))
+         (aliases (cdr result)))
+    (should (member "order_items" tables))
+    (should (member "users" tables))
+    (should (assoc "oi" aliases))
+    (should (assoc "u" aliases))))
+
+(ert-deftest clutch-test-union-branch-skips-string-union ()
+  "UNION inside a string should not split branches."
+  (let* ((sql "select 'union all' from a union all select * from b")
+         ;; Point in the first branch (before the real UNION).
+         (range (clutch--union-branch-range sql 5)))
+    ;; The range should NOT start after the string — only split at real UNION.
+    (should (= (car range) 0))
+    (should (< (car range) 26))))
+
+(ert-deftest clutch-test-innermost-paren-skips-string-parens ()
+  "Parentheses inside string literals should not affect depth tracking."
+  (let* ((sql "select (a, ')', b) from t")
+         (range (clutch--innermost-paren-range sql 9)))
+    ;; Point at 'a' inside the real parens — range should be (8 . 17).
+    ;; ( is at 7, ) is at 17; result is (1+ open) . close-pos.
+    (should (= (car range) 8))
+    (should (= (cdr range) 17))))
+
 (ert-deftest clutch-test-sql-keyword-completion-honors-lowercase-style ()
   "Keyword completion should honor `clutch-sql-completion-case-style'."
   (let ((clutch-sql-completion-case-style 'lower))
