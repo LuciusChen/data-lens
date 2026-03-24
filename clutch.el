@@ -2424,9 +2424,106 @@ executed outside clutch that would otherwise leave stale completions."
   "Return known table names mentioned in the current statement only."
   (plist-get (clutch--tables-in-query-cache-entry schema) :statement-tables))
 
+(defun clutch--innermost-paren-range (text point-offset)
+  "Return (BEG . END) of the innermost parenthesized block containing POINT-OFFSET.
+Returns (0 . LEN) when POINT-OFFSET is at the top level."
+  (let* ((len (length text))
+         (depth 0)
+         (stack nil)
+         (result (cons 0 len)))
+    (cl-loop for i below len do
+             (pcase (aref text i)
+               (?\( (push i stack)
+                    (cl-incf depth))
+               (?\) (when stack
+                      (let ((open (pop stack)))
+                        (cl-decf depth)
+                        (when (and (<= open point-offset)
+                                   (>= i point-offset))
+                          ;; Tightest enclosing pair so far.
+                          (when (< (- i open) (- (cdr result) (car result)))
+                            (setq result (cons (1+ open) i)))))))))
+    result))
+
+(defun clutch--union-branch-range (text point-offset)
+  "Return (BEG . END) of the UNION branch containing POINT-OFFSET.
+First narrows to the innermost parenthesized scope, then splits by
+UNION / UNION ALL at depth 0 within that scope."
+  (pcase-let* ((`(,scope-beg . ,scope-end)
+                (clutch--innermost-paren-range text point-offset))
+               (sub (substring text scope-beg scope-end))
+               (sub-offset (- point-offset scope-beg))
+               (sub-len (length sub))
+               (depth 0)
+               (boundaries (list 0))
+               (case-fold-search t)
+               (i 0))
+    ;; Collect positions of depth-0 UNION keywords within the scope.
+    (while (< i sub-len)
+      (pcase (aref sub i)
+        (?\( (cl-incf depth))
+        (?\) (cl-decf depth))
+        (_
+         (when (and (zerop depth)
+                    (string-match "\\bunion\\b\\(?:\\s-+all\\b\\)?" sub i)
+                    (= (match-beginning 0) i))
+           (push (match-beginning 0) boundaries)
+           (push (match-end 0) boundaries)
+           (setq i (1- (match-end 0))))))
+      (cl-incf i))
+    (push sub-len boundaries)
+    (setq boundaries (nreverse boundaries))
+    ;; Find the segment containing sub-offset, translate back to text coords.
+    (let ((beg 0)
+          (end sub-len))
+      (while boundaries
+        (let ((b (pop boundaries)))
+          (cond
+           ((<= b sub-offset) (setq beg b))
+           (t (setq end b boundaries nil)))))
+      (cons (+ scope-beg beg) (+ scope-beg end)))))
+
+(defun clutch--extract-aliases-in-range (text beg end)
+  "Extract alias-to-table mappings from TEXT between BEG and END."
+  (let ((case-fold-search t)
+        (pos beg)
+        aliases)
+    (while (and (< pos end)
+                (string-match
+                 "\\b\\(from\\|join\\|update\\|into\\)\\s-+\\([[:alnum:]_$#.`\"]+\\)"
+                 text pos))
+      (when (< (match-beginning 0) end)
+        (let* ((table-token (match-string 2 text))
+               (table (clutch--normalize-statement-table-token table-token))
+               (table-end (match-end 2))
+               (alias-consumed-end table-end))
+          (setq pos table-end)
+          (when (and (string-match
+                      "\\s-+\\(?:as\\s-+\\)?\\([[:alnum:]_$#`\"]+\\)"
+                      text table-end)
+                     (= (match-beginning 0) table-end)
+                     (< (match-beginning 0) end))
+            (when-let* ((alias-token (match-string 1 text))
+                        (alias (clutch--normalize-statement-table-token alias-token))
+                        ((not (member (upcase alias) clutch--sql-keywords))))
+              (setq alias-consumed-end (match-end 0))
+              (push (cons alias table) aliases)))
+          (setq pos alias-consumed-end))))
+    (nreverse aliases)))
+
 (defun clutch--table-aliases-in-current-statement (schema)
-  "Return alias-to-table mappings mentioned in the current statement."
-  (plist-get (clutch--tables-in-query-cache-entry schema) :statement-aliases))
+  "Return alias-to-table mappings for the UNION branch containing point.
+When the statement has no UNION, returns all aliases."
+  (let* ((entry (clutch--tables-in-query-cache-entry schema))
+         (all-aliases (plist-get entry :statement-aliases))
+         (stmt-beg (plist-get entry :beg))
+         (stmt-end (plist-get entry :end))
+         (text (buffer-substring-no-properties stmt-beg stmt-end))
+         (point-offset (- (point) stmt-beg))
+         (range (clutch--union-branch-range text point-offset)))
+    (if (and (= (car range) 0) (= (cdr range) (length text)))
+        all-aliases
+      (clutch--extract-aliases-in-range text (car range) (cdr range)))))
 
 (defun clutch--tables-in-query (schema)
   "Return known table names in FROM/JOIN/UPDATE clauses of current statement.

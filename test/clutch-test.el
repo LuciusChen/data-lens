@@ -3941,6 +3941,77 @@ Otherwise the scanner skips past the JOIN token and misses the joined table."
           (should-not (member "ZJ_SYS_PARA" candidates))
           (should-not (member "ZJ_LOG" candidates)))))))
 
+(ert-deftest clutch-test-union-all-alias-scoped-to-branch ()
+  "Same alias in different UNION ALL branches should resolve to the
+branch-local table, not always the first occurrence."
+  ;; Cursor in the second branch: t. should complete with posts columns.
+  (with-temp-buffer
+    (insert "select t.id from users t\nunion all\nselect t.ti from posts t")
+    (goto-char (point-min))
+    (search-forward "t.ti")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake)
+          seen)
+      (puthash "users" nil schema)
+      (puthash "posts" nil schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (_conn _schema table)
+                   (push table seen)
+                   (pcase table
+                     ("users" '("id" "name"))
+                     ("posts" '("title" "body"))
+                     (_ nil)))))
+        (let* ((capf (clutch-completion-at-point))
+               (candidates (nth 2 capf)))
+          (should capf)
+          ;; Should load columns for posts (second branch), not users.
+          (should (equal seen '("posts")))
+          (should (member "title" candidates))
+          (should-not (member "name" candidates)))))))
+
+(ert-deftest clutch-test-union-all-alias-scoped-inside-subquery ()
+  "UNION ALL inside a subquery should still scope aliases per branch."
+  ;; Outer: select ... from (...) data_view
+  ;; Inner: two branches with same alias t for different tables.
+  (with-temp-buffer
+    (insert (concat "select data_view.id from (\n"
+                    "  select t.id from users t\n"
+                    "  union all\n"
+                    "  select t.ti from posts t\n"
+                    ") data_view"))
+    (goto-char (point-min))
+    (search-forward "t.ti")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake)
+          seen)
+      (puthash "users" nil schema)
+      (puthash "posts" nil schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (_conn _schema table)
+                   (push table seen)
+                   (pcase table
+                     ("users" '("id" "name"))
+                     ("posts" '("title" "body"))
+                     (_ nil)))))
+        (let* ((capf (clutch-completion-at-point))
+               (candidates (nth 2 capf)))
+          (should capf)
+          (should (equal seen '("posts")))
+          (should (member "title" candidates))
+          (should-not (member "name" candidates)))))))
+
 (ert-deftest clutch-test-sql-keyword-completion-honors-lowercase-style ()
   "Keyword completion should honor `clutch-sql-completion-case-style'."
   (let ((clutch-sql-completion-case-style 'lower))
