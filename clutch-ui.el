@@ -28,6 +28,8 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "Filtered subset of `clutch--result-rows', or nil when unfiltered.")
 (defvar-local clutch--header-active-col nil
   "Column index currently highlighted in the header, or nil.")
+(defvar-local clutch--footer-base-string nil
+  "Static portion of mode-line footer (pagination, sort, etc.).")
 (defvar-local clutch--header-line-string nil
   "Full header-line string before hscroll adjustment.")
 (defvar-local clutch--last-window-width nil
@@ -90,6 +92,7 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (declare-function clutch--bind-connection-context "clutch" (conn &optional params product))
 (declare-function clutch--cell-placeholder-value "clutch" (value))
 (declare-function clutch--center-padding-widths "clutch" (content-width total-width))
+(declare-function nerd-icons--function-name "nerd-icons" (name))
 (declare-function clutch--column-names "clutch" (columns))
 (declare-function clutch--compute-column-widths "clutch" (col-names rows columns))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table))
@@ -116,6 +119,11 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (declare-function clutch-db-result-rows "clutch-db" (result))
 (declare-function clutch-db-result-warnings "clutch-db" (result))
 
+(defun clutch--nerd-icons-available-p ()
+  "Return non-nil when nerd-icons is loaded and usable."
+  (and (require 'nerd-icons nil t)
+       (fboundp 'nerd-icons--function-name)))
+
 (defun clutch--icon (name &optional fallback &rest icon-args)
   "Return a nerd-icons icon for NAME, or FALLBACK string.
 NAME is a cons (FAMILY . ICON-NAME) where FAMILY is any nerd-icons
@@ -123,10 +131,10 @@ glyph-set symbol (e.g. `mdicon', `devicon', `codicon', `octicon').
 ICON-ARGS are keyword arguments forwarded to the nerd-icons function
 \(e.g. :height 1.2).  The icon function is resolved dynamically via
 `nerd-icons--function-name', so new families require no changes here.
-Falls back gracefully when nerd-icons is not installed or unknown."
+Falls back to FALLBACK (a Unicode symbol) when nerd-icons is not
+installed or the icon is unknown."
   (pcase-let ((`(,family . ,icon-name) name))
-    (or (and (require 'nerd-icons nil t)
-             (fboundp 'nerd-icons--function-name)
+    (or (and (clutch--nerd-icons-available-p)
              (let ((fn (nerd-icons--function-name family)))
                (and (fboundp fn)
                     (apply fn icon-name icon-args))))
@@ -504,6 +512,22 @@ Returns a list of propertized strings (may be empty)."
                      (propertize (clutch--format-elapsed clutch--query-elapsed)
                                  'face hi)))))))
 
+(defun clutch--footer-cursor-part ()
+  "Return a mode-line segment showing the current row and column at point."
+  (let ((ridx (get-text-property (point) 'clutch-row-idx))
+        (cidx (get-text-property (point) 'clutch-col-idx)))
+    (when (and ridx cidx)
+      (let* ((hi 'font-lock-keyword-face)
+             (dim 'font-lock-comment-face)
+             (raw-name (or (nth cidx clutch--result-columns) ""))
+             (col-name (if (> (length raw-name) 20)
+                           (concat (substring raw-name 0 17) "...")
+                         raw-name)))
+        (concat (clutch--footer-icon '(codicon . "nf-cod-location") "⌖" hi)
+                (propertize (format "R-%d" (1+ ridx)) 'face hi)
+                (propertize ":" 'face dim)
+                (propertize col-name 'face hi))))))
+
 (defun clutch--render-footer (row-count page-num page-size total-rows)
   "Return the mode-line footer string for pagination state."
   (let ((sep (propertize "  •  " 'face 'font-lock-comment-face)))
@@ -512,6 +536,15 @@ Returns a list of propertized strings (may be empty)."
                                                   total-rows)
                        (clutch--footer-filter-parts))
                sep)))
+
+(defun clutch--footer-mode-line-display ()
+  "Return the display-ready mode-line string with dynamic cursor position."
+  (let ((base (or clutch--footer-base-string ""))
+        (cursor (clutch--footer-cursor-part))
+        (sep (propertize "  •  " 'face 'font-lock-comment-face)))
+    (concat (propertize " " 'display '(space :align-to 0))
+            base
+            (when cursor (concat sep cursor)))))
 
 (defun clutch--effective-widths ()
   "Return column widths adjusted for header indicator icons.
@@ -684,11 +717,11 @@ RENDER-STATE contains render lookup tables for pending UI state."
 
 (defun clutch--update-result-line-formats (rows visible-cols widths nw)
   "Set mode-line-format and header-line-format for the result buffer."
-  (setq mode-line-format
-        (concat (propertize " " 'display '(space :align-to 0))
-                (clutch--render-footer
-                 (length rows) clutch--page-current
-                 clutch-result-max-rows clutch--page-total-rows)))
+  (setq clutch--footer-base-string
+        (clutch--render-footer
+         (length rows) clutch--page-current
+         clutch-result-max-rows clutch--page-total-rows))
+  (setq mode-line-format '(:eval (clutch--footer-mode-line-display)))
   (setq clutch--header-line-string
         (clutch--build-header-line visible-cols widths nw
                                    clutch--header-active-col))

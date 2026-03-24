@@ -4900,16 +4900,29 @@ Otherwise the scanner skips past the JOIN token and misses the joined table."
   (with-temp-buffer
     (setq-local clutch-connection nil
                 clutch--connection-params '(:backend jdbc :driver oracle))
+    ;; With nerd-icons: show icon only, no name.
     (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) nil))
               ((symbol-function 'clutch--db-backend-icon-for-key) (lambda (_key) "[db]"))
+              ((symbol-function 'clutch--nerd-icons-available-p) (lambda () t))
               ((symbol-function 'clutch--backend-display-name-from-params) (lambda (_params) "Oracle"))
               ((symbol-function 'clutch--connection-state-icon) (lambda (_connected) "[disc]"))
               ((symbol-function 'clutch--header-line-indent) (lambda () "")))
       (let* ((line (clutch--build-connection-header-line))
              (start (string-match "Disconnect" line)))
-        (should (string-match-p "\\[db\\] Oracle" line))
-        (should (string-match-p "Oracle  •  \\[disc\\] Disconnect" line))
-        (should-not (string-match-p "\\[disc\\]  •  Disconnect" line))
+        (should (string-match-p "\\[db\\]" line))
+        (should-not (string-match-p "Oracle" line))
+        (should start)
+        (should (eq (get-text-property start 'face line) 'warning))))
+    ;; Without nerd-icons: show name, no icon.
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) nil))
+              ((symbol-function 'clutch--db-backend-icon-for-key) (lambda (_key) ""))
+              ((symbol-function 'clutch--nerd-icons-available-p) (lambda () nil))
+              ((symbol-function 'clutch--backend-display-name-from-params) (lambda (_params) "Oracle"))
+              ((symbol-function 'clutch--connection-state-icon) (lambda (_connected) "[disc]"))
+              ((symbol-function 'clutch--header-line-indent) (lambda () "")))
+      (let* ((line (clutch--build-connection-header-line))
+             (start (string-match "Disconnect" line)))
+        (should (string-match-p "Oracle" line))
         (should start)
         (should (eq (get-text-property start 'face line) 'warning))))))
 

@@ -55,7 +55,9 @@
 (declare-function clutch-jdbc-conn-p "clutch-db-jdbc" (conn))
 (declare-function clutch-jdbc-conn-params "clutch-db-jdbc" (conn))
 (declare-function clutch-db-browseable-object-entries "clutch-db" (conn))
+(declare-function clutch--nerd-icons-available-p "clutch-ui" ())
 (declare-function clutch--ensure-point-visible-horizontally "clutch-ui" ())
+(declare-function clutch--footer-mode-line-display "clutch-ui" ())
 (declare-function clutch--header-line-display "clutch-ui" ())
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
 (declare-function clutch--column-border-position "clutch-ui" (cidx))
@@ -458,6 +460,7 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar clutch--filter-pattern)
 (defvar clutch--fk-info)
 (defvar clutch--filtered-rows)
+(defvar clutch--footer-base-string)
 (defvar clutch--header-active-col)
 (defvar clutch--header-line-string)
 (defvar clutch--last-window-width)
@@ -733,7 +736,7 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
   "Return a header-line segment for CONN transaction state, or nil.
 Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
   (when conn
-    (let ((icon (clutch--icon '(mdicon . "nf-md-database_lock") "󰪪")))
+    (let ((icon (clutch--icon '(mdicon . "nf-md-database_lock") "⛁")))
       (if (clutch-db-manual-commit-p conn)
           (if (clutch--tx-dirty-p conn)
               (propertize (concat icon " Tx: Manual*") 'face 'error)
@@ -945,17 +948,19 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
     (_ nil)))
 
 (defun clutch--connection-backend-segment (&optional conn params)
-  "Return the shared backend segment for CONN or PARAMS, or nil."
+  "Return the shared backend segment for CONN or PARAMS, or nil.
+When nerd-icons is available, show only the icon; otherwise fall back
+to the display name (e.g. \"MySQL\")."
   (let* ((icon (clutch--db-backend-icon-for-key
                 (or (and conn (clutch--backend-key-from-conn conn))
                     (and params (clutch--backend-key-from-params params)))))
          (name (or (and conn (clutch-db-display-name conn))
                    (and params (clutch--backend-display-name-from-params params)))))
-    (when name
-      (let ((backend (propertize name 'face 'bold)))
-        (if icon
-            (concat icon " " backend)
-          backend)))))
+    (cond
+     ((and icon (not (string-empty-p icon))
+           (clutch--nerd-icons-available-p))
+      icon)
+     (name (propertize name 'face 'bold)))))
 
 (defun clutch--connection-state-icon (connected)
   "Return a connection state icon for CONNECTED."
@@ -977,8 +982,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
                               clutch-connection clutch--connection-params))
                (disconnect   (propertize
                               (concat (clutch--connection-state-icon nil)
-                                      " "
-                                      "Disconnect")
+                                      " Disconnect")
                               'face 'warning))
                (parts        (delq nil (list (if backend
                                                  backend
@@ -4446,14 +4450,27 @@ Includes a header row with column names."
              (length col-indices) (if (= (length col-indices) 1) "" "s"))))
 
 (defun clutch-result--goto-col-idx (col-idx)
-  "Move point to the first data cell matching COL-IDX in the buffer."
-  (goto-char (point-min))
-  (when-let* ((found (text-property-search-forward 'clutch-col-idx col-idx #'eq)))
-    (goto-char (prop-match-beginning found))
+  "Move point to COL-IDX in the current row, preserving the row position.
+When point is at line-end or a border, scan backward to find the row."
+  (let ((ridx (or (get-text-property (point) 'clutch-row-idx)
+                   (and (> (point) (line-beginning-position))
+                        (get-text-property (1- (point)) 'clutch-row-idx))
+                   (save-excursion
+                     (let ((prev (previous-single-property-change
+                                  (point) 'clutch-row-idx)))
+                       (when prev
+                         (get-text-property (max (1- prev) (point-min))
+                                            'clutch-row-idx)))))))
+    (if ridx
+        (clutch--goto-cell ridx col-idx)
+      (goto-char (point-min))
+      (when-let* ((found (text-property-search-forward
+                          'clutch-col-idx col-idx #'eq)))
+        (goto-char (prop-match-beginning found))))
     (clutch--ensure-point-visible-horizontally)))
 
 (defun clutch-result-goto-column ()
-  "Jump to a specific result column."
+  "Jump to a specific column in the current row."
   (interactive)
   (unless clutch--result-columns
     (user-error "No result columns"))
