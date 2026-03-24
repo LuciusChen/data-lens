@@ -725,20 +725,38 @@ Preserves point position (row + column) across the render."
   "Return the column index at point, from data cells."
   (get-text-property (point) 'clutch-col-idx))
 
+(defun clutch--column-border-position (cidx)
+  "Return the buffer column of the left border `│' for column CIDX."
+  (let* ((widths (clutch--effective-widths))
+         (nw (clutch--row-number-digits))
+         (pad clutch-column-padding)
+         ;; │ + mark + row-num + padding
+         (pos (+ 1 1 nw pad)))
+    (dotimes (i cidx)
+      (cl-incf pos (+ 1 (* 2 pad) (aref widths i))))
+    pos))
+
 (defun clutch--ensure-point-visible-horizontally ()
-  "Scroll the selected result window horizontally when point leaves view."
-  (when-let* ((win (get-buffer-window (current-buffer))))
-    (let* ((margin 2)
-           (col (current-column))
-           (hscroll (window-hscroll win))
-           (width (max 1 (window-body-width win))))
+  "Scroll the result window so the cell at point is fully visible.
+When the target column's border is outside the visible area, snap
+hscroll to that column's left border so it appears at the window edge."
+  (when-let* ((win (get-buffer-window (current-buffer)))
+              (cidx (get-text-property (point) 'clutch-col-idx)))
+    (let* ((hscroll (window-hscroll win))
+           (width (max 1 (window-body-width win)))
+           (widths (clutch--effective-widths))
+           (pad clutch-column-padding)
+           (border (clutch--column-border-position cidx))
+           (col-end (+ border 1 (* 2 pad) (aref widths cidx))))
       (cond
-       ((< col (+ hscroll margin))
-        (set-window-hscroll win (max 0 (- col margin))))
-       ((>= col (- (+ hscroll width) margin))
-        (set-window-hscroll
-         win
-         (max 0 (- col width (1- margin)))))))))
+       ;; Column border is left of visible area — page backward:
+       ;; place target column at the right edge of the window.
+       ((< border hscroll)
+        (set-window-hscroll win (max 0 (- col-end width))))
+       ;; Column right edge extends past visible area — page forward:
+       ;; place target column at the left edge of the window.
+       ((> col-end (+ hscroll width))
+        (set-window-hscroll win border))))))
 
 (defun clutch--goto-cell (ridx cidx)
   "Move point to the cell at ROW-IDX RIDX and COL-IDX CIDX.

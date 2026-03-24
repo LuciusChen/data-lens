@@ -209,7 +209,7 @@ Interactive result browsing with column paging, sorting, filtering, mutations.
 | `n` / `p` | `clutch-result-down-cell` / `clutch-result-up-cell` | Move to next/previous row in same column |
 | `N` / `P` | `clutch-result-next-page` / `clutch-result-prev-page` | Next / previous SQL page |
 | `M-<` / `M->` | `clutch-result-first-page` / `clutch-result-last-page` | First / last SQL page |
-| `]` / `[` | `clutch-result-scroll-right` / `clutch-result-scroll-left` | Scroll right / left |
+| `]` / `[` | `clutch-result-scroll-right` / `clutch-result-scroll-left` | Page right / left (snap to column border) |
 | `=` / `-` | `clutch-result-widen-column` / `clutch-result-narrow-column` | Adjust column width |
 | `C` | `clutch-result-goto-column` | Jump to a column by name |
 | `s` / `S` | `clutch-result-sort-by-column` / `clutch-result-sort-by-column-desc` | Sort by current column |
@@ -338,8 +338,8 @@ Line-by-line SQL evaluation with history and inline results.
 | `clutch-result-goto-cell` | Open FK, expand BLOB/JSON, or view record |
 | `clutch-result-page-down` | Next row page |
 | `clutch-result-page-up` | Previous row page |
-| `clutch-result-scroll-right` | Scroll the result window right |
-| `clutch-result-scroll-left` | Scroll the result window left |
+| `clutch-result-scroll-right` | Page right, snapping to the next column border |
+| `clutch-result-scroll-left` | Page left, snapping to the previous column border |
 
 ### Export
 
@@ -575,7 +575,7 @@ User types SQL in clutch-mode
 ### Horizontal Overflow
 
 - **Layout**: every result column is rendered into one buffer
-- **Navigation**: `]` / `[` scroll the window horizontally
+- **Navigation**: `]` / `[` page the window horizontally, snapping to column borders
 - **Searchability**: `isearch` and `TAB` traversal work across all columns
 - **Width adjustment**: `+` / `-` (increase/decrease by `clutch-column-width-step`)
 

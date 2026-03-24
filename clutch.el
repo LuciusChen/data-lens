@@ -58,6 +58,7 @@
 (declare-function clutch--ensure-point-visible-horizontally "clutch-ui" ())
 (declare-function clutch--header-line-display "clutch-ui" ())
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
+(declare-function clutch--column-border-position "clutch-ui" (cidx))
 
 ;;;; Customization
 
@@ -3317,8 +3318,8 @@ Navigate (row):
   \\[clutch-result-last-page]	Last data page
   \\[clutch-result-count-total]	Query total row count
   \\[clutch-result-aggregate]	Aggregate current/selected column values
-  \\[clutch-result-scroll-right]	Scroll right
-  \\[clutch-result-scroll-left]	Scroll left
+  \\[clutch-result-scroll-right]	Page right (snap to next column border)
+  \\[clutch-result-scroll-left]	Page left (snap to previous column border)
 Copy:
   \\[clutch-result-copy-dispatch]	Copy… (transient: choose format, -r to refine)
   \\[clutch-result-export]	Export all rows (copy/file)
@@ -3334,8 +3335,8 @@ Edit:
   \\[clutch-result-rerun]	Re-execute the query"
   (setq truncate-lines t)
   (hl-line-mode 1)
-  ;; Disable pixel-scroll in result buffers to keep row alignment
   (setq-local scroll-step 1)
+  (setq-local hscroll-step 1)
   ;; Make mode-line use default background so footer renders cleanly
   (face-remap-add-relative 'mode-line :inherit 'default)
   (face-remap-add-relative 'mode-line-inactive :inherit 'default)
@@ -4709,14 +4710,56 @@ When STMTS is nil, build statements from the current pending state."
 ;;;; Horizontal scrolling and width adjustment
 
 (defun clutch-result-scroll-right ()
-  "Scroll the current result window to the right."
+  "Page the result window right with one-column overlap.
+The last column whose border falls within the current viewport becomes
+the first column of the new view, so partially visible edge columns
+remain visible after paging."
   (interactive)
-  (scroll-left (max 1 (/ (window-body-width) 2))))
+  (when-let* ((win (get-buffer-window (current-buffer))))
+    (let* ((hs (window-hscroll win))
+           (width (window-body-width win))
+           (right-edge (+ hs width))
+           (ncols (length clutch--result-columns))
+           (last-in-view nil)
+           (first-past nil))
+      (dotimes (i ncols)
+        (let ((border (clutch--column-border-position i)))
+          (cond
+           ((and (> border hs) (< border right-edge))
+            (setq last-in-view border))
+           ((and (>= border right-edge) (null first-past))
+            (setq first-past border)))))
+      (cond
+       (last-in-view (set-window-hscroll win last-in-view))
+       (first-past   (set-window-hscroll win first-past))
+       (t (message "Already at rightmost columns"))))))
 
 (defun clutch-result-scroll-left ()
-  "Scroll the current result window to the left."
+  "Page the result window left with one-column overlap.
+The column at the current left edge remains visible near the right
+edge of the new view, so partially visible edge columns stay visible
+after paging."
   (interactive)
-  (scroll-right (max 1 (/ (window-body-width) 2))))
+  (when-let* ((win (get-buffer-window (current-buffer))))
+    (let* ((hs (window-hscroll win))
+           (width (window-body-width win))
+           (ncols (length clutch--result-columns)))
+      (when (> hs 0)
+        ;; Column at the current left edge (largest border <= hs).
+        (let ((first-border 0)
+              (target nil))
+          (dotimes (i ncols)
+            (let ((border (clutch--column-border-position i)))
+              (when (<= border hs)
+                (setq first-border border))))
+          ;; Smallest column border that keeps first-border in the new view:
+          ;; new-hs + width > first-border  →  new-hs > first-border - width
+          (let ((min-new (- first-border width)))
+            (dotimes (i ncols)
+              (let ((border (clutch--column-border-position i)))
+                (when (and (> border min-new) (< border hs) (null target))
+                  (setq target border)))))
+          (set-window-hscroll win (max 0 (or target 0))))))))
 
 (defun clutch-result-widen-column ()
   "Widen the column at point by `clutch-column-width-step'."
@@ -5112,8 +5155,8 @@ Accumulates input until a semicolon is found, then executes."
     ("P" "Prev page"         clutch-result-prev-page)
     ("M-<" "First page"      clutch-result-first-page)
     ("M->" "Last page"       clutch-result-last-page)
-    ("]" "Scroll right"      clutch-result-scroll-right)
-    ("[" "Scroll left"       clutch-result-scroll-left)]
+    ("]" "Page right →│"     clutch-result-scroll-right)
+    ("[" "Page left │←"      clutch-result-scroll-left)]
    ["Mutate"
     ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
     ("i" "Stage insert"      clutch-result-insert-row)

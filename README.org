@@ -57,7 +57,7 @@ For backend-specific implementation notes, see
 - Inline cell editing with UPDATE generation
 - Inline INSERT (=o=) and DELETE (=d=) rows with confirmation
 - WHERE filtering (=W=), client-side fuzzy filter (=/=), SQL =ORDER BY= sorting (=s=)
-- Horizontal scrolling via =[= / =]=, plus column width adjustment via =-= / ===
+- Column-aligned horizontal paging via =[= / =]=, plus column width adjustment via =-= / ===
 - CSV/Org export, copy as INSERT
 - Object picker and actions for =Tables= / =Views= / =Synonyms= / =Indexes= / =Sequences= / =Procedures= / =Functions= / =Triggers=, with annotated minibuffer candidates, type-grouped completion, optional prefix filtering, and a no-Embark transient fallback
 - SQL completion: table/column names scoped to the current statement, with synchronous column loading kept conservative for large schemas, plus keywords; completion case can be customized via =clutch-sql-completion-case-style=
@@ -277,8 +277,8 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =M->= / =M-<= | Last page / first page                       |
 | =#=            | Query total row count                         |
 | =A=            | Aggregate numeric values (region/current cell; =C-u= with region enters visual refine mode) |
-| =]=            | Scroll right                                  |
-| =[=            | Scroll left                                   |
+| =]=            | Page right (snap to next column border)       |
+| =[=            | Page left (snap to previous column border)    |
 | ===            | Widen current column                          |
 | =-=            | Narrow current column                         |
 | =W=            | WHERE filter (press again to clear)           |
@@ -392,7 +392,7 @@ Typical flow:
               → mode-line shows: Σ 500 of ? rows • 1 / 1 • ⏱ 42ms
 3. N / P      Next page / previous page
 4. #          Query total rows → mode-line shows "Σ 500 of 1234 rows"
-5. ] / [      Scroll horizontally when result has many columns
+5. ] / [      Page horizontally with column-aligned snapping
               → all columns stay searchable because they remain in the buffer
 6. W          Enter filter: status = 'pending'
               → Appends WHERE clause, re-queries from page 1

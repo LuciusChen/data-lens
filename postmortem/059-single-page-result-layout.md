@@ -36,7 +36,8 @@ behavior instead of simplifying it.
 
 ## Consequences
 
-- `[` and `]` become plain horizontal scrolling affordances for wide rows.
+- `[` and `]` become column-aligned paging affordances: each press snaps the
+  viewport to the next/previous column border, keeping cell content fully visible.
 - `C` continues to jump to a column, but no longer changes result pages.
 - Pin/unpin commands and column-page indicators are removed.
 - Header/footer rendering no longer needs left/right page-edge markers.
