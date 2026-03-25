@@ -85,8 +85,12 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "Current row index being displayed in a record buffer.")
 (defvar-local clutch-record--expanded-fields nil
   "List of expanded long field column indices in a record buffer.")
+(defvar-local clutch-record--header-base nil
+  "Cached record header string, set during render.")
 (defvar clutch-column-padding)
 (defvar clutch-connection)
+(defvar clutch-describe--header-base)
+(defvar clutch-record--header-base)
 (defvar clutch-result-max-rows)
 
 (declare-function clutch--bind-connection-context "clutch" (conn &optional params product))
@@ -185,6 +189,22 @@ the real rendered width, preventing column misalignment."
   "Return footer icon SPEC/FALLBACK with explicit FACE."
   (concat (clutch--icon-with-face spec fallback face)
           (propertize " " 'face face)))
+
+(defun clutch--disconnected-badge ()
+  "Return a disconnected indicator string with warning face, or nil if connected."
+  (unless clutch-connection
+    (concat (clutch--icon-with-face '(mdicon . "nf-md-database_off") "⨯" 'warning)
+            (propertize " Disconnected" 'face 'warning))))
+
+(defun clutch--header-with-disconnect-badge (base)
+  "Prepend disconnected badge to BASE header string when not connected."
+  (let ((badge (clutch--disconnected-badge)))
+    (if badge
+        (concat (propertize " " 'display '(space :align-to 0))
+                badge
+                (propertize "  •  " 'face 'font-lock-comment-face)
+                base)
+      (or base ""))))
 
 (defun clutch--clear-executed-sql-overlay (&rest _)
   "Remove the last executed SQL overlay in the current buffer."
@@ -546,10 +566,12 @@ Returns a list of propertized strings (may be empty)."
 
 (defun clutch--footer-mode-line-display ()
   "Return the display-ready mode-line string with dynamic cursor position."
-  (let ((base (or clutch--footer-base-string ""))
+  (let ((badge (clutch--disconnected-badge))
+        (base (or clutch--footer-base-string ""))
         (cursor (clutch--footer-cursor-part))
         (sep (propertize "  •  " 'face 'font-lock-comment-face)))
     (concat (propertize " " 'display '(space :align-to 0))
+            (when badge (concat badge sep))
             base
             (when cursor (concat sep cursor)))))
 

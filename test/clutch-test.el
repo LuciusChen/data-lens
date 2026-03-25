@@ -3646,6 +3646,129 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                                     (substring-no-properties header-line-format)))))
       (kill-buffer buf))))
 
+(ert-deftest clutch-test-kill-console-disconnects-and-invalidates ()
+  "Killing a console buffer disconnects and invalidates derived buffers."
+  (let ((disconnected nil)
+        (console (generate-new-buffer " *clutch-console*"))
+        (result (generate-new-buffer " *clutch-result*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_c) t))
+                  ((symbol-function 'clutch-db-disconnect)
+                   (lambda (_c) (setq disconnected t)))
+                  ((symbol-function 'clutch--confirm-disconnect-transaction-loss) #'ignore)
+                  ((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
+                  ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
+                  ((symbol-function 'clutch--save-console) #'ignore))
+          (with-current-buffer result
+            (setq-local clutch-connection 'fake-conn))
+          (with-current-buffer console
+            (clutch-mode)
+            (setq clutch-connection 'fake-conn))
+          (kill-buffer console)
+          (should disconnected)
+          ;; Derived buffer's connection should be invalidated.
+          (should-not (buffer-local-value 'clutch-connection result)))
+      (when (buffer-live-p console) (kill-buffer console))
+      (when (buffer-live-p result) (kill-buffer result)))))
+
+(ert-deftest clutch-test-kill-indirect-buffer-does-not-disconnect ()
+  "Killing an indirect SQL buffer must NOT disconnect the connection."
+  (let ((disconnected nil)
+        (buf (generate-new-buffer " *clutch-indirect*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_c) t))
+                  ((symbol-function 'clutch-db-disconnect)
+                   (lambda (_c) (setq disconnected t)))
+                  ((symbol-function 'clutch--save-console) #'ignore))
+          (with-current-buffer buf
+            (clutch-mode)
+            (clutch-indirect-mode 1)
+            (setq clutch-connection 'fake-conn))
+          (kill-buffer buf))
+      (when (buffer-live-p buf) (kill-buffer buf)))
+    (should-not disconnected)))
+
+(ert-deftest clutch-test-kill-plain-sql-buffer-disconnects ()
+  "Killing a plain clutch-mode buffer (no console-name) that owns a
+connection should still disconnect."
+  (let ((disconnected nil)
+        (buf (generate-new-buffer " *clutch-plain-sql*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_c) t))
+                  ((symbol-function 'clutch-db-disconnect)
+                   (lambda (_c) (setq disconnected t)))
+                  ((symbol-function 'clutch--confirm-disconnect-transaction-loss) #'ignore)
+                  ((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
+                  ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
+                  ((symbol-function 'clutch--save-console) #'ignore))
+          (with-current-buffer buf
+            (clutch-mode)
+            ;; No clutch--console-name, no clutch-indirect-mode.
+            (setq clutch-connection 'fake-conn))
+          (kill-buffer buf))
+      (when (buffer-live-p buf) (kill-buffer buf)))
+    (should disconnected)))
+
+(ert-deftest clutch-test-kill-repl-buffer-disconnects ()
+  "Killing a REPL buffer that owns a connection should disconnect."
+  (let ((disconnected nil)
+        (buf (generate-new-buffer " *clutch-repl-kill*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_c) t))
+                  ((symbol-function 'clutch-db-disconnect)
+                   (lambda (_c) (setq disconnected t)))
+                  ((symbol-function 'clutch--confirm-disconnect-transaction-loss) #'ignore)
+                  ((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
+                  ((symbol-function 'clutch--clear-tx-dirty) #'ignore))
+          (with-current-buffer buf
+            (clutch-repl-mode)
+            (setq clutch-connection 'fake-conn))
+          (kill-buffer buf))
+      (when (buffer-live-p buf) (kill-buffer buf)))
+    (should disconnected)))
+
+(ert-deftest clutch-test-reconnect-invalidates-derived-buffers ()
+  "Reconnecting in a console should invalidate derived buffers holding the old connection."
+  (let ((old-conn (list 'old))
+        (new-conn (list 'new))
+        (result (generate-new-buffer " *clutch-result-reconnect*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (c) (eq c old-conn)))
+                  ((symbol-function 'clutch-db-disconnect) #'ignore)
+                  ((symbol-function 'clutch--confirm-disconnect-transaction-loss) #'ignore)
+                  ((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
+                  ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
+                  ((symbol-function 'clutch--read-connection-params)
+                   (lambda () '(:host "localhost")))
+                  ((symbol-function 'clutch--effective-sql-product) (lambda (_p) 'mysql))
+                  ((symbol-function 'clutch--build-conn) (lambda (_p) new-conn))
+                  ((symbol-function 'clutch--bind-connection-context) #'ignore)
+                  ((symbol-function 'clutch--prime-schema-cache) #'ignore)
+                  ((symbol-function 'clutch--update-mode-line) #'ignore)
+                  ((symbol-function 'clutch--connection-key) (lambda (_c) "test")))
+          (with-current-buffer result
+            (setq-local clutch-connection old-conn))
+          (let ((clutch-connection old-conn))
+            (clutch-connect))
+          ;; After reconnect, derived buffer should be invalidated.
+          (should-not (buffer-local-value 'clutch-connection result)))
+      (when (buffer-live-p result) (kill-buffer result)))))
+
+(ert-deftest clutch-test-kill-result-buffer-does-not-disconnect ()
+  "Killing a derived result buffer must NOT disconnect the connection."
+  (let ((disconnected nil)
+        (buf (generate-new-buffer " *clutch-result-kill*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-db-disconnect)
+                   (lambda (_c) (setq disconnected t)))
+                  ((symbol-function 'clutch--result-buffer-cleanup) #'ignore))
+          (with-current-buffer buf
+            (clutch-result-mode)
+            (setq clutch-connection 'fake-conn))
+          (kill-buffer buf))
+      (when (buffer-live-p buf) (kill-buffer buf)))
+    (should-not disconnected)))
+
 (ert-deftest clutch-test-toggle-auto-commit-manual-to-auto ()
   "Toggling from manual→auto (clean) calls set-auto-commit(t) and clears dirty."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
@@ -5333,9 +5456,9 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
        'fake-conn
        '(:name "orders" :type "TABLE" :source-schema "PUBLIC"))
       (should (string-match-p "PUBLIC.orders (TABLE)" (buffer-string)))
-      (should (string-match-p "\\[desc\\]" (format "%s" header-line-format)))
-      (should (string-match-p "show definition" (format "%s" header-line-format)))
-      (should-not (string-match-p "PUBLIC.orders" (format "%s" header-line-format))))))
+      (should (string-match-p "\\[desc\\]" clutch-describe--header-base))
+      (should (string-match-p "show definition" clutch-describe--header-base))
+      (should-not (string-match-p "PUBLIC.orders" clutch-describe--header-base)))))
 
 (ert-deftest clutch-test-render-object-describe-fontifies-short-standalone-index-name ()
   "Short standalone index names in describe buffers should be highlighted."

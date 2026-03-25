@@ -197,7 +197,9 @@ ORDER-BY is (COL . DIR) or nil.  ESCAPE-FN escapes the column name."
   "Disconnect CONN from the database server.")
 
 (cl-defgeneric clutch-db-live-p (conn)
-  "Return non-nil if CONN is still connected and usable.")
+  "Return non-nil if CONN is still connected and usable."
+  (ignore conn)
+  nil)
 
 (cl-defgeneric clutch-db-init-connection (conn)
   "Perform post-connect initialization on CONN.

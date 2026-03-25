@@ -31,6 +31,7 @@ Each value is a plist with at least :entries and :fetched-at.")
 (defvar embark-keymap-alist)
 
 (declare-function clutch--bind-connection-context "clutch" (conn &optional params product))
+(declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
 (declare-function clutch--connection-alive-p "clutch" (conn))
 (declare-function clutch--effective-sql-product "clutch" (params))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table))
@@ -1043,13 +1044,16 @@ selection can surface objects from different Oracle sources and types."
     (clutch--bind-connection-context conn params product)
     (setq-local clutch-browser-current-object entry
                 clutch--describe-object-entry entry
-                header-line-format
+                clutch-describe--header-base
                 (let ((icon (clutch--icon-with-face '(mdicon . "nf-md-table")
                                                     "▦" 'header-line)))
                   (if (string-empty-p icon)
                       " [s: show definition  C-c C-o: object actions  g: refresh]"
                     (format " %s  [s: show definition  C-c C-o: object actions  g: refresh]"
                             icon)))
+                header-line-format
+                '(:eval (clutch--header-with-disconnect-badge
+                         clutch-describe--header-base))
                 revert-buffer-function #'clutch-describe-refresh)
     (erase-buffer)
     (insert (clutch--object-describe-text conn entry))
@@ -1085,6 +1089,9 @@ selection can surface objects from different Oracle sources and types."
     (define-key map (kbd "g") #'clutch-describe-refresh)
     map)
   "Keymap for `clutch-describe-mode'.")
+
+(defvar-local clutch-describe--header-base nil
+  "Cached describe header string, set during render.")
 
 (define-derived-mode clutch-describe-mode special-mode "clutch-describe"
   "Major mode for clutch object describe buffers.")

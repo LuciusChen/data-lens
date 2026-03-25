@@ -862,7 +862,11 @@ If the connection has dropped, attempts to reconnect automatically
 using the stored params.  Signals a user-error if not recoverable."
   (unless (clutch--connection-alive-p clutch-connection)
     (unless (clutch--try-reconnect)
-      (user-error "Not connected.  Use C-c C-e to connect"))))
+      (user-error
+       (if (derived-mode-p 'clutch-result-mode 'clutch-record-mode
+                           'clutch-describe-mode)
+           "Connection closed.  Reconnect from the SQL buffer or REPL"
+         "Not connected.  Use C-c C-e to connect")))))
 
 (defun clutch--schema-status-header-line-segment (conn)
   "Return a header-line segment for CONN schema status, or nil.
@@ -970,8 +974,8 @@ to the display name (e.g. \"MySQL\")."
 (defun clutch--connection-state-icon (connected)
   "Return a connection state icon for CONNECTED."
   (if connected
-      (clutch--icon '(mdicon . "nf-md-connection") "⇄")
-    (clutch--icon '(mdicon . "nf-md-close_network") "⨯")))
+      (clutch--icon '(mdicon . "nf-md-database") "⬢")
+    (clutch--icon '(mdicon . "nf-md-database_off") "⨯")))
 
 (defun clutch--header-line-indent ()
   "Return leading spaces to align header-line text with the buffer text area.
@@ -1174,8 +1178,7 @@ params; see `clutch-connection-alist' for details."
            (product (clutch--effective-sql-product params))
            (conn    (clutch--build-conn params)))
       (when old-live-p
-        (clutch--clear-tx-dirty old-conn)
-        (clutch-db-disconnect old-conn))
+        (clutch--do-disconnect old-conn))
       (clutch--bind-connection-context conn params product)
       (clutch--prime-schema-cache conn)
       (clutch--update-mode-line)
@@ -1188,14 +1191,43 @@ params; see `clutch-connection-alist' for details."
     (clutch--confirm-disconnect-transaction-loss
      clutch-connection
      "Uncommitted changes will be lost.  Disconnect? ")
-    (clutch--mark-dml-results-connection-closed clutch-connection)
-    (clutch--clear-tx-dirty clutch-connection)
-    (clutch-db-disconnect clutch-connection)
+    (clutch--do-disconnect clutch-connection)
     (message "Disconnected"))
   (setq clutch-connection nil)
   (when clutch--console-name
     (clutch--update-console-buffer-name))
   (clutch--update-mode-line))
+
+(defun clutch--invalidate-derived-buffers (conn)
+  "Nil out `clutch-connection' in all non-current buffers sharing CONN.
+Also refreshes their mode-line/header-line to reflect the disconnected state."
+  (dolist (buf (buffer-list))
+    (when (and (buffer-live-p buf)
+               (not (eq buf (current-buffer)))
+               (eq (buffer-local-value 'clutch-connection buf) conn))
+      (with-current-buffer buf
+        (setq-local clutch-connection nil)
+        (force-mode-line-update)))))
+
+(defun clutch--do-disconnect (conn)
+  "Perform full disconnect sequence for CONN.
+Marks DML results, invalidates derived buffers, clears transaction
+state, and disconnects the underlying connection."
+  (clutch--mark-dml-results-connection-closed conn)
+  (clutch--invalidate-derived-buffers conn)
+  (clutch--clear-tx-dirty conn)
+  (clutch-db-disconnect conn))
+
+(defun clutch--disconnect-on-kill ()
+  "Disconnect the connection owned by this buffer.
+Invalidates all derived buffers that share the same connection.
+Does nothing in indirect SQL buffers (`clutch-indirect-mode')."
+  (when (and (not (bound-and-true-p clutch-indirect-mode))
+             (clutch--connection-alive-p clutch-connection))
+    (clutch--confirm-disconnect-transaction-loss
+     clutch-connection
+     "Uncommitted changes will be lost.  Kill buffer? ")
+    (clutch--do-disconnect clutch-connection)))
 
 (defun clutch-commit ()
   "Commit the current transaction."
@@ -3164,6 +3196,7 @@ Key bindings:
   \\[clutch-preview-execution-sql]	Preview execution"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
   (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
+  (add-hook 'kill-buffer-hook #'clutch--disconnect-on-kill nil t)
   (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
   (clutch--install-completion-capfs)
   (add-hook 'eldoc-documentation-functions
@@ -5000,9 +5033,11 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
     (unless (< ridx (length rows))
       (user-error "Row %d no longer exists" ridx))
     (erase-buffer)
+    (setq-local clutch-record--header-base
+                (propertize (format " Record: row %d/%d" (1+ ridx) (length rows))
+                            'face 'clutch-header-face))
     (setq header-line-format
-          (propertize (format " Record: row %d/%d" (1+ ridx) (length rows))
-                      'face 'clutch-header-face))
+          '(:eval (clutch--header-with-disconnect-badge clutch-record--header-base)))
     (let* ((row (nth ridx rows))
            (max-name-w (apply #'max (mapcar #'string-width col-names))))
       (cl-loop for name in col-names
@@ -5119,7 +5154,8 @@ Selects JSON, XML, or binary string view based on column type and content."
   \\[clutch-switch-schema]	Switch schema"
   (setq comint-prompt-regexp "^db> \\|^    -> ")
   (setq comint-input-sender #'clutch-repl--input-sender)
-  (clutch--install-completion-capfs))
+  (clutch--install-completion-capfs)
+  (add-hook 'kill-buffer-hook #'clutch--disconnect-on-kill nil t))
 
 (defun clutch-repl--input-sender (_proc input)
   "Process INPUT from comint.
