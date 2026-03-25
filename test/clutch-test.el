@@ -1847,6 +1847,22 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (clutch--run-db-query conn "UPDATE demo SET x = 1")
       (should (clutch--tx-dirty-p conn)))))
 
+(ert-deftest clutch-test-tx-header-line-segment-preserves-icon-family ()
+  "Transaction header icons should keep the nerd-icons font family."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--tx-dirty-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--icon)
+               (lambda (_spec &rest _fallback)
+                 (propertize "[lock]"
+                             'face '(:family "Symbols Nerd Font Mono")))))
+      (let* ((seg (clutch--tx-header-line-segment clutch-connection))
+             (face (get-text-property 0 'face seg)))
+        (should (equal face '((:family "Symbols Nerd Font Mono") warning)))))))
+
 (ert-deftest clutch-test-run-db-query-clears-dirty-on-commit ()
   "Successful COMMIT should clear dirty manual-commit state."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))

@@ -736,12 +736,18 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
   "Return a header-line segment for CONN transaction state, or nil.
 Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
   (when conn
-    (let ((icon (clutch--icon '(mdicon . "nf-md-database_lock") "⛁")))
-      (if (clutch-db-manual-commit-p conn)
-          (if (clutch--tx-dirty-p conn)
-              (propertize (concat icon " Tx: Manual*") 'face 'error)
-            (propertize (concat icon " Tx: Manual")   'face 'warning))
-        (propertize (concat icon " Tx: Auto") 'face 'success)))))
+    (let* ((icon (copy-sequence (clutch--icon '(mdicon . "nf-md-database_lock") "⛁")))
+           (state-face (if (clutch-db-manual-commit-p conn)
+                           (if (clutch--tx-dirty-p conn) 'error 'warning)
+                         'success))
+           (label (if (clutch-db-manual-commit-p conn)
+                      (if (clutch--tx-dirty-p conn) "Tx: Manual*" "Tx: Manual")
+                    "Tx: Auto")))
+      (unless (string-empty-p icon)
+        (add-face-text-property 0 (length icon) state-face 'append icon))
+      (concat (unless (string-empty-p icon)
+                (concat icon " "))
+              (propertize label 'face state-face)))))
 
 (defun clutch--record-tx-state-after-query (conn sql)
   "Update transaction dirty state for successful SQL on CONN."
