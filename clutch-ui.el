@@ -141,12 +141,17 @@ installed or the icon is unknown."
         fallback
         "")))
 
+(defun clutch--append-face (string face)
+  "Return STRING with FACE appended, preserving existing properties."
+  (let ((copy (copy-sequence string)))
+    (unless (or (null face)
+                (string-empty-p copy))
+      (add-face-text-property 0 (length copy) face 'append copy))
+    copy))
+
 (defun clutch--icon-with-face (name fallback face &rest icon-args)
   "Return icon NAME/FALLBACK with FACE appended to its text properties."
-  (let ((icon (apply #'clutch--icon name fallback icon-args)))
-    (unless (string-empty-p icon)
-      (add-face-text-property 0 (length icon) face 'append icon))
-    icon))
+  (clutch--append-face (apply #'clutch--icon name fallback icon-args) face))
 
 (defun clutch--fixed-width-icon (spec fallback &optional face)
   "Return icon with `string-width' matching actual display width.
@@ -160,6 +165,7 @@ number of space characters.  This ensures `string-width' matches
 the real rendered width, preventing column misalignment."
   (let* ((raw (clutch--icon spec fallback))
          (raw (if (string-empty-p raw) fallback raw))
+         (raw (clutch--append-face raw face))
          (result
           (if (and (fboundp 'string-pixel-width)
                    (fboundp 'default-font-width)
@@ -173,11 +179,12 @@ the real rendered width, preventing column misalignment."
                     raw
                   (propertize (make-string cells ?\s) 'display raw)))
             raw)))
-    (if face (propertize result 'face face) result)))
+    result))
 
 (defun clutch--footer-icon (spec fallback face)
   "Return footer icon SPEC/FALLBACK with explicit FACE."
-  (propertize (concat (clutch--icon spec fallback) " ") 'face face))
+  (concat (clutch--icon-with-face spec fallback face)
+          (propertize " " 'face face)))
 
 (defun clutch--clear-executed-sql-overlay (&rest _)
   "Remove the last executed SQL overlay in the current buffer."

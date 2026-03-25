@@ -539,6 +539,20 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should-not (string-match-p "commit:" footer))
         (should-not (string-match-p "discard:" footer))))))
 
+(ert-deftest clutch-test-footer-icon-preserves-icon-family ()
+  "Footer icons should keep the nerd-icons font family when tinted."
+  (cl-letf (((symbol-function 'clutch--icon)
+             (lambda (_spec &rest _fallback)
+               (propertize "[files]"
+                           'face '(:family "Symbols Nerd Font Mono")))))
+    (let* ((icon (clutch--footer-icon '(codicon . "nf-cod-files")
+                                      "⊞"
+                                      'font-lock-keyword-face))
+           (face (get-text-property 0 'face icon)))
+      (should (equal face
+                     '((:family "Symbols Nerd Font Mono")
+                       font-lock-keyword-face))))))
+
 (ert-deftest clutch-test-render-footer-warns-when-primary-key-missing ()
   "Footer should explain when edit/delete are disabled due to missing PK."
   (with-temp-buffer
@@ -1863,6 +1877,36 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
              (face (get-text-property 0 'face seg)))
         (should (equal face '((:family "Symbols Nerd Font Mono") warning)))))))
 
+(ert-deftest clutch-test-icon-with-face-preserves-family-without-mutating-source ()
+  "Tinting an icon should preserve its family and leave the source string untouched."
+  (let ((source (propertize (copy-sequence "[icon]")
+                            'face '(:family "Symbols Nerd Font Mono"))))
+    (cl-letf (((symbol-function 'clutch--icon)
+               (lambda (_spec &rest _fallback)
+                 source)))
+      (let* ((icon (clutch--icon-with-face '(codicon . "nf-cod-files")
+                                           "⊞"
+                                           'font-lock-keyword-face))
+             (source-face (get-text-property 0 'face source))
+             (icon-face (get-text-property 0 'face icon)))
+        (should (equal source-face '(:family "Symbols Nerd Font Mono")))
+        (should (equal icon-face
+                       '((:family "Symbols Nerd Font Mono")
+                         font-lock-keyword-face)))))))
+
+(ert-deftest clutch-test-fixed-width-icon-preserves-icon-family-when-faced ()
+  "Fixed-width icons should append FACE without dropping the icon family."
+  (cl-letf (((symbol-function 'clutch--icon)
+             (lambda (_spec &rest _fallback)
+               (propertize "[sort]"
+                           'face '(:family "Symbols Nerd Font Mono")))))
+    (let* ((icon (clutch--fixed-width-icon '(codicon . "nf-cod-arrow_up")
+                                           "▲"
+                                           'header-line))
+           (face (get-text-property 0 'face icon)))
+      (should (equal face
+                     '((:family "Symbols Nerd Font Mono")
+                       header-line))))))
 (ert-deftest clutch-test-run-db-query-clears-dirty-on-commit ()
   "Successful COMMIT should clear dirty manual-commit state."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
