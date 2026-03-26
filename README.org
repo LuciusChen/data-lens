@@ -264,6 +264,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-u=   | Roll back transaction (manual-commit connections only) |
 | =C-c C-a=   | Toggle auto-commit on/off for the current connection |
 | =C-c ?=     | Transient menu             |
+| =M-.=       | Jump to table alias definition in FROM/JOIN clause |
 | =TAB=       | Complete table/column name |
 
 ** Result Browser (clutch-result-mode) Key Bindings

@@ -48,6 +48,7 @@
 (require 'clutch-ui)
 (require 'clutch-object)
 (require 'clutch-edit)
+(require 'xref)
 
 (defvar clutch--describe-object-entry)
 
@@ -2550,6 +2551,146 @@ When the statement has no UNION, returns all aliases."
         all-aliases
       (cdr (clutch--extract-tables-and-aliases text (car range) (cdr range))))))
 
+(defun clutch--toplevel-union-branch-range (text point-offset)
+  "Return (BEG . END) of the depth-0 UNION branch containing POINT-OFFSET.
+Unlike `clutch--union-branch-range', does not narrow into parenthesized
+scopes first, so FROM/JOIN clauses remain visible from inside expressions."
+  (let ((len (length text))
+        (depth 0)
+        (boundaries (list 0))
+        (case-fold-search t)
+        (i 0))
+    (while (< i len)
+      (if-let* ((skip (clutch-db-sql-skip-literal/comment text i)))
+          (setq i skip)
+        (pcase (aref text i)
+          (?\( (cl-incf depth) (cl-incf i))
+          (?\) (cl-decf depth) (cl-incf i))
+          (_
+           (if (and (zerop depth)
+                    (string-match "\\bunion\\b\\(?:[ \t\n\r]+all\\b\\)?" text i)
+                    (= (match-beginning 0) i))
+               (progn
+                 (push (match-beginning 0) boundaries)
+                 (push (match-end 0) boundaries)
+                 (setq i (match-end 0)))
+             (cl-incf i))))))
+    (push len boundaries)
+    (setq boundaries (nreverse boundaries))
+    (let ((beg 0) (end len))
+      (while boundaries
+        (let ((b (pop boundaries)))
+          (cond
+           ((<= b point-offset) (setq beg b))
+           (t (setq end b boundaries nil)))))
+      (cons beg end))))
+
+(defun clutch--find-alias-in-range (text masked alias stmt-beg search-beg search-end)
+  "Search for ALIAS definition in TEXT between SEARCH-BEG and SEARCH-END.
+MASKED is the literal/comment-masked version of TEXT.
+Returns the buffer position (offset by STMT-BEG), or nil."
+  (let ((case-fold-search t)
+        (pos search-beg))
+    (catch 'found
+      (while (and (< pos search-end)
+                  (string-match
+                   "\\b\\(from\\|join\\|update\\|into\\)[ \t\n\r]+\\([[:alnum:]_$#.`\"]+\\)"
+                   masked pos))
+        (when (>= (match-beginning 0) search-end)
+          (throw 'found nil))
+        (let ((table-end (match-end 2))
+              (alias-pos nil))
+          (setq pos table-end)
+          (when (and (string-match
+                      "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\([[:alnum:]_$#`\"]+\\)"
+                      masked table-end)
+                     (= (match-beginning 0) table-end)
+                     (< (match-beginning 0) search-end))
+            (let* ((token (match-string 1 text))
+                   (normalized (clutch--normalize-statement-table-token token)))
+              (when (and normalized
+                         (not (member (upcase normalized) clutch--sql-keywords))
+                         (string-equal-ignore-case normalized alias))
+                (setq alias-pos (+ stmt-beg (match-beginning 1))))))
+          (when alias-pos
+            (throw 'found alias-pos))
+          (setq pos (max pos (if (match-end 0) (match-end 0) (1+ pos)))))))))
+
+(defun clutch--find-alias-definition-position (alias)
+  "Return buffer position of ALIAS definition in the current statement.
+First searches the innermost paren scope (subquery), then falls back to
+the top-level UNION branch so expression parens like SUM(...) don't hide
+outer FROM/JOIN clauses."
+  (let* ((bounds (clutch--statement-bounds))
+         (stmt-beg (car bounds))
+         (text (buffer-substring-no-properties stmt-beg (cdr bounds)))
+         (point-offset (- (point) stmt-beg))
+         (masked (clutch-db-sql-mask-literal/comment text))
+         (inner (clutch--union-branch-range text point-offset))
+         (outer (clutch--toplevel-union-branch-range text point-offset)))
+    (or (clutch--find-alias-in-range text masked alias stmt-beg
+                                     (car inner) (cdr inner))
+        (clutch--find-alias-in-range text masked alias stmt-beg
+                                     (car outer) (cdr outer)))))
+
+;;; xref backend — alias jump-to-definition
+
+(defun clutch--xref-backend ()
+  "Return `clutch' as xref backend in clutch SQL buffers.
+Always claims the backend to prevent fallthrough to etags, which
+triggers syntax_table errors in `sql-mode' derived buffers."
+  (when clutch-connection 'clutch))
+
+(defun clutch--xref-symbol-at-point ()
+  "Return the SQL identifier at point without relying on syntax tables.
+Returns (BEG . SYMBOL) or nil.  Uses explicit character scanning to
+avoid `sql-mode' syntax-table errors that break `thing-at-point'."
+  (save-excursion
+    (let ((end (progn (skip-chars-forward "[:alnum:]_$#`\"") (point)))
+          (beg (progn (skip-chars-backward "[:alnum:]_$#`\"") (point))))
+      (when (< beg end)
+        (cons beg (buffer-substring-no-properties beg end))))))
+
+(defun clutch--xref-alias-at-point ()
+  "Return the normalized alias name at point, or nil.
+Handles both bare aliases (`u') and qualified references (`u.name').
+Normalizes quoted identifiers to match the alias cache."
+  (when-let* ((hit (clutch--xref-symbol-at-point))
+              (beg (car hit))
+              (sym (cdr hit))
+              (raw (or (clutch--qualified-identifier-qualifier beg) sym)))
+    (clutch--normalize-statement-table-token raw)))
+
+(defun clutch--xref-statement-aliases ()
+  "Return alias alist for the current statement without requiring schema cache.
+Falls back to UNION-branch-aware direct extraction when the schema cache
+is unavailable."
+  (let ((schema (clutch--schema-for-connection clutch-connection)))
+    (if schema
+        (clutch--table-aliases-in-current-statement schema)
+      (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
+                   (text (buffer-substring-no-properties beg end))
+                   (point-offset (- (point) beg))
+                   (range (clutch--toplevel-union-branch-range text point-offset)))
+        (cdr (clutch--extract-tables-and-aliases
+              text (car range) (cdr range)))))))
+
+(cl-defmethod xref-backend-identifier-at-point ((_backend (eql 'clutch)))
+  "Return the identifier at point, preferring normalized alias names."
+  (or (clutch--xref-alias-at-point)
+      (cdr (clutch--xref-symbol-at-point))
+      ""))
+
+(cl-defmethod xref-backend-definitions ((_backend (eql 'clutch)) identifier)
+  "Return xref location of alias IDENTIFIER definition in the current statement."
+  (when-let* ((pos (clutch--find-alias-definition-position identifier)))
+    (list (xref-make (format "%s (alias)" identifier)
+                     (xref-make-buffer-location (current-buffer) pos)))))
+
+(cl-defmethod xref-backend-references ((_backend (eql 'clutch)) _identifier)
+  "Not yet implemented."
+  nil)
+
 (defun clutch--tables-in-query (schema)
   "Return known table names in FROM/JOIN/UPDATE clauses of current statement.
 Scans only the SQL statement surrounding point, bounded by semicolons or
@@ -3201,6 +3342,7 @@ Key bindings:
   (clutch--install-completion-capfs)
   (add-hook 'eldoc-documentation-functions
             #'clutch--eldoc-function nil t)
+  (add-hook 'xref-backend-functions #'clutch--xref-backend nil t)
   (clutch--update-mode-line))
 
 ;;;###autoload
@@ -5155,6 +5297,7 @@ Selects JSON, XML, or binary string view based on column type and content."
   (setq comint-prompt-regexp "^db> \\|^    -> ")
   (setq comint-input-sender #'clutch-repl--input-sender)
   (clutch--install-completion-capfs)
+  (add-hook 'xref-backend-functions #'clutch--xref-backend nil t)
   (add-hook 'kill-buffer-hook #'clutch--disconnect-on-kill nil t))
 
 (defun clutch-repl--input-sender (_proc input)
