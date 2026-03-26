@@ -4446,6 +4446,56 @@ preserving order, with duplicates retained (caller deduplicates)."
           ;; Should land on the `"' of `"u"' in FROM clause
           (should (eq (char-after pos) ?\")))))))
 
+(ert-deftest clutch-test-xref-ignores-alias-in-comment ()
+  "M-. should not jump when point is on alias-like text inside a comment."
+  (with-temp-buffer
+    (clutch-mode)
+    (setq-local clutch-connection 'fake-conn)
+    (insert "SELECT * FROM users u -- use u.id here\nWHERE u.id = 1")
+    (cl-letf (((symbol-function 'clutch--schema-for-connection)
+               (lambda (&optional _conn) nil)))
+      (goto-char (point-min))
+      (search-forward "u.id here")
+      (goto-char (match-beginning 0))
+      (should-not
+       (xref-backend-definitions
+        'clutch
+        (xref-backend-identifier-at-point 'clutch))))))
+
+(ert-deftest clutch-test-xref-ignores-alias-in-string ()
+  "M-. should not jump when point is on alias-like text inside a string."
+  (with-temp-buffer
+    (clutch-mode)
+    (setq-local clutch-connection 'fake-conn)
+    (insert "SELECT 'u.id' AS note FROM users u WHERE u.id = 1")
+    (cl-letf (((symbol-function 'clutch--schema-for-connection)
+               (lambda (&optional _conn) nil)))
+      (goto-char (point-min))
+      (search-forward "u.id'")
+      (goto-char (match-beginning 0))
+      (should-not
+       (xref-backend-definitions
+        'clutch
+        (xref-backend-identifier-at-point 'clutch))))))
+
+(ert-deftest clutch-test-xref-alias-quoted-multiword ()
+  "M-. should handle double-quoted multi-word alias identifiers."
+  (with-temp-buffer
+    (clutch-mode)
+    (setq-local clutch-connection 'fake-conn)
+    (insert "SELECT \"User Name\".id FROM users \"User Name\" WHERE \"User Name\".id = 1")
+    (cl-letf (((symbol-function 'clutch--schema-for-connection)
+               (lambda (&optional _conn) nil)))
+      (goto-char (point-min))
+      (search-forward ".id")
+      (backward-char 2)
+      (let ((id (xref-backend-identifier-at-point 'clutch)))
+        (should (equal id "User Name"))
+        (let* ((defs (xref-backend-definitions 'clutch id))
+               (loc (xref-item-location (car defs)))
+               (pos (xref-buffer-location-position loc)))
+          (should (eq (char-after pos) ?\")))))))
+
 ;;; String/comment awareness tests
 
 (ert-deftest clutch-test-skip-literal/comment-single-quote ()

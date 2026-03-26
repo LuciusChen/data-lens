@@ -2602,7 +2602,7 @@ Returns the buffer position (offset by STMT-BEG), or nil."
               (alias-pos nil))
           (setq pos table-end)
           (when (and (string-match
-                      "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\([[:alnum:]_$#`\"]+\\)"
+                      "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\(\"[^\"]+\"\\|`[^`]+`\\|[[:alnum:]_$#`\"]+\\)"
                       masked table-end)
                      (= (match-beginning 0) table-end)
                      (< (match-beginning 0) search-end))
@@ -2641,15 +2641,63 @@ Always claims the backend to prevent fallthrough to etags, which
 triggers syntax_table errors in `sql-mode' derived buffers."
   (when clutch-connection 'clutch))
 
+(defun clutch--xref-bare-identifier-char-p (ch)
+  "Return non-nil when CH is part of an unquoted SQL identifier."
+  (or (and (>= ch ?0) (<= ch ?9))
+      (and (>= ch ?A) (<= ch ?Z))
+      (and (>= ch ?a) (<= ch ?z))
+      (memq ch '(?_ ?$ ?#))))
+
 (defun clutch--xref-symbol-at-point ()
   "Return the SQL identifier at point without relying on syntax tables.
-Returns (BEG . SYMBOL) or nil.  Uses explicit character scanning to
-avoid `sql-mode' syntax-table errors that break `thing-at-point'."
+Returns (BEG . SYMBOL) or nil.  Uses SQL-aware token scanning so comments,
+single-quoted strings, and multi-word quoted identifiers are handled
+without consulting syntax tables."
+  (pcase-let* ((`(,stmt-beg . ,stmt-end) (clutch--statement-bounds))
+               (text (buffer-substring-no-properties stmt-beg stmt-end))
+               (len (length text))
+               (target (- (point) stmt-beg))
+               (i 0))
+    (when (and (>= target 0) (< target len))
+      (catch 'hit
+        (while (< i len)
+          (if-let* ((skip (clutch-db-sql-skip-literal/comment text i)))
+              (progn
+                (when (and (<= i target) (< target skip))
+                  (throw 'hit nil))
+                (setq i skip))
+            (let ((ch (aref text i)))
+              (cond
+               ((memq ch '(?\" ?`))
+                (let* ((quote ch)
+                       (end (or (cl-loop for j from (1+ i) below len
+                                         when (= (aref text j) quote)
+                                         return (1+ j))
+                                len)))
+                  (when (and (<= i target) (< target end))
+                    (throw 'hit (cons (+ stmt-beg i)
+                                      (substring text i end))))
+                  (setq i end)))
+               ((clutch--xref-bare-identifier-char-p ch)
+                (let ((end (1+ i)))
+                  (while (and (< end len)
+                              (clutch--xref-bare-identifier-char-p
+                               (aref text end)))
+                    (cl-incf end))
+                  (when (and (<= i target) (< target end))
+                    (throw 'hit (cons (+ stmt-beg i)
+                                      (substring text i end))))
+                  (setq i end)))
+               (t
+                (cl-incf i))))))))))
+
+(defun clutch--xref-qualified-identifier-qualifier (beg)
+  "Return the qualifier immediately preceding identifier start BEG."
   (save-excursion
-    (let ((end (progn (skip-chars-forward "[:alnum:]_$#`\"") (point)))
-          (beg (progn (skip-chars-backward "[:alnum:]_$#`\"") (point))))
-      (when (< beg end)
-        (cons beg (buffer-substring-no-properties beg end))))))
+    (goto-char beg)
+    (when (eq (char-before) ?.)
+      (goto-char (max (point-min) (- beg 2)))
+      (cdr (clutch--xref-symbol-at-point)))))
 
 (defun clutch--xref-alias-at-point ()
   "Return the normalized alias name at point, or nil.
@@ -2658,7 +2706,7 @@ Normalizes quoted identifiers to match the alias cache."
   (when-let* ((hit (clutch--xref-symbol-at-point))
               (beg (car hit))
               (sym (cdr hit))
-              (raw (or (clutch--qualified-identifier-qualifier beg) sym)))
+              (raw (or (clutch--xref-qualified-identifier-qualifier beg) sym)))
     (clutch--normalize-statement-table-token raw)))
 
 (defun clutch--xref-statement-aliases ()
