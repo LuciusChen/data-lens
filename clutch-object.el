@@ -594,8 +594,50 @@ When TABLE-LIKE-ONLY is non-nil, only return table-like objects."
                       (derived-mode-p 'clutch-mode 'clutch-repl-mode))))
       entry)))
 
+(defun clutch--symbol-has-local-completions-p (symbol entries)
+  "Return non-nil when SYMBOL prefix-matches any entry name in ENTRIES."
+  (let ((downcased (downcase symbol)))
+    (cl-loop for entry in entries
+             thereis (string-prefix-p downcased
+                                      (downcase (or (plist-get entry :name) ""))))))
+
+(defun clutch--on-demand-object-search (conn sym table-like-only allowed-types)
+  "Search for objects matching SYM on CONN beyond the local cache.
+Returns a list of matching entries from table search and, when cache is
+incomplete and TABLE-LIKE-ONLY is nil, from a sync-refreshed full snapshot.
+Results are filtered by ALLOWED-TYPES and deduplicated."
+  (let* ((table-hits
+          (condition-case nil
+              (clutch-db-search-table-entries conn sym)
+            (clutch-db-error nil)))
+         (full-entries
+          (when (and (not table-like-only)
+                     (not (clutch--object-cache-complete-p conn)))
+            (clutch--filter-object-entries-by-types
+             (clutch--object-entries conn t)
+             allowed-types)))
+         (name-from-full
+          (when full-entries
+            (let ((downcased (downcase sym)))
+              (seq-filter
+               (lambda (e)
+                 (string-prefix-p downcased
+                                  (downcase (or (plist-get e :name) ""))))
+               full-entries)))))
+    (list :hits (clutch--filter-object-entries-by-types
+                  (clutch--merge-object-entries-by-name
+                   (append table-hits name-from-full))
+                  allowed-types)
+          :full-entries full-entries)))
+
 (defun clutch--resolve-object-entry (prompt &optional table-like-only category allowed-types)
-  "Return the object entry for PROMPT in the current buffer context."
+  "Return the object entry for PROMPT in the current buffer context.
+Uses a layered resolution strategy:
+1. Buffer-local current object or exact match at point
+2. Multiple matches → picker with pre-fill
+3. Local prefix match → pre-fill picker
+4. On-demand remote search → direct return or picker with results
+5. No match → picker with full candidate list, no pre-fill"
   (let ((current-object (clutch--buffer-current-object table-like-only allowed-types))
         (matches (clutch--object-matches-at-point table-like-only allowed-types)))
     (clutch--remember-current-object
@@ -610,10 +652,42 @@ When TABLE-LIKE-ONLY is non-nil, only return table-like objects."
                                     (thing-at-point 'symbol t)
                                     category))
       (t
-       (clutch-object-read prompt table-like-only
-                           (thing-at-point 'symbol t)
-                           category
-                           allowed-types))))))
+       (clutch--ensure-connection)
+       (clutch--warn-schema-cache-state clutch-connection)
+       (let* ((sym (thing-at-point 'symbol t))
+              (entries
+               (clutch--filter-object-entries-by-types
+                (if table-like-only
+                    (clutch--browseable-object-entries clutch-connection)
+                  (clutch--object-entries clutch-connection))
+                allowed-types))
+              (cat (or category 'clutch-object)))
+         (cond
+          ((null sym)
+           (clutch--object-entry-reader clutch-connection
+                                         (or prompt "Object: ") entries nil cat))
+          ((clutch--symbol-has-local-completions-p sym entries)
+           (clutch--object-entry-reader clutch-connection
+                                         (or prompt "Object: ") entries sym cat))
+          ((clutch--object-connection-alive-p clutch-connection)
+           (let* ((result (clutch--on-demand-object-search
+                           clutch-connection sym table-like-only allowed-types))
+                  (hits (plist-get result :hits))
+                  (full (plist-get result :full-entries)))
+             (cond
+              ((= (length hits) 1) (car hits))
+              ((> (length hits) 1)
+               (clutch--object-entry-reader clutch-connection prompt
+                                             hits sym cat))
+              (t
+               (message "No matching object found for: %s" sym)
+               (clutch--object-entry-reader clutch-connection
+                                             (or prompt "Object: ")
+                                             (or full entries) nil cat)))))
+          (t
+           (message "No matching object found for: %s" sym)
+           (clutch--object-entry-reader clutch-connection
+                                         (or prompt "Object: ") entries nil cat)))))))))
 
 (defun clutch--read-table-name (prompt tables)
   "Read a table name from TABLES with PROMPT.
