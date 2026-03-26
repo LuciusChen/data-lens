@@ -550,7 +550,7 @@ Returns a list of propertized strings (may be empty)."
              (col-name (if (> (length raw-name) 20)
                            (concat (substring raw-name 0 17) "...")
                          raw-name)))
-        (concat (clutch--footer-icon '(codicon . "nf-cod-location") "⌖" hi)
+        (concat (clutch--footer-icon '(mdicon . "nf-md-cursor_default_click_outline") "⌖" hi)
                 (propertize (format "R-%d" (1+ ridx)) 'face hi)
                 (propertize ":" 'face dim)
                 (propertize col-name 'face hi))))))
