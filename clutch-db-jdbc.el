@@ -127,20 +127,27 @@ Set this to nil to keep Oracle in auto-commit by default.  Per-connection
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
                   :filename "db2jcc4.jar"))
     (redshift  . (:maven "com.amazon.redshift:redshift-jdbc42:2.1.0.30"
-                  :filename "redshift-jdbc42.jar")))
+                  :filename "redshift-jdbc42.jar"))
+    (clickhouse . (:maven "com.clickhouse:clickhouse-jdbc:0.9.8:all"
+                   :filename "clickhouse-jdbc.jar"))
+    (slf4j-api  . (:maven "org.slf4j:slf4j-api:2.0.16"
+                   :filename "slf4j-api.jar"))
+    (slf4j-nop  . (:maven "org.slf4j:slf4j-nop:2.0.16"
+                   :filename "slf4j-nop.jar")))
   "Known JDBC driver sources.
 All entries support auto-download via `clutch-jdbc-install-driver'.")
 
 ;;;; Drivers that default to JDBC backend
 
 (defconst clutch-jdbc--jdbc-drivers
-  '(oracle sqlserver db2 snowflake redshift)
+  '(oracle sqlserver db2 snowflake redshift clickhouse)
   "Driver symbols that are automatically routed to the JDBC backend.")
 
 (defconst clutch-jdbc--driver-companions
   '((oracle oracle-i18n)
     (oracle-8 oracle-i18n)
-    (oracle-11 oracle-i18n))
+    (oracle-11 oracle-i18n)
+    (clickhouse slf4j-api slf4j-nop))
   "Optional companion driver artifacts to install alongside a primary driver.")
 
 (defconst clutch-jdbc--oracle-driver-filenames
@@ -490,6 +497,9 @@ or :sid (Oracle SID-style connection)."
           ('redshift
            (format "jdbc:redshift://%s:%d/%s"
                    host (or port 5439) database))
+          ('clickhouse
+           (format "jdbc:clickhouse://%s:%d/%s"
+                   host (or port 8123) database))
           (_
            (error "clutch-db-jdbc: unknown driver %s; provide :url directly" driver))))))
 
@@ -1294,8 +1304,9 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
     ('sqlserver "SQL Server")
     ('db2       "DB2")
     ('snowflake "Snowflake")
-    ('redshift  "Redshift")
-    (_          "JDBC")))
+    ('redshift   "Redshift")
+    ('clickhouse "ClickHouse")
+    (_           "JDBC")))
 
 ;;;; Agent installation helpers
 
@@ -1354,15 +1365,22 @@ Fetches from GitHub Releases."
       (message "Installed JDBC driver(s); shared clutch-jdbc-agent restarted on next use"))))
 
 (defun clutch-jdbc--download-maven-driver (coords dest)
-  "Download a Maven artifact at COORDS (\"group:artifact:version\") to DEST."
-  (pcase-let ((`(,group ,artifact ,version)
-               (split-string coords ":")))
-    (let* ((group-path (replace-regexp-in-string "\\." "/" group))
-           (url (format "https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.jar"
-                        group-path artifact version artifact version)))
-      (message "Downloading %s from Maven Central..." coords)
-      (url-copy-file url dest)
-      (message "Downloaded driver to %s" dest))))
+  "Download a Maven artifact at COORDS to DEST.
+COORDS is \"group:artifact:version\" or \"group:artifact:version:classifier\"."
+  (let* ((parts      (split-string coords ":"))
+         (group      (nth 0 parts))
+         (artifact   (nth 1 parts))
+         (version    (nth 2 parts))
+         (classifier (nth 3 parts))
+         (group-path (replace-regexp-in-string "\\." "/" group))
+         (jar-name   (if classifier
+                         (format "%s-%s-%s.jar" artifact version classifier)
+                       (format "%s-%s.jar" artifact version)))
+         (url        (format "https://repo1.maven.org/maven2/%s/%s/%s/%s"
+                             group-path artifact version jar-name)))
+    (message "Downloading %s from Maven Central..." coords)
+    (url-copy-file url dest)
+    (message "Downloaded driver to %s" dest)))
 
 (defun clutch-jdbc--oracle-driver-symbol-p (driver)
   "Return non-nil when DRIVER selects an Oracle JDBC jar."

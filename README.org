@@ -706,12 +706,11 @@ artifact from Maven Central rather than a nonexistent plain
                               :database "MYDB"
                               :user "myuser" :pass-entry "prod-snowflake"))
 
-        ;; Generic JDBC (any database with a JDBC driver jar in drivers/)
-        ;; Use :url to bypass URL construction; pick any registered JDBC symbol as :backend.
-        ("clickhouse" . (:backend sqlserver
-                          :url "jdbc:clickhouse://ch.corp.com:8123/default"
-                          :user "default" :password ""
-                          :rpc-timeout 10))))
+        ;; ClickHouse (column-oriented OLAP, HTTP protocol on port 8123)
+        ("clickhouse" . (:backend clickhouse
+                          :host "ch.corp.com"
+                          :database "default"
+                          :user "default" :password ""))))
 #+end_src
 
 JDBC connections use the same =:pass-entry= auth-source integration as other
