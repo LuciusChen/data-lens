@@ -24,6 +24,16 @@ especially on Oracle.
 Runtime schema switching updates both sessions together so one clutch
 connection still presents one effective schema/database context.
 
+The stdin reader is intentionally not blocked by one long-running request.
+Each decoded request is submitted to a request pool.  The dispatcher then
+serializes most operations per `conn-id`, so one JDBC connection still sees one
+foreground operation at a time.
+
+`cancel` is the exception: it bypasses the per-connection lock, looks up the
+currently running `Statement` for the target `conn-id`, and calls
+`Statement.cancel()` from another request thread.  This is what makes
+recoverable `C-g` interruption possible on the Elisp side.
+
 ## Transport
 
 - Request transport: stdin
@@ -66,6 +76,7 @@ Rules:
 
 Connection lifecycle:
 
+- `ping`
 - `connect`
 - `disconnect`
 - `commit`
@@ -75,16 +86,20 @@ Connection lifecycle:
 
 Execution and cursor flow:
 
+- `cancel`
 - `execute`
 - `fetch`
 - `close-cursor`
 
 Schema and object metadata:
 
+- `get-schemas`
 - `get-tables`
 - `search-tables`
 - `get-columns`
+- `search-columns`
 - `get-primary-keys`
+- `get-foreign-keys`
 - `get-indexes`
 - `get-index-columns`
 - `get-sequences`
@@ -93,7 +108,6 @@ Schema and object metadata:
 - `get-procedure-params`
 - `get-function-params`
 - `get-triggers`
-- `get-users`
 - `get-object-source`
 - `get-object-ddl`
 - `get-referencing-objects`
@@ -123,16 +137,35 @@ The connect response returns:
 
 That `conn-id` is then used in all subsequent operations.
 
+`cancel` accepts:
+
+- `conn-id`
+
+Its success response returns:
+
+- `conn-id`
+- `request-id` when a running statement was found
+- `cancelled` (`true` when a statement was cancelled, `false` when nothing was running)
+
+The cancelled `execute`/`fetch` request may still produce a late response after
+the client has already committed to the interrupt path.  The Elisp side tracks
+request ids explicitly so those late responses can be dropped instead of
+polluting the next request.
+
 ## Error semantics
 
-There are two distinct failure classes:
+There are three distinct failure classes:
 
-1. The agent is running but a request times out or the underlying JDBC session
+1. A normal request-level database error.
+   - Examples: SQL syntax error, object-not-found, cancelled statement.
+   - The agent stays up and Elisp surfaces the database error normally.
+
+2. The agent is running but a request times out or the underlying JDBC session
    wedges.
    - Elisp reports this as a connection-loss error and clears the local agent
      state.
 
-2. The agent exits before replying.
+3. The agent exits before replying.
    - Elisp reads agent stderr and reports the startup failure directly.
    - If stderr contains `UnsupportedClassVersionError`, clutch reports that the
      configured Java runtime is too old for the current jar.

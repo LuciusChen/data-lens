@@ -126,6 +126,16 @@ Relevant variables:
   (pg-query conn "INSERT INTO users (name) VALUES ('bob')"))
 ```
 
+### Interrupts and Timeouts
+
+- `:query-timeout` maps to PostgreSQL `statement_timeout`.
+- `pg-cancel-query` sends a wire-protocol `CancelRequest` on an auxiliary
+  socket, then drains the main connection until `ReadyForQuery`.
+- In clutch UI terms, `C-g` on native PostgreSQL uses that path, so a cancelled
+  query keeps the same session usable for the next SQL.
+- Native MySQL and SQLite do not currently provide the same recoverable
+  interrupt path; clutch falls back to disconnect/reconnect semantics there.
+
 ## SQLite
 
 ### Scope

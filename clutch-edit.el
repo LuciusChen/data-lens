@@ -555,13 +555,6 @@ column indices to their referenced table and column."
   "Return a vector of PK column values from ROW at PK-INDICES."
   (apply #'vector (mapcar (lambda (i) (nth i row)) pk-indices)))
 
-(defun clutch--row-pending-delete-p (row pk-indices pending-del)
-  "Return non-nil if ROW is staged for deletion, using PK-INDICES.
-Compares PK values with EQUAL against PENDING-DEL list."
-  (when pk-indices
-    (let ((pv (clutch-result--extract-pk-vec row pk-indices)))
-      (cl-find pv pending-del :test #'equal))))
-
 (defun clutch-result--group-edits-by-pk (edits)
   "Group EDITS alist by PK-VEC into a hash-table (test: equal).
 Returns hash-table mapping pk-vec -> list of (cidx . new-value)."

@@ -57,6 +57,15 @@
 (define-error 'pg-query-error "PostgreSQL query error" 'pg-error)
 (define-error 'pg-timeout "PostgreSQL timeout" 'pg-error)
 
+(defconst pg--cancel-request-code 80877102
+  "PostgreSQL CancelRequest protocol code.")
+
+(defconst pg--cancel-connect-timeout 2
+  "Seconds to wait for the auxiliary cancel socket to connect.")
+
+(defconst pg--cancel-drain-timeout 2
+  "Seconds to wait for the main connection to return to ReadyForQuery.")
+
 ;;;; TLS configuration
 
 (defgroup pg nil
@@ -840,6 +849,44 @@ Returns (TAG . AFFECTED-ROWS) where AFFECTED-ROWS may be nil."
   (cl-loop for (msg-type . _payload) = (pg--read-message conn)
            until (= msg-type ?Z)))
 
+(defun pg--send-cancel-request (proc pid secret-key)
+  "Send PostgreSQL CancelRequest over PROC for PID and SECRET-KEY."
+  (process-send-string proc (pg--int32-be-bytes 16))
+  (process-send-string proc (pg--int32-be-bytes pg--cancel-request-code))
+  (process-send-string proc (pg--int32-be-bytes pid))
+  (process-send-string proc (pg--int32-be-bytes secret-key)))
+
+(defun pg-cancel-query (conn)
+  "Cancel the in-flight query on CONN and restore protocol sync.
+This opens an auxiliary socket, sends CancelRequest using the backend
+PID/secret key captured during startup, then drains CONN until
+ReadyForQuery.  Return non-nil when the session is usable again."
+  (unless (and (integerp (pg-conn-pid conn))
+               (integerp (pg-conn-secret-key conn)))
+    (signal 'pg-connection-error
+            (list "Connection is missing backend cancel keys")))
+  (pcase-let ((`(,proc . ,buf)
+               (pg--open-connection (pg-conn-host conn)
+                                    (pg-conn-port conn)
+                                    pg--cancel-connect-timeout)))
+    (unwind-protect
+        (progn
+          (pg--send-cancel-request proc (pg-conn-pid conn) (pg-conn-secret-key conn))
+          (condition-case nil
+              (accept-process-output proc 0.05 nil t)
+            (error nil)))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (when (buffer-live-p buf)
+        (kill-buffer buf))))
+  (let ((original-timeout (pg-conn-read-idle-timeout conn)))
+    (unwind-protect
+        (progn
+          (setf (pg-conn-read-idle-timeout conn) pg--cancel-drain-timeout)
+          (pg--drain-until-ready conn)
+          t)
+      (setf (pg-conn-read-idle-timeout conn) original-timeout))))
+
 (defun pg--handle-query-error (conn payload)
   "Handle an ErrorResponse PAYLOAD during query, then drain to ReadyForQuery."
   (let ((fields (pg--parse-error-fields payload)))
@@ -907,21 +954,26 @@ Signals `pg-error' if the connection is busy (re-entrant call)."
             (timeout (pg-conn-query-timeout conn))
             (apply-timeout (and (pg-conn-query-timeout conn)
                                 (not (pg--transaction-control-query-p sql))))
-            result err)
+            result err interrupted)
         (when apply-timeout
           (pg--set-statement-timeout conn timeout))
-        (unwind-protect
-            (condition-case e
-                (setq result (pg--simple-query conn sql))
-              (error
-               (setq err e)))
-          (when apply-timeout
-            (condition-case nil
-                (pg--set-statement-timeout conn nil)
-              (pg-error nil))))
-        (if err
-            (signal (car err) (cdr err))
-          result))
+        (condition-case e
+            (setq result (pg--simple-query conn sql))
+          (quit
+           (setq interrupted t))
+          (error
+           (setq err e)))
+        (when (and apply-timeout (not interrupted))
+          (condition-case nil
+              (pg--set-statement-timeout conn nil)
+            (pg-error nil)))
+        (cond
+         (interrupted
+          (signal 'quit nil))
+         (err
+          (signal (car err) (cdr err)))
+         (t
+          result)))
     (setf (pg-conn-busy conn) nil)))
 
 ;;;; Ping

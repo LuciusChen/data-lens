@@ -64,7 +64,7 @@
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "4333f4464e0518d748c06e5c7d5321ccc428ec976de58d1a7efdb29dde8936cf"
+  "1de60d526113a3e62d9045b0b7a072677f000f4d2d0edf4e1b8d0c3feee660ed"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -174,6 +174,12 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 (defvar clutch-jdbc--async-callbacks (make-hash-table :test 'eql)
   "Map of JDBC request ids to asynchronous callbacks.")
 
+(defvar clutch-jdbc--busy-request-ids (make-hash-table :test 'eq)
+  "Map of JDBC connection objects to their current in-flight request id.")
+
+(defvar clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql)
+  "Set of JDBC response ids to drop because the request was interrupted.")
+
 (defconst clutch-jdbc--json-false (make-symbol "clutch-jdbc-json-false")
   "Sentinel used to represent JSON false distinctly from nil.")
 
@@ -236,6 +242,11 @@ JAR defaults to `clutch-jdbc--agent-jar'."
            clutch-jdbc--async-callbacks)
   (clrhash clutch-jdbc--async-callbacks))
 
+(defun clutch-jdbc--clear-request-state ()
+  "Clear in-flight and ignored JDBC request bookkeeping."
+  (clrhash clutch-jdbc--busy-request-ids)
+  (clrhash clutch-jdbc--ignored-response-ids))
+
 (defun clutch-jdbc--dispatch-async-response (response)
   "Dispatch asynchronous RESPONSE when a callback is registered.
 Return non-nil when RESPONSE was consumed asynchronously."
@@ -285,10 +296,16 @@ Return non-nil when RESPONSE was consumed asynchronously."
                                                    :false-object clutch-jdbc--json-false)
                               (error nil))))
                 (when parsed
-                  (unless (clutch-jdbc--dispatch-async-response parsed)
-                    (setq clutch-jdbc--response-queue
-                          (nconc clutch-jdbc--response-queue
-                                 (list parsed)))))))))))))
+                  (let ((id (plist-get parsed :id)))
+                    (cond
+                     ((clutch-jdbc--dispatch-async-response parsed)
+                      nil)
+                     ((and id (gethash id clutch-jdbc--ignored-response-ids))
+                      (remhash id clutch-jdbc--ignored-response-ids))
+                     (t
+                      (setq clutch-jdbc--response-queue
+                            (nconc clutch-jdbc--response-queue
+                                   (list parsed)))))))))))))))
 
 (defun clutch-jdbc--start-agent ()
   "Start the clutch-jdbc-agent process and wait for its ready signal."
@@ -310,6 +327,7 @@ Return non-nil when RESPONSE was consumed asynchronously."
       (setq clutch-jdbc--agent-process proc)
       (setq clutch-jdbc--response-queue nil)
       (clutch-jdbc--clear-async-callbacks)
+      (clutch-jdbc--clear-request-state)
       ;; Wait for the ready message (id=0).
       (let ((ready (clutch-jdbc--recv-response 0)))
         (unless (plist-get ready :ok)
@@ -322,7 +340,8 @@ Return non-nil when RESPONSE was consumed asynchronously."
     (delete-process clutch-jdbc--agent-process))
   (setq clutch-jdbc--agent-process nil
         clutch-jdbc--response-queue nil)
-  (clutch-jdbc--clear-async-callbacks))
+  (clutch-jdbc--clear-async-callbacks)
+  (clutch-jdbc--clear-request-state))
 
 (defun clutch-jdbc--ensure-agent ()
   "Ensure the agent process is running, starting it if necessary."
@@ -398,9 +417,14 @@ OP, when non-nil, names the RPC for context-sensitive timeout errors."
         (let (remaining)
           (while (and (not response) clutch-jdbc--response-queue)
             (let ((parsed (pop clutch-jdbc--response-queue)))
-              (if (and parsed (eql (plist-get parsed :id) id))
-                  (setq response parsed)
-                (push parsed remaining))))
+              (cond
+               ((and parsed
+                     (gethash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
+                (remhash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
+               ((and parsed (eql (plist-get parsed :id) id))
+                (setq response parsed))
+               (t
+                (push parsed remaining)))))
           (setq clutch-jdbc--response-queue
                 (nconc (nreverse remaining) clutch-jdbc--response-queue))))
       (unless response
@@ -423,6 +447,7 @@ OP, when non-nil, names the RPC for context-sensitive timeout errors."
       (when (process-live-p clutch-jdbc--agent-process)
         (delete-process clutch-jdbc--agent-process))
       (clutch-jdbc--clear-async-callbacks)
+      (clutch-jdbc--clear-request-state)
       (setq clutch-jdbc--agent-process nil
             clutch-jdbc--response-queue nil)
       (signal 'clutch-db-error
@@ -443,6 +468,31 @@ Signals `clutch-db-error' on agent-reported errors."
       (signal 'clutch-db-error
               (list (or (plist-get response :error)
                         (format "agent error on op %s" op)))))))
+
+(defun clutch-jdbc--rpc-on-conn (conn op params &optional timeout-seconds)
+  "Send OP with PARAMS while tracking the in-flight request for CONN."
+  (clutch-jdbc--ensure-agent)
+  (let* ((id (clutch-jdbc--send op params))
+         (clear-request-id t)
+         response)
+    (puthash conn id clutch-jdbc--busy-request-ids)
+    (unwind-protect
+        (condition-case err
+            (progn
+              (setq response (clutch-jdbc--recv-response id timeout-seconds op))
+              (if (eq t (plist-get response :ok))
+                  (plist-get response :result)
+                (signal 'clutch-db-error
+                        (list (or (plist-get response :error)
+                                  (format "agent error on op %s" op))))))
+          (quit
+           (setq clear-request-id nil)
+           (signal 'quit nil))
+          (clutch-db-error
+           (signal (car err) (cdr err))))
+      (when (and clear-request-id
+                 (eql (gethash conn clutch-jdbc--busy-request-ids) id))
+        (remhash conn clutch-jdbc--busy-request-ids)))))
 
 (defun clutch-jdbc--rpc-async (op params callback &optional errback timeout-seconds)
   "Send OP with PARAMS to the agent asynchronously.
@@ -579,6 +629,7 @@ Returns a `clutch-jdbc-conn'."
 
 (cl-defmethod clutch-db-disconnect ((conn clutch-jdbc-conn))
   "Disconnect JDBC CONN, releasing it in the agent."
+  (remhash conn clutch-jdbc--busy-request-ids)
   (condition-case nil
       (clutch-jdbc--rpc "disconnect"
                         `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))
@@ -603,6 +654,15 @@ pass `process-live-p' briefly; the identity check closes that window."
 Always non-nil: `clutch-jdbc--apply-timeout-defaults' ensures the value is
 stored in params at connect time."
   (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout))
+
+(defun clutch-jdbc--conn-effective-query-timeout (conn)
+  "Return the effective query timeout in seconds for CONN, or nil.
+The timeout is clamped so the agent-side timeout fires before the outer
+Emacs RPC timeout."
+  (let* ((query-timeout (plist-get (clutch-jdbc-conn-params conn) :query-timeout))
+         (rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn)))
+    (when (and query-timeout (> query-timeout 0))
+      (min query-timeout (max 1 (- rpc-timeout 5))))))
 
 (defun clutch-jdbc--oracle-conn-p (conn)
   "Return non-nil when CONN is an Oracle JDBC connection."
@@ -672,12 +732,17 @@ commits any pending transaction per the JDBC specification."
 (defun clutch-jdbc--fetch-all (conn cursor-id)
   "Fetch all remaining rows for CURSOR-ID on CONN, returning a flat list."
   (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn))
+        (effective-qt (clutch-jdbc--conn-effective-query-timeout conn))
         batches done)
     (while (not done)
-      (let ((result (clutch-jdbc--rpc "fetch"
-                                      `((cursor-id  . ,cursor-id)
-                                        (fetch-size . ,clutch-jdbc-fetch-size))
-                                      rpc-timeout)))
+      (let ((result (clutch-jdbc--rpc-on-conn
+                     conn
+                     "fetch"
+                     `((cursor-id  . ,cursor-id)
+                       (fetch-size . ,clutch-jdbc-fetch-size)
+                       ,@(when effective-qt
+                           `((query-timeout-seconds . ,effective-qt))))
+                     rpc-timeout)))
         (push (plist-get result :rows) batches)
         (setq done (eq t (plist-get result :done)))))
     (apply #'nconc (nreverse batches))))
@@ -772,12 +837,10 @@ Clob plists become their :preview string."
   (setf (clutch-jdbc-conn-busy conn) t)
   (unwind-protect
       (condition-case err
-          (let* ((query-timeout (plist-get (clutch-jdbc-conn-params conn) :query-timeout))
-                 (rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn))
-                 ;; Clamp: ensure Oracle fires before Emacs RPC timeout
-                 (effective-qt  (when (and query-timeout (> query-timeout 0))
-                                  (min query-timeout (max 1 (- rpc-timeout 5)))))
-                 (result (clutch-jdbc--rpc
+          (let* ((rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn))
+                 (effective-qt  (clutch-jdbc--conn-effective-query-timeout conn))
+                 (result (clutch-jdbc--rpc-on-conn
+                          conn
                           "execute"
                           `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
                             (sql        . ,sql)
@@ -807,6 +870,16 @@ Clob plists become their :preview string."
                  :rows       (mapcar #'clutch-jdbc--normalize-row all-rows)))))
         (clutch-db-error (signal (car err) (cdr err))))
     (setf (clutch-jdbc-conn-busy conn) nil)))
+
+(cl-defmethod clutch-db-interrupt-query ((conn clutch-jdbc-conn))
+  "Interrupt the active JDBC request on CONN without dropping the session."
+  (when-let* ((request-id (gethash conn clutch-jdbc--busy-request-ids)))
+    (puthash request-id t clutch-jdbc--ignored-response-ids)
+    (remhash conn clutch-jdbc--busy-request-ids)
+    (clutch-jdbc--rpc "cancel"
+                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+                      (clutch-jdbc--conn-rpc-timeout conn))
+    t))
 
 (defun clutch-jdbc--build-oracle-paged-sql (conn base offset page-size order-by)
   "Build Oracle ROWNUM-based pagination SQL.

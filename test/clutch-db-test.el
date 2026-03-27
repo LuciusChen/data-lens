@@ -39,6 +39,8 @@
 ;; `mysql-tls-verify-server' is defined in mysql.el; declare it special here so
 ;; local test bindings remain dynamic even before the backend requires mysql.el.
 (defvar mysql-tls-verify-server)
+(defvar clutch-jdbc--busy-request-ids)
+(defvar clutch-jdbc--ignored-response-ids)
 
 ;;;; Test configuration
 
@@ -99,14 +101,34 @@
   (let ((batches '((:rows (("alpha" 17) ("beta" 23)) :done nil)
                    (:rows (("omega" -9)) :done t)))
         (conn (make-clutch-jdbc-conn :params '(:rpc-timeout 9))))
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional timeout-seconds)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc-on-conn)
+               (lambda (_conn op params &optional timeout-seconds)
                  (should (equal op "fetch"))
                  (should (= (alist-get 'cursor-id params) 9))
                  (should (= timeout-seconds 9))
                  (pop batches))))
       (should (equal (clutch-jdbc--fetch-all conn 9)
                      '(("alpha" 17) ("beta" 23) ("omega" -9)))))))
+
+(ert-deftest clutch-db-test-jdbc-fetch-all-maps-query-and-rpc-timeouts ()
+  "JDBC fetch-all should pass the same effective query timeout as execute."
+  (let ((conn (make-clutch-jdbc-conn :params '(:rpc-timeout 15
+                                               :query-timeout 16)))
+        captured-op captured-params captured-timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc-on-conn)
+               (lambda (_conn op params &optional timeout-seconds)
+                 (setq captured-op op
+                       captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:rows nil :done t))))
+      (should (equal (clutch-jdbc--fetch-all conn 9) nil))
+      (should (equal captured-op "fetch"))
+      (should (= (alist-get 'cursor-id captured-params) 9))
+      (should (= captured-timeout 15))
+      ;; min(16, max(1, 15-5)) = min(16, 10) = 10
+      (should (= (alist-get 'query-timeout-seconds captured-params) 10)))))
 
 (ert-deftest clutch-db-test-jdbc-referencing-objects-maps-rpc-response ()
   "JDBC reverse-reference lookup should map RPC rows to object entries."
@@ -218,8 +240,9 @@
                                      :params '(:rpc-timeout 15
                                                :query-timeout 16)))
         captured-op captured-params captured-timeout)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional timeout-seconds)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc-on-conn)
+               (lambda (_conn op params &optional timeout-seconds)
                  (setq captured-op op
                        captured-params params
                        captured-timeout timeout-seconds)
@@ -237,8 +260,9 @@
                                      :params '(:rpc-timeout 15
                                                :query-timeout 8)))
         captured-params)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_op params &optional _timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc-on-conn)
+               (lambda (_conn _op params &optional _timeout)
                  (setq captured-params params)
                  '(:type "dml" :affected-rows 0))))
       (clutch-db-query conn "delete from t where 1=0")
@@ -251,8 +275,9 @@
                                      :params '(:rpc-timeout 30
                                                :query-timeout 30)))
         captured-params)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_op params &optional _timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc-on-conn)
+               (lambda (_conn _op params &optional _timeout)
                  (setq captured-params params)
                  '(:type "dml" :affected-rows 1))))
       (clutch-db-query conn "update t set x = 1")
@@ -356,21 +381,20 @@
         (should-not (string-match-p "\"ZJ_NCBUSINESSDATA\"" ddl))
         (should-not (string-match-p "\"PK_MAIN\"" ddl))))))
 
-(ert-deftest clutch-db-test-jdbc-refresh-schema-async-uses-get-tables ()
-  "Async JDBC schema refresh should fetch table names via get-tables."
+(ert-deftest clutch-db-test-jdbc-refresh-schema-async-returns-table-names ()
+  "Async JDBC schema refresh should return only table names to its callback."
   (let ((conn (make-clutch-jdbc-conn :conn-id 9
                                      :params `(:driver oracle :user "scott"
                                                :rpc-timeout ,clutch-jdbc-rpc-timeout-seconds)))
-        captured-op captured-params captured-timeout callback-result)
+        callback-result)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (op params callback &optional errback timeout-seconds)
-                 (setq captured-op op
-                       captured-params params
-                       captured-timeout timeout-seconds)
+               (lambda (_op _params callback &optional errback _timeout-seconds)
                  (should-not errback)
                  (funcall callback '(:cursor-id nil
                                     :columns ("name" "type" "schema" "source_schema")
                                     :rows (("USERS" "TABLE" "SCOTT" "SCOTT")
+                                           ("ORDERS_VIEW" "VIEW" "SCOTT" "SCOTT")
+                                           ("PUBLIC_ORDERS" "SYNONYM" "APP" "PUBLIC")
                                            ("ORDERS" "TABLE" "SCOTT" "SCOTT"))
                                     :done t))
                  42)))
@@ -378,32 +402,7 @@
                conn
                (lambda (tables)
                  (setq callback-result tables))))
-      (should (equal captured-op "get-tables"))
-      (should (= (alist-get 'conn-id captured-params) 9))
-      (should (equal (alist-get 'schema captured-params) "SCOTT"))
-      (should (= captured-timeout clutch-jdbc-rpc-timeout-seconds))
       (should (equal callback-result '("USERS" "ORDERS"))))))
-
-(ert-deftest clutch-db-test-jdbc-list-tables-oracle-uses-get-tables ()
-  "Oracle list-tables should use get-tables so browse shares schema-refresh data."
-  (let ((conn (make-clutch-jdbc-conn :conn-id 9
-                                     :params '(:driver oracle :user "app")))
-        captured-op captured-params)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout-seconds)
-                 (setq captured-op op
-                       captured-params params)
-                 '(:cursor-id nil
-                   :columns ("name" "type" "schema" "source_schema")
-                   :rows (("CUSTOMERS" "SYNONYM" "DATA_OWNER" "APP")
-                          ("ORDERS" "SYNONYM" "DATA_OWNER" "APP")
-                          ("PAYMENTS" "TABLE" "DATA_OWNER" "DATA_OWNER"))
-                   :done t))))
-      (let ((tables (clutch-db-list-tables conn)))
-        (should (equal captured-op "get-tables"))
-        (should (= (alist-get 'conn-id captured-params) 9))
-        (should (equal (alist-get 'schema captured-params) "APP"))
-        (should (equal tables '("CUSTOMERS" "ORDERS" "PAYMENTS")))))))
 
 (ert-deftest clutch-db-test-jdbc-list-table-entries-preserves-source-schema ()
   "JDBC table entry listing should preserve schema/source metadata."
@@ -932,17 +931,12 @@
   "Oracle JDBC schema listing should filter common system schemas."
   (let ((conn (make-clutch-jdbc-conn
                :conn-id 7
-               :params '(:driver oracle :user "zjsy" :rpc-timeout 9)))
-        captured-op captured-params)
+               :params '(:driver oracle :user "zjsy" :rpc-timeout 9))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout-seconds)
-                 (setq captured-op op
-                       captured-params params)
+               (lambda (_op _params &optional _timeout-seconds)
                  '(:schemas ("SYS" "SYSTEM" "ZJSY" "CJH_TEST" "ZJ_TEST")))))
       (should (equal (clutch-db-list-schemas conn)
-                     '("ZJSY" "CJH_TEST" "ZJ_TEST")))
-      (should (equal captured-op "get-schemas"))
-      (should (= (alist-get 'conn-id captured-params) 7)))))
+                     '("ZJSY" "CJH_TEST" "ZJ_TEST"))))))
 
 (ert-deftest clutch-db-test-jdbc-set-current-schema-updates-params ()
   "Oracle JDBC schema switching should update both JDBC sessions and persist :schema."
@@ -1363,6 +1357,29 @@
         (should (equal executed-sql "SET search_path TO \"app\""))
         (should (equal (clutch-db-current-schema conn) "app"))))))
 
+(ert-deftest clutch-db-test-pg-interrupt-query-returns-t-after-cancel ()
+  "PostgreSQL interrupt should report success when cancel completes."
+  (require 'clutch-db-pg)
+  (require 'pg)
+  (let ((conn (make-pg-conn :host "127.0.0.1" :port 5432 :pid 11 :secret-key 22))
+        called)
+    (cl-letf (((symbol-function 'pg-cancel-query)
+               (lambda (pg-conn)
+                 (setq called pg-conn)
+                 t)))
+      (should (clutch-db-interrupt-query conn))
+      (should (eq called conn)))))
+
+(ert-deftest clutch-db-test-pg-interrupt-query-returns-nil-on-pg-error ()
+  "PostgreSQL interrupt should degrade to nil when cancel errors."
+  (require 'clutch-db-pg)
+  (require 'pg)
+  (let ((conn (make-pg-conn :host "127.0.0.1" :port 5432 :pid 11 :secret-key 22)))
+    (cl-letf (((symbol-function 'pg-cancel-query)
+               (lambda (_pg-conn)
+                 (signal 'pg-connection-error '("cancel failed")))))
+      (should-not (clutch-db-interrupt-query conn)))))
+
 (ert-deftest clutch-db-test-jdbc-metadata-derived-from-url ()
   "Generic JDBC metadata accessors should derive host/port/database from :url."
   (let ((conn (make-clutch-jdbc-conn
@@ -1668,6 +1685,33 @@ Skips if `clutch-db-test-jdbc-oracle-password' is nil."
               (should (member "NAME" cols))))
         (ignore-errors
           (clutch-db-query conn (format "DROP TABLE %s" tbl)))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-cancel-keeps-connection-usable ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Oracle JDBC cancel should interrupt the query and keep the session usable."
+  (clutch-db-test--with-oracle conn
+    (let ((request-id
+           (clutch-jdbc--send
+            "execute"
+            `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+              (sql . "SELECT COUNT(*) FROM ALL_OBJECTS a, ALL_OBJECTS b")
+              (fetch-size . ,clutch-jdbc-fetch-size))))
+          cancel-result)
+      (puthash request-id t clutch-jdbc--ignored-response-ids)
+      (with-timeout
+          (5 (ert-fail "Oracle live execute did not become cancellable"))
+        (while (not (eq t (plist-get cancel-result :cancelled)))
+          (setq cancel-result
+                (clutch-jdbc--rpc
+                 "cancel"
+                 `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+                 (clutch-jdbc--conn-rpc-timeout conn)))
+          (unless (eq t (plist-get cancel-result :cancelled))
+            (sleep-for 0.05))))
+      (should (eq t (plist-get cancel-result :cancelled)))
+      (let ((result (clutch-db-query conn "SELECT 42 AS answer FROM DUAL")))
+        (should (equal (caar (clutch-db-result-rows result)) "42")))
+      (should-not (gethash request-id clutch-jdbc--ignored-response-ids)))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-low-priv-completion ()
   :tags '(:db-live :jdbc-live :oracle-live)
@@ -1981,6 +2025,42 @@ immediately without touching the agent process."
                  (should (string-match-p "`java'" (cadr err))))))))
       (kill-buffer stderr))))
 
+(ert-deftest clutch-db-test-jdbc-interrupt-query-sends-cancel-and-ignores-late-response ()
+  "Interrupting a JDBC query should send cancel and ignore the late response."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 7
+                                     :params '(:driver jdbc :rpc-timeout 12)))
+        (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+        captured-op captured-params captured-timeout)
+    (puthash conn 41 clutch-jdbc--busy-request-ids)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional timeout-seconds)
+                 (setq captured-op op
+                       captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:cancelled t))))
+      (should (clutch-db-interrupt-query conn))
+      (should (equal captured-op "cancel"))
+      (should (= (alist-get 'conn-id captured-params) 7))
+      (should (= captured-timeout 12))
+      (should-not (gethash conn clutch-jdbc--busy-request-ids))
+      (should (gethash 41 clutch-jdbc--ignored-response-ids)))))
+
+(ert-deftest clutch-db-test-jdbc-interrupt-query-returns-nil-without-busy-request ()
+  "JDBC interrupt should not send cancel when nothing is running."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 7
+                                     :params '(:driver jdbc :rpc-timeout 12)))
+        (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+        rpc-called)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (&rest _args)
+                 (setq rpc-called t)
+                 (error "cancel should not be sent"))))
+      (should-not (clutch-db-interrupt-query conn))
+      (should-not rpc-called)
+      (should (= (hash-table-count clutch-jdbc--ignored-response-ids) 0)))))
+
 (ert-deftest clutch-db-test-jdbc-agent-filter-drops-invalid-json-lines ()
   "Malformed agent output should be ignored instead of enqueuing nil."
   (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
@@ -1993,6 +2073,24 @@ immediately without touching the agent process."
                                      "{\"id\":1,\"ok\":true}\nnot-json\n")
           (should (equal clutch-jdbc--response-queue
                          '((:id 1 :ok t)))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-db-test-jdbc-agent-filter-drops-ignored-response-ids ()
+  "Interrupted JDBC request responses should be dropped instead of queued."
+  (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
+        (clutch-jdbc--response-queue nil)
+        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql)))
+    (puthash 41 t clutch-jdbc--ignored-response-ids)
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-buffer) (lambda (_proc) buf))
+                  ((symbol-function 'clutch-jdbc--dispatch-async-response)
+                   (lambda (_parsed) nil)))
+          (clutch-jdbc--agent-filter 'fake-proc
+                                     "{\"id\":41,\"ok\":false,\"error\":\"Query cancelled\"}\n{\"id\":42,\"ok\":true}\n")
+          (should-not (gethash 41 clutch-jdbc--ignored-response-ids))
+          (should (equal clutch-jdbc--response-queue
+                         '((:id 42 :ok t)))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 

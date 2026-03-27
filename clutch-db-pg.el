@@ -149,6 +149,12 @@ No special init needed — encoding is set in startup message.")
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
+(cl-defmethod clutch-db-interrupt-query ((conn pg-conn))
+  "Interrupt the current PostgreSQL query without dropping the session."
+  (condition-case nil
+      (pg-cancel-query conn)
+    (pg-error nil)))
+
 (cl-defmethod clutch-db-build-paged-sql ((_conn pg-conn) base-sql
                                              page-num page-size
                                              &optional order-by)

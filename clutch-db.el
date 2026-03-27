@@ -38,6 +38,7 @@
 ;;;; Error types
 
 (define-error 'clutch-db-error "Database error")
+(define-error 'clutch-query-interrupted "Query interrupted" 'user-error)
 
 ;;;; Shared helpers
 
@@ -267,8 +268,17 @@ fetch was started, nil when unsupported.")
 (cl-defgeneric clutch-db-query (conn sql)
   "Execute SQL on CONN and return a `clutch-db-result'.")
 
+(cl-defgeneric clutch-db-interrupt-query (conn)
+  "Interrupt the current query on CONN.
+Return non-nil when the query was handed off to a backend-specific
+interrupt path and the connection should remain usable.")
+
+(cl-defmethod clutch-db-interrupt-query ((_conn t))
+  "Backends without query interrupt support return nil."
+  nil)
+
 (cl-defgeneric clutch-db-build-paged-sql (conn base-sql page-num page-size
-                                                  &optional order-by)
+                                          &optional order-by)
   "Build a paginated SQL query for CONN's dialect.
 BASE-SQL is the original query.  PAGE-NUM is 0-based, PAGE-SIZE is
 the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")

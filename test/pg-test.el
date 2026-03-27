@@ -378,6 +378,70 @@
   (should-not (pg--transaction-control-query-p "SELECT 1"))
   (should-not (pg--transaction-control-query-p "INSERT INTO t VALUES (1)")))
 
+(ert-deftest pg-test-query-quit-does-not-reset-statement-timeout ()
+  "Raw quit should not send a timeout reset query on the busy connection."
+  (with-temp-buffer
+    (let ((conn (make-pg-conn :buf (current-buffer) :query-timeout 5))
+          calls
+          quit-caught)
+      (cl-letf (((symbol-function 'pg--set-statement-timeout)
+                 (lambda (_conn timeout)
+                   (push timeout calls)))
+                ((symbol-function 'pg--simple-query)
+                 (lambda (_conn _sql)
+                   (signal 'quit nil))))
+        (condition-case nil
+            (pg-query conn "SELECT pg_sleep(10)")
+          (quit
+           (setq quit-caught t)))
+        (should quit-caught)
+        (should (equal (nreverse calls) '(5)))
+        (should-not (pg-conn-busy conn))))))
+
+(ert-deftest pg-test-cancel-query-sends-cancel-request-and-drains ()
+  "Cancel should send PostgreSQL CancelRequest and drain to ReadyForQuery."
+  (with-temp-buffer
+    (let* ((conn (make-pg-conn :host "127.0.0.1"
+                               :port 5432
+                               :pid 123
+                               :secret-key 456
+                               :buf (current-buffer)
+                               :read-idle-timeout 30))
+           sent-bytes
+           drained-timeout
+           deleted-proc
+           killed-buf
+           (real-kill-buffer (symbol-function 'kill-buffer)))
+      (cl-letf (((symbol-function 'pg--open-connection)
+                 (lambda (_host _port _timeout)
+                   (cons 'cancel-proc (generate-new-buffer " *pg-cancel*"))))
+                ((symbol-function 'process-send-string)
+                 (lambda (_proc data)
+                   (push data sent-bytes)))
+                ((symbol-function 'accept-process-output) (lambda (&rest _args) nil))
+                ((symbol-function 'process-live-p) (lambda (_proc) t))
+                ((symbol-function 'delete-process)
+                 (lambda (proc)
+                   (setq deleted-proc proc)))
+                ((symbol-function 'kill-buffer)
+                 (lambda (buf)
+                   (setq killed-buf buf)
+                   (funcall real-kill-buffer buf)))
+                ((symbol-function 'pg--drain-until-ready)
+                 (lambda (drain-conn)
+                   (setq drained-timeout (pg-conn-read-idle-timeout drain-conn)))))
+        (should (pg-cancel-query conn))
+        (should (equal
+                 (apply #'concat (nreverse sent-bytes))
+                 (concat (pg--int32-be-bytes 16)
+                         (pg--int32-be-bytes 80877102)
+                         (pg--int32-be-bytes 123)
+                         (pg--int32-be-bytes 456))))
+        (should (eq deleted-proc 'cancel-proc))
+        (should (bufferp killed-buf))
+        (should (= drained-timeout 2))
+        (should (= (pg-conn-read-idle-timeout conn) 30))))))
+
 (ert-deftest pg-test-open-connection-does-not-force-plain-type ()
   "Opening a PostgreSQL socket should not force an unsupported process type."
   (let (captured-args)
@@ -596,6 +660,15 @@ Skips if `pg-test-password' is nil."
             (let ((result (pg-query conn "SELECT 1 AS v")))
               (should (= (car (car (pg-result-rows result))) 1))))
         (pg-disconnect conn)))))
+
+(ert-deftest pg-test-live-cancel-query-keeps-connection-usable ()
+  :tags '(:pg-live)
+  "CancelRequest should interrupt the running query and keep the session usable."
+  (pg-test--with-conn conn
+    (pg--send-message conn ?Q (pg--encode-string "SELECT pg_sleep(10)"))
+    (should (pg-cancel-query conn))
+    (let ((result (pg-query conn "SELECT 42 AS v")))
+      (should (= (car (car (pg-result-rows result))) 42)))))
 
 (ert-deftest pg-test-live-empty-result ()
   :tags '(:pg-live)

@@ -238,6 +238,12 @@ manually — the query console is not required.
 4. C-c C-c                 — execute query at point
 #+end_src
 
+In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps that generic
+connect flow.  In query-console buffers, it is narrower: it reconnects the
+saved connection already associated with that console, without reopening the
+global connection picker.  To switch to another saved connection, use
+=M-x clutch-query-console=.
+
 To activate =clutch-mode= automatically for =.sql= files, add to your config:
 
 #+begin_src emacs-lisp
@@ -253,7 +259,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-c=   | Execute region or query at point |
 | =C-c C-r=   | Execute selected region          |
 | =C-c C-b=   | Execute entire buffer      |
-| =C-c C-e=   | Connect / reconnect        |
+| =C-c C-e=   | Connect; query consoles reconnect their own saved connection |
 | =C-c C-j=   | Jump to configured primary object types and run the default action |
 | =C-c C-d=   | Describe object at point, or prompt |
 | =C-c C-o=   | Show object actions for the current object, or prompt |
@@ -477,6 +483,12 @@ db> SELECT * FROM users;     ;; Type SQL, auto-executes on ;
 =clutch-query-console= opens a dedicated buffer =*clutch: NAME*= for a saved
 connection, enables =clutch-mode=, and connects automatically.  Repeated calls
 with the same name switch to the existing buffer rather than creating a new one.
+
+Inside a query console, =C-c C-e= reconnects only that console's saved
+connection.  It does not reopen the full connection list.  If that saved
+connection entry was removed from =clutch-connection-alist=, clutch raises a
+clear error instead of silently reconnecting to some other database.  To move
+to a different saved connection, call =clutch-query-console= again.
 
 =clutch-switch-console= lists all open console buffers via =completing-read= for
 fast switching between active connections.
@@ -917,8 +929,17 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
 - PostgreSQL connections can override via =:connect-timeout=, =:read-idle-timeout=, and =:query-timeout=.
 - JDBC connections can override via =:connect-timeout=, =:read-idle-timeout=, =:query-timeout=, and =:rpc-timeout=.
 - During long-running queries, press =C-g= to interrupt.
-  - clutch will drop the current connection to avoid protocol desync.
-  - the next command auto-reconnects when saved connection params are available.
+  - On JDBC backends, clutch first sends a protocol-level =cancel= for the
+    running statement.
+  - On native PostgreSQL, clutch sends a protocol-level =CancelRequest=, drains
+    the main socket back to =ReadyForQuery=, and keeps the same session usable.
+  - When that backend-specific cancel succeeds, the connection stays usable and
+    you can run the next SQL immediately on the same session.
+  - clutch only drops the connection when interrupt recovery fails, for example
+    if cancel times out, the agent has exited, or the JDBC session is already
+    dead.
+  - Backends without explicit interrupt support still fall back to
+    disconnect/reconnect semantics.
 - High-risk DML (=UPDATE/DELETE= without top-level =WHERE=) requires typed
   confirmation (=YES=) before execution.
 

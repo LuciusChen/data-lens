@@ -63,6 +63,7 @@
 (declare-function clutch-jdbc-conn-p "clutch-db-jdbc" (conn))
 (declare-function clutch-jdbc-conn-params "clutch-db-jdbc" (conn))
 (declare-function clutch-db-browseable-object-entries "clutch-db" (conn))
+(declare-function clutch-db-interrupt-query "clutch-db" (conn))
 (declare-function clutch--nerd-icons-available-p "clutch-ui" ())
 (declare-function clutch--ensure-point-visible-horizontally "clutch-ui" ())
 (declare-function clutch--footer-mode-line-display "clutch-ui" ())
@@ -850,18 +851,6 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
   (clutch--refresh-transaction-ui conn)
   conn)
 
-(defun clutch--result-buffers-with-pending ()
-  "Return list of live result buffers that have uncommitted pending state."
-  (cl-remove-if-not
-   (lambda (buf)
-     (and (buffer-live-p buf)
-          (with-current-buffer buf
-            (and (derived-mode-p 'clutch-result-mode)
-                 (or clutch--pending-deletes
-                     clutch--pending-edits
-                     clutch--pending-inserts)))))
-   (buffer-list)))
-
 (defun clutch--try-reconnect ()
   "Attempt to re-establish the connection for the current logical session.
 Find reconnect params from the current buffer or any attached buffer that
@@ -1198,6 +1187,19 @@ Leaves PARAMS unchanged when :password or :pass-entry is already set."
       params
     (append params (list :pass-entry name))))
 
+(defun clutch--saved-connection-params (name)
+  "Return saved connection params for NAME, or nil when missing."
+  (when-let* ((params (cdr (assoc name clutch-connection-alist))))
+    (clutch--inject-entry-name params name)))
+
+(defun clutch--connect-params-for-current-buffer ()
+  "Return connection params appropriate for the current buffer."
+  (if clutch--console-name
+      (or (clutch--saved-connection-params clutch--console-name)
+          (user-error "Saved connection %s for this query console no longer exists"
+                      clutch--console-name))
+    (clutch--read-connection-params)))
+
 (defun clutch--read-connection-params ()
   "Prompt the user for connection parameters and return a params plist.
 Offers saved connections from `clutch-connection-alist' when non-empty,
@@ -1207,8 +1209,8 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
       (let* ((name   (completing-read "Connection: "
                                       (mapcar #'car clutch-connection-alist)
                                       nil t))
-             (params (cdr (assoc name clutch-connection-alist))))
-        (clutch--inject-entry-name params name))
+             (params (clutch--saved-connection-params name)))
+        params)
     (let* ((host          (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
            (port          (read-number "Port (3306): " 3306))
            (user          (read-string "User: "))
@@ -1233,7 +1235,7 @@ params; see `clutch-connection-alist' for details."
       (clutch--confirm-disconnect-transaction-loss
        old-conn
        "Uncommitted changes will be lost.  Disconnect? "))
-    (let* ((params  (clutch--read-connection-params))
+    (let* ((params  (clutch--connect-params-for-current-buffer))
            (product (clutch--effective-sql-product params))
            (conn    (clutch--build-conn params)))
       (when old-live-p
@@ -1364,8 +1366,7 @@ window rather than replacing the current window."
         (when (file-readable-p file)
           (insert-file-contents file))))
     (unless (clutch--connection-alive-p clutch-connection)
-      (when-let* ((params (clutch--inject-entry-name
-                           (cdr (assoc name clutch-connection-alist)) name))
+      (when-let* ((params (clutch--saved-connection-params name))
                   (conn   (clutch--build-conn params)))
         (clutch--activate-current-buffer-connection conn params)))))
 
@@ -1839,6 +1840,23 @@ Signals `user-error' if the user declines."
                  (not (yes-or-no-p "Discard pending changes and re-run query? ")))
         (user-error "Execution cancelled")))))
 
+(defun clutch--abandon-query-connection (connection)
+  "Drop CONNECTION after an unrecoverable query interruption."
+  (when (clutch--connection-alive-p connection)
+    (clutch-db-disconnect connection))
+  (clutch--clear-tx-dirty connection)
+  (when (eq connection clutch-connection)
+    (setq clutch-connection nil)))
+
+(defun clutch--handle-query-quit (connection)
+  "Convert a raw quit on CONNECTION into an interrupt or disconnect."
+  (unless (condition-case nil
+              (and (clutch--connection-alive-p connection)
+                   (clutch-db-interrupt-query connection))
+            (clutch-db-error nil))
+    (clutch--abandon-query-connection connection))
+  (signal 'clutch-query-interrupted nil))
+
 (defun clutch--execute (sql &optional conn)
   "Execute SQL on CONN (or current buffer connection).
 Times execution and displays results.
@@ -1866,14 +1884,7 @@ Prompts for confirmation on destructive operations."
                     (clutch--execute-select sql connection)
                   (clutch--execute-dml sql connection))))
           (quit
-           ;; A quit during network read can leave protocol state indeterminate.
-           ;; Drop the connection so the next command reconnects cleanly.
-           (when (clutch--connection-alive-p connection)
-             (clutch-db-disconnect connection))
-           (clutch--clear-tx-dirty connection)
-           (when (eq connection clutch-connection)
-             (setq clutch-connection nil))
-           (user-error "Query interrupted")))
+           (clutch--handle-query-quit connection)))
       (when (window-live-p source-win)
         (select-window source-win))
       (setq clutch--executing-p nil)
@@ -2162,11 +2173,7 @@ result buffer.  Stops and reports on the first error."
       (condition-case err
           (progn (clutch--run-db-query clutch-connection stmt) (cl-incf done))
         (quit
-         (when (clutch--connection-alive-p clutch-connection)
-           (clutch-db-disconnect clutch-connection))
-         (clutch--clear-tx-dirty clutch-connection)
-         (setq clutch-connection nil)
-         (user-error "Query interrupted"))
+         (clutch--handle-query-quit clutch-connection))
         (clutch-db-error
          (user-error "Statement %d failed: %s" (1+ done)
                      (error-message-string err)))))
@@ -2180,11 +2187,7 @@ result buffer.  Stops and reports on the first error."
                  (message "%d statement%s executed"
                           done (if (= done 1) "" "s")))
         (quit
-         (when (clutch--connection-alive-p clutch-connection)
-           (clutch-db-disconnect clutch-connection))
-         (clutch--clear-tx-dirty clutch-connection)
-         (setq clutch-connection nil)
-         (user-error "Query interrupted"))
+         (clutch--handle-query-quit clutch-connection))
         (clutch-db-error
          (user-error "Statement %d failed: %s" (1+ done)
                      (error-message-string err)))))))
@@ -2859,20 +2862,6 @@ Normalizes quoted identifiers to match the alias cache."
               (sym (cdr hit))
               (raw (or (clutch--xref-qualified-identifier-qualifier beg) sym)))
     (clutch--normalize-statement-table-token raw)))
-
-(defun clutch--xref-statement-aliases ()
-  "Return alias alist for the current statement without requiring schema cache.
-Falls back to UNION-branch-aware direct extraction when the schema cache
-is unavailable."
-  (let ((schema (clutch--schema-for-connection clutch-connection)))
-    (if schema
-        (clutch--table-aliases-in-current-statement schema)
-      (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
-                   (text (buffer-substring-no-properties beg end))
-                   (point-offset (- (point) beg))
-                   (range (clutch--toplevel-union-branch-range text point-offset)))
-        (cdr (clutch--extract-tables-and-aliases
-              text (car range) (cdr range)))))))
 
 (cl-defmethod xref-backend-identifier-at-point ((_backend (eql 'clutch)))
   "Return the identifier at point, preferring normalized alias names."
@@ -5555,6 +5544,11 @@ Accumulates input until a semicolon is found, then executes."
                          (if (= (length rows) 1) "" "s")
                          elapsed)))
             (clutch-repl--output (clutch-repl--format-dml-result result elapsed)))))
+    (quit
+     (condition-case nil
+         (clutch--handle-query-quit clutch-connection)
+       (clutch-query-interrupted
+        (clutch-repl--output "\nERROR: Query interrupted\n\ndb> "))))
     (error
      (clutch-repl--output
       (format "\nERROR: %s\n\ndb> "

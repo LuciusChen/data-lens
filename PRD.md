@@ -158,7 +158,7 @@ SQL query editing and execution mode. The primary entry point for interacting wi
 
 | Key | Command | Description |
 |-----|---------|-------------|
-| `C-c C-e` | `clutch-connect` | Connect to database |
+| `C-c C-e` | `clutch-connect` | Connect; query consoles reconnect their own saved connection |
 | `C-c C-x` | `clutch-execute` | Execute SQL at point or region |
 | `C-c C-s` | `clutch-refresh-schema` | Refresh schema cache |
 | `C-c ?` | Transient dispatch | Main command menu |
@@ -305,7 +305,7 @@ Line-by-line SQL evaluation with history and inline results.
 
 | Command | Description |
 |---------|-------------|
-| `clutch-connect` | Connect using profile from `clutch-connection-alist` or inline params |
+| `clutch-connect` | Connect using profile from `clutch-connection-alist` or inline params; query consoles reconnect their associated saved connection |
 | `clutch-disconnect` | Close database connection |
 | `clutch-switch-console` | Switch to a named query console buffer |
 | `clutch-query-console` | Open or switch to a named query console |
@@ -863,7 +863,7 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | **Prepared statements** | No parameterized query support; all SQL is executed as raw strings |
 | **CLOB/BLOB full content** | CLOBs show first 256 chars; BLOBs show length only; full streaming deferred |
 | **Multiple result sets** | Stored procedures returning multiple result sets not supported |
-| **Cancel/interrupt** | No UI to cancel a running query mid-execution |
+| **Cancel/interrupt** | `C-g` is recoverable for JDBC and native PostgreSQL; backends without explicit interrupt support still fall back to disconnect/reconnect |
 
 ## 19. Development Guidelines
 
@@ -895,7 +895,7 @@ M-x clutch-query-console
 ;; Start interactive REPL
 M-x clutch-repl
 
-;; Connect (from an open clutch-mode buffer)
+;; Connect (generic in clutch-mode/REPL; query consoles reconnect their own saved connection)
 C-c C-e  (or  M-x clutch-connect)
 
 ;; Object jump / describe / actions / schema switch

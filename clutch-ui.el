@@ -657,21 +657,6 @@ The header-line should track body hscroll exactly."
   (concat (propertize " " 'display '(space :align-to 0))
           (or (clutch--header-line-with-hscroll) "")))
 
-(defun clutch--build-separator (visible-cols widths position nw)
-  "Build a table separator line with row-number column.
-VISIBLE-COLS and WIDTHS describe data columns.
-POSITION is \\='top, \\='middle, or \\='bottom.
-NW is the row-number digit width."
-  (let* ((bface 'clutch-border-face)
-         ;; +1 for the mark column char
-         (rn-dash (+ 1 nw clutch-column-padding))
-         (raw (clutch--render-separator visible-cols widths position))
-         (cross (pcase position ('top "┬") ('bottom "┴") (_ "┼")))
-         (left (pcase position ('top "┌") ('bottom "└") (_ "├")))
-         (data-part (concat cross (substring raw 1)))
-         (rn (propertize (concat left (make-string rn-dash ?─)) 'face bface)))
-    (concat rn (propertize data-part 'face bface))))
-
 (defun clutch--insert-data-rows (rows visible-cols widths nw
                                       global-first-row row-positions render-state)
   "Insert data ROWS into the current buffer.
