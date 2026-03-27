@@ -536,11 +536,15 @@ intentionally small and shared across Embark and Transient:
 
 =C-c C-l= switches the current schema/database on the active connection and
 refreshes metadata for the new context.  Oracle/JDBC connections can switch
-business schemas such as =zj_test= and =cjh_test= within one connection, and
-MySQL connections map schema switching to =USE database=.  ClickHouse is
-handled separately: it has databases rather than runtime schemas, so =C-c C-l=
+business schemas such as =zj_test= and =cjh_test= within one connection,
+PostgreSQL-style wire connections use =SET search_path TO ...=, and MySQL
+connections map schema switching to =USE database=.  ClickHouse is handled
+separately: it has databases rather than runtime schemas, so =C-c C-l=
 prompts with =SHOW DATABASES= and reconnects to the selected =:database=
-instead of attempting session-level schema switching.
+instead of attempting session-level schema switching.  Generic
+=:backend jdbc= connections only support runtime schema switching when clutch
+has an explicit implementation for that driver/backend; custom JDBC URLs such
+as KingbaseES do not gain schema switching automatically.
 
 For JDBC backends, clutch-jdbc-agent now isolates foreground SQL from metadata
 traffic by keeping separate primary and metadata JDBC sessions under one
@@ -612,9 +616,11 @@ semantics, see [[file:docs/jdbc-agent-protocol.md][docs/jdbc-agent-protocol.md]]
 | =snowflake=    | Snowflake           | Maven Central       | —            |
 | =db2=          | IBM DB2             | Manual download     | 50000        |
 
-Any other JDBC-compatible database (ClickHouse, TiDB, Hive, etc.) can be used
-by passing =:url "jdbc:xxx://..."= directly and placing the driver jar in the
-drivers directory.
+Any other JDBC-compatible database (ClickHouse, TiDB, Hive, KingbaseES, etc.)
+can be used through the generic =jdbc= backend by passing
+=:url "jdbc:xxx://..."= directly and placing the driver jar in the drivers
+directory.  Use =:display-name= if you want the UI to show a friendly backend
+label instead of plain =JDBC=.
 
 *** Setup
 
@@ -712,7 +718,15 @@ artifact from Maven Central rather than a nonexistent plain
         ("clickhouse" . (:backend clickhouse
                           :host "ch.corp.com"
                           :database "default"
-                          :user "default" :password ""))))
+                          :user "default" :password ""))
+
+        ;; Generic JDBC (any database with a JDBC driver jar in drivers/)
+        ;; Use :backend jdbc with a full JDBC URL when no native backend exists.
+        ("kingbase" . (:backend jdbc
+                        :url "jdbc:kingbase8://db.corp.com:54321/test"
+                        :display-name "KingbaseES"
+                        :user "system" :pass-entry "kingbase"
+                        :rpc-timeout 15))))
 #+end_src
 
 JDBC connections use the same =:pass-entry= auth-source integration as other

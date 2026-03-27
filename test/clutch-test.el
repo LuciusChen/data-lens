@@ -5949,6 +5949,33 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
     (should (equal (clutch--connection-display-key 'fake-conn)
                    "scott@dbhost:1522"))))
 
+(ert-deftest clutch-test-jdbc-backend-icon-spec-uses-database-cog-outline ()
+  "Generic JDBC should use the requested database-cog-outline icon."
+  (should (equal (car (car (alist-get 'jdbc clutch--db-icon-specs))) 'mdicon))
+  (should (equal (cdr (car (alist-get 'jdbc clutch--db-icon-specs)))
+                 "nf-md-database_cog_outline")))
+
+(ert-deftest clutch-test-connection-state-icon-uses-database-check-outline ()
+  "Connected state icon should use the requested database-check-outline glyph."
+  (let (captured)
+    (cl-letf (((symbol-function 'clutch--icon)
+               (lambda (spec fallback)
+                 (setq captured (list spec fallback))
+                 "[ok]")))
+      (should (equal (clutch--connection-state-icon t) "[ok]"))
+      (should (equal captured '((mdicon . "nf-md-database_check_outline") "⬢"))))))
+
+(ert-deftest clutch-test-connection-display-key-derives-generic-jdbc-endpoint ()
+  "Generic JDBC connections should show endpoint details derived from :url."
+  (require 'clutch-db-jdbc)
+  (let ((conn (make-clutch-jdbc-conn
+               :params '(:driver jdbc
+                         :url "jdbc:kingbase8://127.0.0.1:54321/test"
+                         :display-name "KingbaseES"
+                         :user "system"))))
+    (should (equal (clutch--connection-display-key conn)
+                   "system@127.0.0.1:54321"))))
+
 (ert-deftest clutch-test-object-resolve-prefers-definition-buffer-object-over-symbol-at-point ()
   "Definition buffers should use the displayed object before symbol-at-point."
   (with-temp-buffer

@@ -70,20 +70,56 @@
      :last-insert-id nil
      :warnings nil)))
 
+(defconst clutch-db-pg--current-schema-cache-key "clutch_current_schema"
+  "Connection-local cache key for the effective PostgreSQL schema.")
+
+(defun clutch-db-pg--cached-current-schema (conn)
+  "Return cached current schema for CONN, or nil."
+  (cdr (assoc-string clutch-db-pg--current-schema-cache-key
+                     (pg-conn-parameters conn)
+                     t)))
+
+(defun clutch-db-pg--cache-current-schema (conn schema)
+  "Cache SCHEMA as the current schema for CONN."
+  (setf (pg-conn-parameters conn)
+        (cons (cons clutch-db-pg--current-schema-cache-key schema)
+              (cl-remove-if
+               (lambda (entry)
+                 (string-equal (car entry) clutch-db-pg--current-schema-cache-key))
+               (pg-conn-parameters conn))))
+  schema)
+
+(defun clutch-db-pg--set-search-path (conn schema)
+  "Set CONN search_path to SCHEMA and update the local cache."
+  (let ((schema (string-trim schema)))
+    (pg-query conn
+              (format "SET search_path TO %s"
+                      (pg-escape-identifier schema)))
+    (clutch-db-pg--cache-current-schema conn schema)))
+
 ;;;; Connect function
 
 (defun clutch-db-pg-connect (params)
   "Connect to PostgreSQL using PARAMS plist.
 PARAMS keys: :host, :port, :user, :password, :database, :tls,
 :connect-timeout, :read-idle-timeout, :query-timeout."
-  (condition-case err
-      (apply #'pg-connect
-             (cl-loop for (k v) on params by #'cddr
-                      unless (memq k '(:sql-product :backend))
-                      append (list k v)))
-    (pg-error
-     (signal 'clutch-db-error
-             (list (error-message-string err))))))
+  (let ((schema (plist-get params :schema))
+        conn)
+    (condition-case err
+        (progn
+          (setq conn
+                (apply #'pg-connect
+                       (cl-loop for (k v) on params by #'cddr
+                                unless (memq k '(:sql-product :backend :schema))
+                                append (list k v))))
+          (when schema
+            (clutch-db-pg--set-search-path conn schema))
+          conn)
+      (pg-error
+       (when conn
+         (ignore-errors (pg-disconnect conn)))
+       (signal 'clutch-db-error
+               (list (error-message-string err)))))))
 
 ;;;; Lifecycle methods
 
@@ -131,6 +167,40 @@ No special init needed — encoding is set in startup message.")
   (pg-escape-literal value))
 
 ;;;; Schema methods
+
+(cl-defmethod clutch-db-list-schemas ((conn pg-conn))
+  "Return visible schema names for PostgreSQL CONN."
+  (condition-case err
+      (let ((result (pg-query
+                     conn
+                     "SELECT schema_name FROM information_schema.schemata \
+WHERE schema_name <> 'information_schema' \
+  AND schema_name NOT LIKE 'pg\\_%' ESCAPE '\\' \
+ORDER BY schema_name")))
+        (mapcar #'car (pg-result-rows result)))
+    (pg-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-current-schema ((conn pg-conn))
+  "Return the current effective schema for PostgreSQL CONN."
+  (or (clutch-db-pg--cached-current-schema conn)
+      (condition-case err
+          (let* ((result (pg-query conn "SELECT current_schema()"))
+                 (schema (caar (pg-result-rows result))))
+            (when schema
+              (clutch-db-pg--cache-current-schema conn schema)))
+        (pg-error
+         (signal 'clutch-db-error
+                 (list (error-message-string err)))))))
+
+(cl-defmethod clutch-db-set-current-schema ((conn pg-conn) schema)
+  "Switch PostgreSQL CONN to SCHEMA via search_path."
+  (condition-case err
+      (clutch-db-pg--set-search-path conn schema)
+    (pg-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
 
 (cl-defmethod clutch-db-list-tables ((conn pg-conn))
   "Return table names for the current PostgreSQL database."

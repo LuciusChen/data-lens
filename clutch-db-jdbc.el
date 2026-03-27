@@ -140,8 +140,8 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 ;;;; Drivers that default to JDBC backend
 
 (defconst clutch-jdbc--jdbc-drivers
-  '(oracle sqlserver db2 snowflake redshift clickhouse)
-  "Driver symbols that are automatically routed to the JDBC backend.")
+  '(jdbc oracle sqlserver db2 snowflake redshift clickhouse)
+  "Backend/driver symbols that are routed to the JDBC backend.")
 
 (defconst clutch-jdbc--driver-companions
   '((oracle oracle-i18n)
@@ -611,6 +611,18 @@ stored in params at connect time."
 (defun clutch-jdbc--clickhouse-conn-p (conn)
   "Return non-nil when CONN is a ClickHouse JDBC connection."
   (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'clickhouse))
+
+(defun clutch-jdbc--url-metadata (url)
+  "Return endpoint metadata parsed from JDBC URL, or nil.
+Supports common `jdbc:subprotocol://host[:port]/database' URLs."
+  (when (and url
+             (string-match
+              "\\`jdbc:[^:]+://\\([^/:;?]+\\)\\(?::\\([0-9]+\\)\\)?/\\([^/?;]+\\)"
+              url))
+    (list :host (match-string 1 url)
+          :port (when-let* ((port (match-string 2 url)))
+                  (string-to-number port))
+          :database (match-string 3 url))))
 
 (defconst clutch-jdbc--oracle-system-schemas
   '("SYS" "SYSTEM" "XDB" "MDSYS" "CTXSYS" "LBACSYS" "OLAPSYS"
@@ -1288,26 +1300,36 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 (cl-defmethod clutch-db-host ((conn clutch-jdbc-conn))
   "Return the host for JDBC CONN."
-  (plist-get (clutch-jdbc-conn-params conn) :host))
+  (or (plist-get (clutch-jdbc-conn-params conn) :host)
+      (plist-get (clutch-jdbc--url-metadata
+                  (plist-get (clutch-jdbc-conn-params conn) :url))
+                 :host)))
 
 (cl-defmethod clutch-db-port ((conn clutch-jdbc-conn))
   "Return the port for JDBC CONN."
-  (plist-get (clutch-jdbc-conn-params conn) :port))
+  (or (plist-get (clutch-jdbc-conn-params conn) :port)
+      (plist-get (clutch-jdbc--url-metadata
+                  (plist-get (clutch-jdbc-conn-params conn) :url))
+                 :port)))
 
 (cl-defmethod clutch-db-database ((conn clutch-jdbc-conn))
   "Return the database for JDBC CONN."
-  (plist-get (clutch-jdbc-conn-params conn) :database))
+  (or (plist-get (clutch-jdbc-conn-params conn) :database)
+      (plist-get (clutch-jdbc--url-metadata
+                  (plist-get (clutch-jdbc-conn-params conn) :url))
+                 :database)))
 
 (cl-defmethod clutch-db-display-name ((conn clutch-jdbc-conn))
   "Return a display name based on the JDBC driver type."
-  (pcase (plist-get (clutch-jdbc-conn-params conn) :driver)
-    ('oracle    "Oracle")
-    ('sqlserver "SQL Server")
-    ('db2       "DB2")
-    ('snowflake "Snowflake")
-    ('redshift   "Redshift")
-    ('clickhouse "ClickHouse")
-    (_           "JDBC")))
+  (or (plist-get (clutch-jdbc-conn-params conn) :display-name)
+      (pcase (plist-get (clutch-jdbc-conn-params conn) :driver)
+        ('oracle    "Oracle")
+        ('sqlserver "SQL Server")
+        ('db2       "DB2")
+        ('snowflake "Snowflake")
+        ('redshift  "Redshift")
+        ('clickhouse "ClickHouse")
+        (_          "JDBC"))))
 
 ;;;; Agent installation helpers
 
