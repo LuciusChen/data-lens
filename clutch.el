@@ -907,7 +907,8 @@ Returns nil when the schema is ready (no noise for the happy path)."
     (sqlserver  . ((devicon . "nf-dev-microsoftsqlserver") ""  :color "#CC2927"))
     (snowflake  . ((mdicon  . "nf-md-snowflake")           "❄" :color "#29B5E8"))
     (db2        . ((mdicon  . "nf-md-database")            ""  :color "#1F70C1"))
-    (redshift   . ((mdicon  . "nf-md-database")            ""  :color "#8C4FFF")))
+    (redshift   . ((mdicon  . "nf-md-database")            ""  :color "#8C4FFF"))
+    (clickhouse . ((faicon  . "nf-fa-barcode")             ""  :color "#FFCC00")))
   "Alist mapping backend symbols to icon specs.
 Each value is (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS).
 ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
@@ -949,6 +950,7 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
           ('snowflake 'snowflake)
           ('db2 'db2)
           ('redshift 'redshift)
+          ('clickhouse 'clickhouse)
           (_ nil)))))
 
 (defun clutch--backend-display-name-from-params (params)
@@ -962,6 +964,7 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
     ('snowflake "Snowflake")
     ('db2 "DB2")
     ('redshift "Redshift")
+    ('clickhouse "ClickHouse")
     (_ nil)))
 
 (defun clutch--connection-backend-segment (&optional conn params)

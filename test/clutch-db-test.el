@@ -784,6 +784,55 @@
           (should (file-exists-p (expand-file-name "drivers/redshift-jdbc42.jar" tmpdir))))
       (delete-directory tmpdir t))))
 
+;;;; Unit tests — ClickHouse driver support
+
+(ert-deftest clutch-db-test-jdbc-build-url-clickhouse ()
+  "ClickHouse URL builder should produce a jdbc:clickhouse URL with default port 8123."
+  (should (equal (clutch-jdbc--build-url
+                  'clickhouse
+                  '(:host "ch.corp.com" :database "default"))
+                 "jdbc:clickhouse://ch.corp.com:8123/default"))
+  (should (equal (clutch-jdbc--build-url
+                  'clickhouse
+                  '(:host "ch.corp.com" :port 8443 :database "analytics"))
+                 "jdbc:clickhouse://ch.corp.com:8443/analytics")))
+
+(ert-deftest clutch-db-test-jdbc-display-name-clickhouse ()
+  "ClickHouse connections should display as \"ClickHouse\"."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver clickhouse))))
+    (should (equal (clutch-db-display-name conn) "ClickHouse"))))
+
+(ert-deftest clutch-db-test-jdbc-install-driver-installs-clickhouse ()
+  "Installing ClickHouse JDBC should download the all-classifier artifact and companions."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
+         (clutch-jdbc-agent-dir tmpdir)
+         all-coords)
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (coords dest)
+                     (push coords all-coords)
+                     (with-temp-file dest (insert "jar")))))
+          (clutch-jdbc-install-driver 'clickhouse)
+          (should (cl-some (lambda (c) (string-match-p ":all\\'" c)) all-coords))
+          (should (file-exists-p (expand-file-name "drivers/clickhouse-jdbc.jar" tmpdir)))
+          (should (file-exists-p (expand-file-name "drivers/slf4j-api.jar" tmpdir)))
+          (should (file-exists-p (expand-file-name "drivers/slf4j-nop.jar" tmpdir))))
+      (delete-directory tmpdir t))))
+
+(ert-deftest clutch-db-test-jdbc-download-maven-classifier ()
+  "Maven downloader should handle 4-segment coords (with classifier)."
+  (let (captured-url)
+    (cl-letf (((symbol-function 'url-copy-file)
+               (lambda (url _dest &rest _) (setq captured-url url))))
+      ;; 4-segment: group:artifact:version:classifier
+      (clutch-jdbc--download-maven-driver
+       "com.clickhouse:clickhouse-jdbc:0.9.8:all" "/tmp/test.jar")
+      (should (string-match-p "clickhouse-jdbc-0.9.8-all\\.jar" captured-url))
+      ;; 3-segment: group:artifact:version (unchanged behavior)
+      (clutch-jdbc--download-maven-driver
+       "com.amazon.redshift:redshift-jdbc42:2.1.0.30" "/tmp/test2.jar")
+      (should (string-match-p "redshift-jdbc42-2.1.0.30\\.jar" captured-url)))))
+
 ;;;; Unit tests — clutch-jdbc--conn-schema
 
 (ert-deftest clutch-db-test-jdbc-conn-schema-oracle-defaults-to-user ()
