@@ -34,6 +34,7 @@
 (declare-function clutch--sql-normalize-for-rewrite "clutch" (sql))
 (declare-function clutch--string-pad "clutch" (s width &optional pad-left numeric))
 (declare-function clutch--value-to-literal "clutch" (val))
+(declare-function clutch--humanize-db-error "clutch" (msg))
 (declare-function clutch--refresh-display "clutch" ())
 (declare-function clutch-result--selected-row-indices "clutch" ())
 (declare-function clutch-db-escape-identifier "clutch-db" (conn name))
@@ -622,7 +623,7 @@ Clear pending edits and re-run the last query if confirmed."
         (condition-case err
             (clutch--run-db-query clutch-connection stmt)
           (clutch-db-error
-           (user-error "UPDATE failed: %s" (error-message-string err)))))
+           (user-error "%s" (clutch--humanize-db-error (error-message-string err))))))
       (setq clutch--pending-edits nil)
       (message "%d row%s updated"
                (length statements)
@@ -699,7 +700,7 @@ Executes in order: INSERTs first, then UPDATEs, then DELETEs."
         (condition-case err
             (clutch--run-db-query clutch-connection stmt)
           (clutch-db-error
-           (user-error "Statement failed: %s" (error-message-string err)))))
+           (user-error "%s" (clutch--humanize-db-error (error-message-string err))))))
       (setq clutch--pending-edits nil
             clutch--pending-deletes nil
             clutch--pending-inserts nil
@@ -743,7 +744,7 @@ PK-INDICES are primary key column indices."
         (condition-case err
             (clutch--run-db-query clutch-connection stmt)
           (clutch-db-error
-           (user-error "DELETE failed: %s" (error-message-string err)))))
+           (user-error "%s" (clutch--humanize-db-error (error-message-string err))))))
       (setq clutch--marked-rows nil)
       (message "%d row%s deleted"
                (length statements)

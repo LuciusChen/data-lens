@@ -1137,8 +1137,9 @@ Returns a live connection object or signals a `user-error'."
     (condition-case err
         (clutch-db-connect backend db-params)
       (clutch-db-error
-       (user-error "%s" (or (car (cdr err))
-                            (error-message-string err)))))))
+       (user-error "%s" (clutch--humanize-db-error
+                         (or (car (cdr err))
+                             (error-message-string err))))))))
 
 (defun clutch--inject-entry-name (params name)
   "Return PARAMS with :pass-entry defaulting to NAME.
@@ -1628,8 +1629,9 @@ Signals an error if pagination is not available."
            (result (condition-case err
                        (clutch--run-db-query clutch-connection paged-sql)
                      (clutch-db-error
-                      (user-error "Query error: %s"
-                                  (error-message-string err)))))
+                      (user-error "%s"
+                                  (clutch--humanize-db-error
+                                   (error-message-string err))))))
            (elapsed (- (float-time) start))
            (rows (clutch-db-result-rows result)))
       (clutch--update-page-state
@@ -1858,6 +1860,58 @@ Prompts for confirmation on destructive operations."
       (move-to-column (1- column))
       (1+ (- (point) (point-min))))))
 
+;;;; Error humanization
+
+(defconst clutch--db-error-hints
+  '(;; ClickHouse
+    ("Lightweight updates are not supported"
+     . "enable lightweight update: ALTER TABLE ... MODIFY SETTING enable_block_number_column = 1")
+    ("Lightweight deletes? \\(?:is\\|are\\) not supported"
+     . "enable lightweight delete: SET allow_experimental_lightweight_delete = 1")
+    ;; Oracle
+    ("ORA-00942" . "table or view does not exist; check name and privileges")
+    ("ORA-01031" . "insufficient privileges")
+    ("ORA-00904" . "invalid column name")
+    ;; MySQL
+    ("Access denied for user" . "wrong username or password")
+    ("Unknown column" . "column does not exist; check spelling")
+    ;; PostgreSQL
+    ("relation .* does not exist" . "table does not exist; check schema and name")
+    ("permission denied" . "insufficient privileges")
+    ;; General
+    ("Connection refused" . "cannot connect; check host and port")
+    ("connect timed out\\|connection timeout" . "connection timed out; check network and firewall"))
+  "Alist of (REGEX . HINT) for known database error patterns.")
+
+(defun clutch--humanize-db-error (msg)
+  "Return a user-friendly version of database error MSG.
+Strips internal noise (queryId, version, stack traces) and appends
+actionable hints for known error patterns."
+  (let ((cleaned (or msg ""))
+        (case-fold-search t))
+    ;; Strip "Database error: " prefix
+    (setq cleaned (replace-regexp-in-string
+                   "\\`Database error: " "" cleaned))
+    ;; Strip ClickHouse queryId suffix: (queryId= uuid-value)
+    (setq cleaned (replace-regexp-in-string
+                   "[ \t]*(queryId=[^)]*)" "" cleaned))
+    ;; Strip ClickHouse version suffix: (version N.N.N (official build))
+    (setq cleaned (replace-regexp-in-string
+                   "[ \t]*(version [^)]*([^)]*)[^)]*)" "" cleaned))
+    ;; Strip Java stack trace (from first "at " frame onward)
+    (when (string-match "\n[ \t]*at " cleaned)
+      (setq cleaned (substring cleaned 0 (match-beginning 0))))
+    ;; Normalize whitespace
+    (setq cleaned (string-trim
+                   (replace-regexp-in-string "[[:space:]\n\r]+" " " cleaned)))
+    ;; Look up hint
+    (let ((hint (cl-loop for (pattern . h) in clutch--db-error-hints
+                         when (string-match-p pattern cleaned)
+                         return h)))
+      (if hint
+          (format "%s [%s]" cleaned hint)
+        cleaned))))
+
 (defun clutch--parse-error-position (msg &optional sql)
   "Extract a 1-based character position from error MSG, or nil.
 Handles PG \\='(position N)\\=' suffix and Oracle-style \\='line N, column M\\='."
@@ -1883,13 +1937,10 @@ Handles PG \\='(position N)\\=' suffix and Oracle-style \\='line N, column M\\='
 
 (defun clutch--format-error-banner (msg)
   "Return a compact single-line banner string for error MSG."
-  (let* ((summary (replace-regexp-in-string
-                   "[[:space:]\n\r]+"
-                   " "
-                   (string-trim (or msg ""))))
-         (text (if (string-empty-p summary)
+  (let* ((humanized (clutch--humanize-db-error msg))
+         (text (if (string-empty-p humanized)
                    "SQL execution failed"
-                 (format "SQL error: %s" summary))))
+                 humanized)))
     (truncate-string-to-width text 160 0 nil "...")))
 
 (defun clutch--mark-error-banner (buf pos &optional msg)
@@ -5413,7 +5464,8 @@ Accumulates input until a semicolon is found, then executes."
             (clutch-repl--output (clutch-repl--format-dml-result result elapsed)))))
     (error
      (clutch-repl--output
-      (format "\nERROR: %s\n\ndb> " (error-message-string err))))))
+      (format "\nERROR: %s\n\ndb> "
+              (clutch--humanize-db-error (error-message-string err)))))))
 
 ;;;###autoload
 (defun clutch-repl ()
