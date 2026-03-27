@@ -486,6 +486,81 @@
                 (:name "USER_SYM" :type "SYNONYM" :schema "SCOTT"
                         :target-schema "APP" :target-name "USERS")))))))
 
+(ert-deftest clutch-db-test-jdbc-conn-catalog-clickhouse-defaults-to-database ()
+  "ClickHouse JDBC metadata should use :database as the default catalog."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver clickhouse
+                                               :database "default"))))
+    (should (equal (clutch-jdbc--conn-catalog conn) "default"))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-list-table-entries-sends-catalog ()
+  "ClickHouse table discovery should pass catalog to JDBC metadata RPC."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver clickhouse
+                                               :database "default")))
+        captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (setq captured-op op
+                       captured-params params)
+                 '(:tables ((:name "events" :type "TABLE" :schema "")
+                            (:name "daily_mv" :type "VIEW" :schema ""))))))
+      (should
+       (equal (clutch-db-list-table-entries conn)
+              '((:name "events" :type "TABLE" :schema "")
+                (:name "daily_mv" :type "VIEW" :schema ""))))
+      (should (equal captured-op "get-tables"))
+      (should (equal (alist-get 'catalog captured-params) "default"))
+      (should-not (alist-get 'schema captured-params)))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-search-table-entries-sends-catalog ()
+  "ClickHouse table search should pass catalog to JDBC metadata RPC."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver clickhouse
+                                               :database "default")))
+        captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (setq captured-op op
+                       captured-params params)
+                 '(:tables ((:name "clutch_live_smoke" :type "TABLE"
+                              :schema "" :source-schema ""))))))
+      (should
+       (equal (clutch-db-search-table-entries conn "clutch")
+              '((:name "clutch_live_smoke" :type "TABLE"
+                 :schema "" :source-schema ""))))
+      (should (equal captured-op "search-tables"))
+      (should (equal (alist-get 'catalog captured-params) "default"))
+      (should (equal (alist-get 'prefix captured-params) "clutch"))
+      (should-not (alist-get 'schema captured-params)))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-column-details-send-catalog ()
+  "ClickHouse column metadata RPCs should carry catalog through all metadata calls."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver clickhouse
+                                               :database "default")))
+        calls)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (push (cons op params) calls)
+                 (pcase op
+                   ("get-primary-keys" '(:primary-keys ("id")))
+                   ("get-foreign-keys" '(:foreign-keys nil))
+                   ("get-columns" `(:columns ((:name "id" :type "UInt64"
+                                               :nullable ,clutch-jdbc--json-false)
+                                              (:name "name" :type "String"
+                                               :nullable t))))
+                   (_ (ert-fail (format "unexpected op: %s" op)))))))
+      (should
+       (equal (clutch-db-column-details conn "events")
+              '((:name "id" :type "UInt64" :nullable nil
+                 :primary-key t :foreign-key nil :comment nil)
+                (:name "name" :type "String" :nullable t
+                 :primary-key nil :foreign-key nil :comment nil))))
+      (dolist (call calls)
+        (should (equal (alist-get 'catalog (cdr call)) "default"))
+        (should-not (alist-get 'schema (cdr call)))))))
+
 ;;;; Unit tests — clutch-db-complete-tables (Oracle, cache-first)
 
 (ert-deftest clutch-db-test-jdbc-complete-tables-uses-cache ()
@@ -783,6 +858,55 @@
           (should (string-prefix-p "com.amazon.redshift:redshift-jdbc42:" requested-coords))
           (should (file-exists-p (expand-file-name "drivers/redshift-jdbc42.jar" tmpdir))))
       (delete-directory tmpdir t))))
+
+;;;; Unit tests — ClickHouse driver support
+
+(ert-deftest clutch-db-test-jdbc-build-url-clickhouse ()
+  "ClickHouse URL builder should produce a jdbc:clickhouse URL with default port 8123."
+  (should (equal (clutch-jdbc--build-url
+                  'clickhouse
+                  '(:host "ch.corp.com" :database "default"))
+                 "jdbc:clickhouse://ch.corp.com:8123/default"))
+  (should (equal (clutch-jdbc--build-url
+                  'clickhouse
+                  '(:host "ch.corp.com" :port 8443 :database "analytics"))
+                 "jdbc:clickhouse://ch.corp.com:8443/analytics")))
+
+(ert-deftest clutch-db-test-jdbc-display-name-clickhouse ()
+  "ClickHouse connections should display as \"ClickHouse\"."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver clickhouse))))
+    (should (equal (clutch-db-display-name conn) "ClickHouse"))))
+
+(ert-deftest clutch-db-test-jdbc-install-driver-installs-clickhouse ()
+  "Installing ClickHouse JDBC should download the all-classifier artifact and companions."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
+         (clutch-jdbc-agent-dir tmpdir)
+         all-coords)
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (coords dest)
+                     (push coords all-coords)
+                     (with-temp-file dest (insert "jar")))))
+          (clutch-jdbc-install-driver 'clickhouse)
+          (should (cl-some (lambda (c) (string-match-p ":all\\'" c)) all-coords))
+          (should (file-exists-p (expand-file-name "drivers/clickhouse-jdbc.jar" tmpdir)))
+          (should (file-exists-p (expand-file-name "drivers/slf4j-api.jar" tmpdir)))
+          (should (file-exists-p (expand-file-name "drivers/slf4j-nop.jar" tmpdir))))
+      (delete-directory tmpdir t))))
+
+(ert-deftest clutch-db-test-jdbc-download-maven-classifier ()
+  "Maven downloader should handle 4-segment coords (with classifier)."
+  (let (captured-url)
+    (cl-letf (((symbol-function 'url-copy-file)
+               (lambda (url _dest &rest _) (setq captured-url url))))
+      ;; 4-segment: group:artifact:version:classifier
+      (clutch-jdbc--download-maven-driver
+       "com.clickhouse:clickhouse-jdbc:0.9.8:all" "/tmp/test.jar")
+      (should (string-match-p "clickhouse-jdbc-0.9.8-all\\.jar" captured-url))
+      ;; 3-segment: group:artifact:version (unchanged behavior)
+      (clutch-jdbc--download-maven-driver
+       "com.amazon.redshift:redshift-jdbc42:2.1.0.30" "/tmp/test2.jar")
+      (should (string-match-p "redshift-jdbc42-2.1.0.30\\.jar" captured-url)))))
 
 ;;;; Unit tests — clutch-jdbc--conn-schema
 

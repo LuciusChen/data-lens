@@ -3415,6 +3415,68 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (clutch--goto-cell 1 99)
       (should (= (point) (+ row1 3))))))
 
+;;;; Unit tests — clutch--humanize-db-error
+
+(ert-deftest clutch-test-humanize-db-error-clickhouse-update ()
+  "ClickHouse NOT_IMPLEMENTED error should get cleaned and hinted."
+  (let ((msg (concat "Code: 48. DB::Exception: Lightweight updates are not supported. "
+                     "Lightweight updates are supported only for tables with materialized "
+                     "_block_number column. (NOT_IMPLEMENTED) "
+                     "(version 26.2.5.45 (official build))  "
+                     "(queryId= 92961bbf-e430-4c89-95c3-0deb471daec6)")))
+    (let ((result (clutch--humanize-db-error msg)))
+      (should (string-match-p "enable lightweight update" result))
+      (should-not (string-match-p "queryId" result))
+      (should-not (string-match-p "version 26" result)))))
+
+(ert-deftest clutch-test-humanize-db-error-clickhouse-delete ()
+  "ClickHouse lightweight delete error should match singular and plural forms."
+  (dolist (msg '("Lightweight delete is not supported"
+                 "Lightweight deletes are not supported"))
+    (let ((result (clutch--humanize-db-error msg)))
+      (should (string-match-p "enable lightweight delete" result)))))
+
+(ert-deftest clutch-test-humanize-db-error-oracle-ora00942 ()
+  "ORA-00942 should get a friendly hint appended."
+  (let ((result (clutch--humanize-db-error "ORA-00942: table or view does not exist")))
+    (should (string-match-p "ORA-00942" result))
+    (should (string-match-p "table or view does not exist" result))))
+
+(ert-deftest clutch-test-humanize-db-error-connection-refused ()
+  "Connection refused should hint to check host and port."
+  (let ((result (clutch--humanize-db-error "Connection refused (host=db.example.com, port=3306)")))
+    (should (string-match-p "check host and port" result))))
+
+(ert-deftest clutch-test-humanize-db-error-unknown-passes-through ()
+  "Unknown errors should pass through with noise stripped but no hint."
+  (let ((result (clutch--humanize-db-error "Something totally unexpected happened")))
+    (should (equal result "Something totally unexpected happened"))
+    (should-not (string-match-p "\\[" result))))
+
+(ert-deftest clutch-test-humanize-db-error-strips-queryid ()
+  "ClickHouse queryId and version suffixes should be removed."
+  (let ((result (clutch--humanize-db-error
+                 "Some error (version 24.1.1.1 (official build)) (queryId= abc-123)")))
+    (should-not (string-match-p "queryId" result))
+    (should-not (string-match-p "version 24" result))
+    (should (string-match-p "Some error" result))))
+
+(ert-deftest clutch-test-humanize-db-error-strips-stack-trace ()
+  "Java stack traces should be truncated from the first 'at' frame."
+  (let ((result (clutch--humanize-db-error
+                 (concat "Connection failed: timeout\n"
+                         "\tat java.base/java.net.Socket.connect(Socket.java:633)\n"
+                         "\tat com.clickhouse.client.Http.open(Http.java:42)"))))
+    (should (string-match-p "Connection failed" result))
+    (should-not (string-match-p "java\\.base" result))
+    (should-not (string-match-p "Socket" result))))
+
+(ert-deftest clutch-test-humanize-db-error-strips-database-error-prefix ()
+  "The redundant 'Database error: ' prefix should be removed."
+  (let ((result (clutch--humanize-db-error "Database error: ORA-00942: table does not exist")))
+    (should-not (string-prefix-p "Database error:" result))
+    (should (string-match-p "ORA-00942" result))))
+
 (ert-deftest clutch-test-parse-error-position-supports-pg-and-oracle ()
   "Error position parsing should handle PG and Oracle/JDBC formats."
   (should (= 17 (clutch--parse-error-position "syntax error (position 17)")))
@@ -3463,7 +3525,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should (overlayp clutch--error-banner-overlay))
       (should (= (overlay-start clutch--error-banner-overlay) (point-min)))
       (should (string-match-p
-               "SQL error: ORA-00904: invalid identifier"
+               "ORA-00904"
                (overlay-get clutch--error-banner-overlay 'before-string))))))
 
 (ert-deftest clutch-test-mark-sql-error-banner-anchors-to-statement-line ()
@@ -5687,6 +5749,67 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (should (equal clutch--connection-params '(:backend mysql :database "cjh_test")))
         (should (equal cleared-keys '("current" "user@host:3306/zj_test")))))))
 
+(ert-deftest clutch-test-switch-schema-clickhouse-reconnects-to-selected-database ()
+  "ClickHouse switching should reconnect with the selected database."
+  (let ((old-conn 'old-conn)
+        (new-conn 'new-conn)
+        built-params disconnected primed tx-cleared cleared-keys message-text)
+    (with-temp-buffer
+      (setq-local clutch-connection old-conn
+                  clutch--connection-params '(:backend clickhouse
+                                              :host "127.0.0.1"
+                                              :port 8123
+                                              :database "default"
+                                              :user "default"))
+      (cl-letf (((symbol-function 'clutch--list-clickhouse-databases)
+                 (lambda (_conn) '("default" "demo")))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--confirm-disconnect-transaction-loss)
+                 (lambda (&rest _) t))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _args) "demo"))
+                ((symbol-function 'clutch--build-conn)
+                 (lambda (params)
+                   (setq built-params params)
+                   new-conn))
+                ((symbol-function 'clutch-db-disconnect)
+                 (lambda (conn) (setq disconnected conn)))
+                ((symbol-function 'clutch--prime-schema-cache)
+                 (lambda (conn) (setq primed conn)))
+                ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
+                ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
+                ((symbol-function 'clutch--clear-tx-dirty)
+                 (lambda (conn) (setq tx-cleared conn)))
+                ((symbol-function 'clutch--clear-connection-metadata-caches)
+                 (lambda (_conn &optional key)
+                   (push (or key "current") cleared-keys)))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (conn)
+                   (if (eq conn old-conn)
+                       "default-key"
+                     "demo-key")))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq message-text (apply #'format fmt args)))))
+        (clutch-switch-schema)
+        (should (eq clutch-connection new-conn))
+        (should (equal built-params '(:backend clickhouse
+                                      :host "127.0.0.1"
+                                      :port 8123
+                                      :database "demo"
+                                      :user "default")))
+        (should (equal clutch--connection-params '(:backend clickhouse
+                                                   :host "127.0.0.1"
+                                                   :port 8123
+                                                   :database "demo"
+                                                   :user "default")))
+        (should (eq disconnected old-conn))
+        (should (eq primed new-conn))
+        (should (eq tx-cleared old-conn))
+        (should (equal cleared-keys '("current" "default-key")))
+        (should (equal message-text "Current database: demo"))))))
+
 (ert-deftest clutch-test-clear-connection-metadata-caches-cancels-explicit-key-timers ()
   "Clearing metadata for an explicit key should cancel timers for that key."
   (let ((clutch--schema-cache (make-hash-table :test 'equal))
@@ -5757,6 +5880,25 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (should (string-match-p "user@host" line))
         (should (string-match-p "\\[schema\\] zj_test" line))
         (should-not (string-match-p "Schema:" line))))))
+
+(ert-deftest clutch-test-header-line-shows-clickhouse-database ()
+  "Connection header line should show the current ClickHouse database."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--connection-clickhouse-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--icon) (lambda (&rest _) "[schema]"))
+              ((symbol-function 'clutch--db-backend-icon-for-key) (lambda (_key) nil))
+              ((symbol-function 'clutch-db-display-name) (lambda (_conn) "ClickHouse"))
+              ((symbol-function 'clutch--connection-display-key) (lambda (_conn) "default@127.0.0.1"))
+              ((symbol-function 'clutch-db-database) (lambda (_conn) "demo"))
+              ((symbol-function 'clutch-db-current-schema) (lambda (_conn) nil))
+              ((symbol-function 'clutch--schema-status-header-line-segment) (lambda (_conn) nil))
+              ((symbol-function 'clutch--tx-header-line-segment) (lambda (_conn) nil))
+              ((symbol-function 'clutch--header-line-indent) (lambda () "")))
+      (let ((line (clutch--build-connection-header-line)))
+        (should (string-match-p "default@127.0.0.1" line))
+        (should (string-match-p "\\[schema\\] demo" line))))))
 
 (ert-deftest clutch-test-disconnected-header-line-shows-backend-and-warning-state ()
   "Disconnected header line should keep backend context and warn loudly."
