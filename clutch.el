@@ -666,6 +666,15 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
        (clutch-jdbc-conn-p conn)
        (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)))
 
+(defun clutch--connection-clickhouse-p (conn)
+  "Return non-nil when CONN is a ClickHouse connection."
+  (and conn
+       (eq (ignore-errors (clutch--backend-key-from-conn conn)) 'clickhouse)))
+
+(defun clutch--params-clickhouse-p (params)
+  "Return non-nil when connection PARAMS target ClickHouse."
+  (eq (and params (clutch--backend-key-from-params params)) 'clickhouse))
+
 (defun clutch--sql-leading-keyword (sql)
   "Return the leading SQL keyword for SQL, or nil."
   (let ((trimmed (clutch--strip-leading-comments sql)))
@@ -827,6 +836,20 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
           (clutch--refresh-result-status-line)
           (clutch--update-position-indicator)))))))
 
+(defun clutch--activate-current-buffer-connection (conn params &optional product)
+  "Bind CONN as the current buffer connection and prime local UI state."
+  (clutch--bind-connection-context conn params product)
+  (clutch--prime-schema-cache conn)
+  (clutch--update-mode-line)
+  conn)
+
+(defun clutch--finalize-rebound-connection (conn)
+  "Prime metadata and refresh UI after CONN has been rebound to buffers."
+  (clutch--prime-schema-cache conn)
+  (clutch--refresh-schema-status-ui conn)
+  (clutch--refresh-transaction-ui conn)
+  conn)
+
 (defun clutch--result-buffers-with-pending ()
   "Return list of live result buffers that have uncommitted pending state."
   (cl-remove-if-not
@@ -857,14 +880,26 @@ Returns non-nil on success, nil on failure."
         (let ((conn (clutch--build-conn params)))
           (clutch--clear-tx-dirty old-conn)
           (clutch--rebind-connection-buffers old-conn conn params product)
-          (clutch--prime-schema-cache conn)
-          (clutch--refresh-schema-status-ui conn)
-          (clutch--refresh-transaction-ui conn)
+          (clutch--finalize-rebound-connection conn)
           (message "Reconnected to %s" (clutch--connection-key conn))
           t)
       (error
        (message "Reconnect failed: %s" (error-message-string err))
        nil))))
+
+(defun clutch--replace-connection (old-conn params &optional product)
+  "Replace OLD-CONN with a new connection built from PARAMS.
+PRODUCT is the effective SQL product for the new logical session."
+  (let* ((product (or product (clutch--effective-sql-product params)))
+         (old-key (clutch--connection-key old-conn))
+         (new-conn (clutch--build-conn params)))
+    (clutch--clear-tx-dirty old-conn)
+    (clutch--rebind-connection-buffers old-conn new-conn params product)
+    (when (clutch--connection-alive-p old-conn)
+      (clutch-db-disconnect old-conn))
+    (clutch--clear-connection-metadata-caches old-conn old-key)
+    (clutch--clear-connection-metadata-caches new-conn)
+    (clutch--finalize-rebound-connection new-conn)))
 
 (defun clutch--ensure-connection ()
   "Ensure current buffer has a live connection.
@@ -889,9 +924,15 @@ Returns nil when the schema is ready (no noise for the happy path)."
       ('failed     (propertize "schema!" 'face 'error))
       (_ nil))))
 
+(defun clutch--current-namespace-name (conn)
+  "Return the current schema/database label for CONN, or nil."
+  (or (and (clutch--connection-clickhouse-p conn)
+           (clutch-db-database conn))
+      (clutch-db-current-schema conn)))
+
 (defun clutch--current-schema-header-line-segment (conn)
-  "Return a header-line segment for CONN's current schema, or nil."
-  (when-let* ((schema (clutch-db-current-schema conn)))
+  "Return a header-line segment for CONN's current schema or database, or nil."
+  (when-let* ((schema (clutch--current-namespace-name conn)))
     (let ((icon (clutch--icon-with-face '(mdicon . "nf-md-sitemap_outline")
                                         "≣" 'header-line)))
       (if (string-empty-p icon)
@@ -905,12 +946,13 @@ Returns nil when the schema is ready (no noise for the happy path)."
   '((mysql      . ((devicon . "nf-dev-mysql")              ""  :color "#469AD7"))
     (pg         . ((devicon . "nf-dev-postgresql")         ""  :color "#336791"))
     (sqlite     . ((devicon . "nf-dev-sqlite")             ""  :color "#3A7EC6"))
-    (jdbc       . ((mdicon  . "nf-md-database")            ""  :color "#59636e"))
+    (jdbc       . ((mdicon  . "nf-md-database_cog_outline") "" :color "#59636e"))
     (oracle     . ((mdicon  . "nf-md-alpha_o_circle")      "O" :color "#C74634"))
     (sqlserver  . ((devicon . "nf-dev-microsoftsqlserver") ""  :color "#CC2927"))
     (snowflake  . ((mdicon  . "nf-md-snowflake")           "❄" :color "#29B5E8"))
     (db2        . ((mdicon  . "nf-md-database")            ""  :color "#1F70C1"))
-    (redshift   . ((mdicon  . "nf-md-database")            ""  :color "#8C4FFF")))
+    (redshift   . ((mdicon  . "nf-md-database")            ""  :color "#8C4FFF"))
+    (clickhouse . ((faicon  . "nf-fa-barcode")             ""  :color "#FFCC00")))
   "Alist mapping backend symbols to icon specs.
 Each value is (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS).
 ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
@@ -953,6 +995,7 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
           ('snowflake 'snowflake)
           ('db2 'db2)
           ('redshift 'redshift)
+          ('clickhouse 'clickhouse)
           (_ nil)))))
 
 (defun clutch--backend-display-name-from-params (params)
@@ -968,6 +1011,7 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
         ('snowflake "Snowflake")
         ('db2 "DB2")
         ('redshift "Redshift")
+        ('clickhouse "ClickHouse")
         (_ nil))))
 
 (defun clutch--connection-backend-segment (&optional conn params)
@@ -988,7 +1032,7 @@ to the display name (e.g. \"MySQL\")."
 (defun clutch--connection-state-icon (connected)
   "Return a connection state icon for CONNECTED."
   (if connected
-      (clutch--icon '(mdicon . "nf-md-database") "⬢")
+      (clutch--icon '(mdicon . "nf-md-database_check_outline") "⬢")
     (clutch--icon '(mdicon . "nf-md-database_off") "⨯")))
 
 (defun clutch--header-line-indent ()
@@ -1143,8 +1187,9 @@ Returns a live connection object or signals a `user-error'."
     (condition-case err
         (clutch-db-connect backend db-params)
       (clutch-db-error
-       (user-error "%s" (or (car (cdr err))
-                            (error-message-string err)))))))
+       (user-error "%s" (clutch--humanize-db-error
+                         (or (car (cdr err))
+                             (error-message-string err))))))))
 
 (defun clutch--inject-entry-name (params name)
   "Return PARAMS with :pass-entry defaulting to NAME.
@@ -1193,9 +1238,7 @@ params; see `clutch-connection-alist' for details."
            (conn    (clutch--build-conn params)))
       (when old-live-p
         (clutch--do-disconnect old-conn))
-      (clutch--bind-connection-context conn params product)
-      (clutch--prime-schema-cache conn)
-      (clutch--update-mode-line)
+      (clutch--activate-current-buffer-connection conn params product)
       (message "Connected to %s" (clutch--connection-key conn)))))
 
 (defun clutch-disconnect ()
@@ -1324,12 +1367,7 @@ window rather than replacing the current window."
       (when-let* ((params (clutch--inject-entry-name
                            (cdr (assoc name clutch-connection-alist)) name))
                   (conn   (clutch--build-conn params)))
-        (setq clutch-connection conn
-              clutch--connection-params params
-              clutch--conn-sql-product (clutch--effective-sql-product params))
-        (clutch--prime-schema-cache conn)
-        (clutch--update-mode-line)
-        ))))
+        (clutch--activate-current-buffer-connection conn params)))))
 
 ;;;###autoload
 (defun clutch-switch-console ()
@@ -1634,8 +1672,9 @@ Signals an error if pagination is not available."
            (result (condition-case err
                        (clutch--run-db-query clutch-connection paged-sql)
                      (clutch-db-error
-                      (user-error "Query error: %s"
-                                  (error-message-string err)))))
+                      (user-error "%s"
+                                  (clutch--humanize-db-error
+                                   (error-message-string err))))))
            (elapsed (- (float-time) start))
            (rows (clutch-db-result-rows result)))
       (clutch--update-page-state
@@ -1864,6 +1903,58 @@ Prompts for confirmation on destructive operations."
       (move-to-column (1- column))
       (1+ (- (point) (point-min))))))
 
+;;;; Error humanization
+
+(defconst clutch--db-error-hints
+  '(;; ClickHouse
+    ("Lightweight updates are not supported"
+     . "enable lightweight update: ALTER TABLE ... MODIFY SETTING enable_block_number_column = 1")
+    ("Lightweight deletes? \\(?:is\\|are\\) not supported"
+     . "enable lightweight delete: SET allow_experimental_lightweight_delete = 1")
+    ;; Oracle
+    ("ORA-00942" . "table or view does not exist; check name and privileges")
+    ("ORA-01031" . "insufficient privileges")
+    ("ORA-00904" . "invalid column name")
+    ;; MySQL
+    ("Access denied for user" . "wrong username or password")
+    ("Unknown column" . "column does not exist; check spelling")
+    ;; PostgreSQL
+    ("relation .* does not exist" . "table does not exist; check schema and name")
+    ("permission denied" . "insufficient privileges")
+    ;; General
+    ("Connection refused" . "cannot connect; check host and port")
+    ("connect timed out\\|connection timeout" . "connection timed out; check network and firewall"))
+  "Alist of (REGEX . HINT) for known database error patterns.")
+
+(defun clutch--humanize-db-error (msg)
+  "Return a user-friendly version of database error MSG.
+Strips internal noise (queryId, version, stack traces) and appends
+actionable hints for known error patterns."
+  (let ((cleaned (or msg ""))
+        (case-fold-search t))
+    ;; Strip "Database error: " prefix
+    (setq cleaned (replace-regexp-in-string
+                   "\\`Database error: " "" cleaned))
+    ;; Strip ClickHouse queryId suffix: (queryId= uuid-value)
+    (setq cleaned (replace-regexp-in-string
+                   "[ \t]*(queryId=[^)]*)" "" cleaned))
+    ;; Strip ClickHouse version suffix: (version N.N.N (official build))
+    (setq cleaned (replace-regexp-in-string
+                   "[ \t]*(version [^)]*([^)]*)[^)]*)" "" cleaned))
+    ;; Strip Java stack trace (from first "at " frame onward)
+    (when (string-match "\n[ \t]*at " cleaned)
+      (setq cleaned (substring cleaned 0 (match-beginning 0))))
+    ;; Normalize whitespace
+    (setq cleaned (string-trim
+                   (replace-regexp-in-string "[[:space:]\n\r]+" " " cleaned)))
+    ;; Look up hint
+    (let ((hint (cl-loop for (pattern . h) in clutch--db-error-hints
+                         when (string-match-p pattern cleaned)
+                         return h)))
+      (if hint
+          (format "%s [%s]" cleaned hint)
+        cleaned))))
+
 (defun clutch--parse-error-position (msg &optional sql)
   "Extract a 1-based character position from error MSG, or nil.
 Handles PG \\='(position N)\\=' suffix and Oracle-style \\='line N, column M\\='."
@@ -1889,13 +1980,10 @@ Handles PG \\='(position N)\\=' suffix and Oracle-style \\='line N, column M\\='
 
 (defun clutch--format-error-banner (msg)
   "Return a compact single-line banner string for error MSG."
-  (let* ((summary (replace-regexp-in-string
-                   "[[:space:]\n\r]+"
-                   " "
-                   (string-trim (or msg ""))))
-         (text (if (string-empty-p summary)
+  (let* ((humanized (clutch--humanize-db-error msg))
+         (text (if (string-empty-p humanized)
                    "SQL execution failed"
-                 (format "SQL error: %s" summary))))
+                 humanized)))
     (truncate-string-to-width text 160 0 nil "...")))
 
 (defun clutch--mark-error-banner (buf pos &optional msg)
@@ -2320,37 +2408,87 @@ executed outside clutch that would otherwise leave stale completions."
                       (funcall update-fn clutch--connection-params))
           (clutch--update-mode-line))))))
 
-(defun clutch-switch-schema ()
-  "Switch the current Oracle/JDBC connection to another visible schema."
+(defun clutch--list-clickhouse-databases (conn)
+  "Return sorted database names visible to ClickHouse CONN."
+  (sort
+   (delete-dups
+    (cl-loop for row in (clutch-db-result-rows (clutch-db-query conn "SHOW DATABASES"))
+             for db = (car row)
+             when (and (stringp db) (not (string-empty-p db)))
+             collect db))
+   #'string-collate-lessp))
+
+(defun clutch-switch-database ()
+  "Switch the current ClickHouse connection to another database by reconnecting."
   (interactive)
   (let* ((context (clutch--command-connection-context))
          (conn (or clutch-connection
                    (plist-get context :connection)
                    (user-error "No active connection")))
-         (schemas (clutch-db-list-schemas conn))
-         (current (clutch-db-current-schema conn))
-         (old-key (clutch--connection-key conn)))
-    (unless schemas
-      (user-error "Runtime schema switching is not available for this connection"))
-    (let ((schema (completing-read
-                   (if current
-                       (format "Switch to schema (current %s): " current)
-                     "Switch to schema: ")
-                   schemas nil t nil nil current)))
-      (unless (string-empty-p schema)
-        (if (and current (string-equal-ignore-case schema current))
-            (message "Already on schema %s" current)
-          (clutch-db-set-current-schema conn schema)
-          (clutch--update-connection-params-for-buffers
+         (params (or (plist-get context :params)
+                     (car (clutch--connection-context conn))
+                     (user-error "No reconnect parameters for this connection")))
+         (current (or (plist-get params :database) "default"))
+         (databases (clutch--list-clickhouse-databases conn)))
+    (unless (or (clutch--connection-clickhouse-p conn)
+                (clutch--params-clickhouse-p params))
+      (user-error "Runtime database switching is currently available only for ClickHouse"))
+    (unless databases
+      (user-error "No databases returned by SHOW DATABASES"))
+    (let ((database (completing-read
+                     (if current
+                         (format "Switch to database (current %s): " current)
+                       "Switch to database: ")
+                     databases nil t nil nil current)))
+      (unless (string-empty-p database)
+        (if (string-equal database current)
+            (message "Already on database %s" current)
+          (when (clutch--connection-alive-p conn)
+            (clutch--confirm-disconnect-transaction-loss
+             conn
+             "Uncommitted changes will be lost.  Switch database? "))
+          (clutch--replace-connection
            conn
-           (lambda (params)
-             (if (eq (plist-get params :backend) 'mysql)
-                 (plist-put params :database schema)
-               (plist-put params :schema schema))))
-          (clutch--clear-connection-metadata-caches conn old-key)
-          (clutch--clear-connection-metadata-caches conn)
-          (clutch--refresh-current-schema t)
-          (message "Current schema: %s" schema))))))
+           (plist-put (copy-sequence params) :database database)
+           (plist-get context :product))
+          (message "Current database: %s" database))))))
+
+(defun clutch-switch-schema ()
+  "Switch the current schema or database on the active connection."
+  (interactive)
+  (let* ((context (clutch--command-connection-context))
+         (conn (or clutch-connection
+                   (plist-get context :connection)
+                   (user-error "No active connection")))
+         (params (or clutch--connection-params
+                     (plist-get context :params))))
+    (if (or (clutch--connection-clickhouse-p conn)
+            (clutch--params-clickhouse-p params))
+        (clutch-switch-database)
+      (let* ((schemas (clutch-db-list-schemas conn))
+             (current (clutch-db-current-schema conn))
+             (old-key (clutch--connection-key conn)))
+        (unless schemas
+          (user-error "Runtime schema switching is not available for this connection"))
+        (let ((schema (completing-read
+                       (if current
+                           (format "Switch to schema (current %s): " current)
+                         "Switch to schema: ")
+                       schemas nil t nil nil current)))
+          (unless (string-empty-p schema)
+            (if (and current (string-equal-ignore-case schema current))
+                (message "Already on schema %s" current)
+              (clutch-db-set-current-schema conn schema)
+              (clutch--update-connection-params-for-buffers
+               conn
+               (lambda (params)
+                 (if (eq (plist-get params :backend) 'mysql)
+                     (plist-put params :database schema)
+                   (plist-put params :schema schema))))
+              (clutch--clear-connection-metadata-caches conn old-key)
+              (clutch--clear-connection-metadata-caches conn)
+              (clutch--refresh-current-schema t)
+              (message "Current schema: %s" schema))))))))
 
 (defun clutch--eldoc-column-extras (col)
   "Return a space-joined string of constraint annotations for COL plist."
@@ -3394,7 +3532,7 @@ Key bindings:
   \\[clutch-jump]	Object jump
   \\[clutch-describe-dwim]	Describe object
   \\[clutch-act-dwim]	Object actions
-  \\[clutch-switch-schema]	Switch schema
+  \\[clutch-switch-schema]	Switch schema/database
   \\[clutch-preview-execution-sql]	Preview execution"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
   (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
@@ -5354,7 +5492,7 @@ Selects JSON, XML, or binary string view based on column type and content."
   \\[clutch-jump]	Object jump
   \\[clutch-describe-dwim]	Describe object
   \\[clutch-act-dwim]	Object actions
-  \\[clutch-switch-schema]	Switch schema"
+  \\[clutch-switch-schema]	Switch schema/database"
   (setq comint-prompt-regexp "^db> \\|^    -> ")
   (setq comint-input-sender #'clutch-repl--input-sender)
   (clutch--install-completion-capfs)
@@ -5419,7 +5557,8 @@ Accumulates input until a semicolon is found, then executes."
             (clutch-repl--output (clutch-repl--format-dml-result result elapsed)))))
     (error
      (clutch-repl--output
-      (format "\nERROR: %s\n\ndb> " (error-message-string err))))))
+      (format "\nERROR: %s\n\ndb> "
+              (clutch--humanize-db-error (error-message-string err)))))))
 
 ;;;###autoload
 (defun clutch-repl ()
@@ -5473,7 +5612,7 @@ Accumulates input until a semicolon is found, then executes."
     ("j" "Jump to object"     clutch-jump)
     ("D" "Describe object"    clutch-describe-dwim)
     ("o" "Object actions"     clutch-act-dwim)
-    ("l" "Switch schema"      clutch-switch-schema)
+    ("l" "Switch schema/db"   clutch-switch-schema)
     ("s" "Refresh schema"   clutch-refresh-schema)]])
 
 (transient-define-prefix clutch-result-dispatch ()
