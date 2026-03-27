@@ -64,7 +64,7 @@
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "f37081d7fe17c6c8c2adb5be3218fd3b16feb53b533b383a75b6373eae2a7ef2"
+  "2f848488e4597ea6acd6d93b6cdb07b5f41d89490f4cebbb94fafe2907fa6d48"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -608,6 +608,10 @@ stored in params at connect time."
   "Return non-nil when CONN is an Oracle JDBC connection."
   (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle))
 
+(defun clutch-jdbc--clickhouse-conn-p (conn)
+  "Return non-nil when CONN is a ClickHouse JDBC connection."
+  (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'clickhouse))
+
 (defconst clutch-jdbc--oracle-system-schemas
   '("SYS" "SYSTEM" "XDB" "MDSYS" "CTXSYS" "LBACSYS" "OLAPSYS"
     "WMSYS" "DBSNMP" "APPQOSSYS" "AUDSYS" "DVSYS"
@@ -892,6 +896,21 @@ Oracle uses the username as schema (uppercased).  Other backends return nil."
   (or (plist-get (clutch-jdbc-conn-params conn) :schema)
       (clutch-jdbc--default-schema conn)))
 
+(defun clutch-jdbc--conn-catalog (conn)
+  "Return the effective catalog for CONN, or nil when unused.
+ClickHouse maps its current database to JDBC catalog, not schema."
+  (or (plist-get (clutch-jdbc-conn-params conn) :catalog)
+      (when (clutch-jdbc--clickhouse-conn-p conn)
+        (or (plist-get (clutch-jdbc-conn-params conn) :database)
+            "default"))))
+
+(defun clutch-jdbc--metadata-scope-params (conn)
+  "Return optional JDBC metadata scope params for CONN."
+  (let ((catalog (clutch-jdbc--conn-catalog conn))
+        (schema (clutch-jdbc--conn-schema conn)))
+    (append (when catalog `((catalog . ,catalog)))
+            (when schema `((schema . ,schema))))))
+
 (defun clutch-jdbc--visible-schemas (conn schemas)
   "Normalize visible SCHEMAS for CONN."
   (let* ((current (clutch-jdbc--conn-schema conn))
@@ -920,11 +939,10 @@ returning tables from SYS/SYSTEM and other visible schemas."
 
 (cl-defmethod clutch-db-list-table-entries ((conn clutch-jdbc-conn))
   "Return table entry plists for JDBC CONN."
-  (let* ((schema  (clutch-jdbc--conn-schema conn))
-         (result  (clutch-jdbc--rpc
+  (let* ((result  (clutch-jdbc--rpc
                    "get-tables"
                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                     ,@(when schema `((schema . ,schema))))))
+                     ,@(clutch-jdbc--metadata-scope-params conn))))
          (entries (clutch-jdbc--collect-table-entries conn result)))
     entries))
 
@@ -965,12 +983,11 @@ not issue an additional empty-prefix `search-tables' scan here."
 (cl-defmethod clutch-db-refresh-schema-async ((conn clutch-jdbc-conn) callback
                                               &optional errback)
   "Refresh JDBC table names for CONN asynchronously."
-  (let* ((schema      (clutch-jdbc--conn-schema conn))
-         (rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
+  (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-tables"
      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       ,@(when schema `((schema . ,schema))))
+       ,@(clutch-jdbc--metadata-scope-params conn))
      (lambda (result)
        (when callback
          (funcall callback
@@ -985,13 +1002,12 @@ not issue an additional empty-prefix `search-tables' scan here."
 (cl-defmethod clutch-db-column-details-async ((conn clutch-jdbc-conn) table callback
                                               &optional errback)
   "Fetch JDBC column details for TABLE on CONN asynchronously."
-  (let* ((schema (clutch-jdbc--conn-schema conn))
-         (rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
+  (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-columns"
      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
        (table . ,table)
-       ,@(when schema `((schema . ,schema))))
+       ,@(clutch-jdbc--metadata-scope-params conn))
      (lambda (result)
        (when callback
          (funcall callback (plist-get result :columns))))
@@ -1001,12 +1017,11 @@ not issue an additional empty-prefix `search-tables' scan here."
 
 (cl-defmethod clutch-db-list-columns ((conn clutch-jdbc-conn) table)
   "Return column names for TABLE on JDBC CONN using DatabaseMetaData."
-  (let* ((schema  (clutch-jdbc--conn-schema conn))
-         (result  (clutch-jdbc--rpc
+  (let* ((result  (clutch-jdbc--rpc
                    "get-columns"
                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                      (table   . ,table)
-                     ,@(when schema `((schema . ,schema)))))))
+                     ,@(clutch-jdbc--metadata-scope-params conn)))))
     (mapcar (lambda (col) (plist-get col :name))
             (plist-get result :columns))))
 
@@ -1026,31 +1041,28 @@ For Oracle: uses the schema cache when available (no RPC); falls back to a
                            (hash-table-keys schema))))
           (if cached
               cached
-            (let* ((s      (clutch-jdbc--conn-schema conn))
-                   (result (clutch-jdbc--rpc
+            (let* ((result (clutch-jdbc--rpc
                             "search-tables"
                             `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                               (prefix  . ,prefix)
-                              ,@(when s `((schema . ,s)))))))
+                              ,@(clutch-jdbc--metadata-scope-params conn)))))
               (mapcar (lambda (tbl) (plist-get tbl :name))
                       (plist-get result :tables)))))
-      (let* ((s      (clutch-jdbc--conn-schema conn))
-             (result (clutch-jdbc--rpc
+      (let* ((result (clutch-jdbc--rpc
                       "search-tables"
                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                         (prefix  . ,prefix)
-                        ,@(when s `((schema . ,s)))))))
+                        ,@(clutch-jdbc--metadata-scope-params conn)))))
         (mapcar (lambda (tbl) (plist-get tbl :name))
                 (plist-get result :tables))))))
 
 (cl-defmethod clutch-db-search-table-entries ((conn clutch-jdbc-conn) prefix)
   "Return table entry plists matching PREFIX for JDBC CONN."
-  (let* ((schema (clutch-jdbc--conn-schema conn))
-         (result (clutch-jdbc--rpc
+  (let* ((result (clutch-jdbc--rpc
                   "search-tables"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                     (prefix  . ,prefix)
-                    ,@(when schema `((schema . ,schema)))))))
+                    ,@(clutch-jdbc--metadata-scope-params conn)))))
     (plist-get result :tables)))
 
 (cl-defmethod clutch-db-complete-columns ((conn clutch-jdbc-conn) table prefix)
@@ -1058,13 +1070,12 @@ For Oracle: uses the schema cache when available (no RPC); falls back to a
   (let* ((params (clutch-jdbc-conn-params conn))
          (driver (plist-get params :driver)))
     (when (eq driver 'oracle)
-      (let* ((schema (clutch-jdbc--conn-schema conn))
-             (result (clutch-jdbc--rpc
+      (let* ((result (clutch-jdbc--rpc
                       "search-columns"
                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                         (table   . ,table)
                         (prefix  . ,prefix)
-                        ,@(when schema `((schema . ,schema)))))))
+                        ,@(clutch-jdbc--metadata-scope-params conn)))))
         (mapcar (lambda (col) (plist-get col :name))
                 (plist-get result :columns))))))
 
@@ -1072,35 +1083,33 @@ For Oracle: uses the schema cache when available (no RPC); falls back to a
   "Return a best-effort DDL for TABLE on JDBC CONN.
 Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
   (let* ((params (clutch-jdbc-conn-params conn))
-         (driver (plist-get params :driver))
-         (schema (clutch-jdbc--conn-schema conn))
-         (result (clutch-jdbc--rpc
-                  "get-columns"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    (table   . ,table)
-                    ,@(when schema `((schema . ,schema))))))
-         (cols   (plist-get result :columns))
-         (display-ident
-          (if (eq driver 'oracle)
-              #'clutch-jdbc--oracle-display-identifier
-            (lambda (name) (clutch-db-escape-identifier conn name)))))
-    (format "-- DDL reconstructed from DatabaseMetaData\nCREATE TABLE %s (\n%s\n);"
-            (funcall display-ident table)
-            (mapconcat
-             (lambda (col)
-               (format "    %s %s%s"
-                       (funcall display-ident (plist-get col :name))
-                       (plist-get col :type)
-                       (if (clutch-jdbc--json-bool (plist-get col :nullable))
-                           ""
-                         " NOT NULL")))
-             cols
-             ",\n"))))
+         (driver (plist-get params :driver)))
+    (let* ((result (clutch-jdbc--rpc
+                    "get-columns"
+                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                      (table   . ,table)
+                      ,@(clutch-jdbc--metadata-scope-params conn))))
+           (cols   (plist-get result :columns))
+           (display-ident
+            (if (eq driver 'oracle)
+                #'clutch-jdbc--oracle-display-identifier
+              (lambda (name) (clutch-db-escape-identifier conn name)))))
+      (format "-- DDL reconstructed from DatabaseMetaData\nCREATE TABLE %s (\n%s\n);"
+              (funcall display-ident table)
+              (mapconcat
+               (lambda (col)
+                 (format "    %s %s%s"
+                         (funcall display-ident (plist-get col :name))
+                         (plist-get col :type)
+                         (if (clutch-jdbc--json-bool (plist-get col :nullable))
+                             ""
+                           " NOT NULL")))
+               cols
+               ",\n")))))
 
 (cl-defmethod clutch-db-list-objects ((conn clutch-jdbc-conn) category)
   "Return object entry plists for CATEGORY on JDBC CONN."
-  (let* ((schema (clutch-jdbc--conn-schema conn))
-         (op (pcase category
+  (let* ((op (pcase category
                ('indexes "get-indexes")
                ('sequences "get-sequences")
                ('procedures "get-procedures")
@@ -1111,7 +1120,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
       (let* ((result (clutch-jdbc--rpc
                       op
                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                        ,@(when schema `((schema . ,schema))))))
+                        ,@(clutch-jdbc--metadata-scope-params conn))))
              (key (pcase category
                     ('indexes :indexes)
                     ('sequences :sequences)
@@ -1124,8 +1133,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 (cl-defmethod clutch-db-list-objects-async ((conn clutch-jdbc-conn) category callback
                                             &optional errback)
   "Fetch object entry plists for CATEGORY on JDBC CONN asynchronously."
-  (let* ((schema (clutch-jdbc--conn-schema conn))
-         (op (pcase category
+  (let* ((op (pcase category
                ('indexes "get-indexes")
                ('sequences "get-sequences")
                ('procedures "get-procedures")
@@ -1143,7 +1151,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
       (clutch-jdbc--rpc-async
        op
        `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-         ,@(when schema `((schema . ,schema))))
+         ,@(clutch-jdbc--metadata-scope-params conn))
        (lambda (result)
          (when callback
            (funcall callback
@@ -1155,8 +1163,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 (cl-defmethod clutch-db-object-details ((conn clutch-jdbc-conn) entry)
   "Return detail plists for JDBC object ENTRY."
-  (let* ((schema (clutch-jdbc--conn-schema conn))
-         (type (upcase (or (plist-get entry :type) ""))))
+  (let* ((type (upcase (or (plist-get entry :type) ""))))
     (pcase type
       ("INDEX"
        (let ((result
@@ -1166,7 +1173,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
                  (index   . ,(plist-get entry :name))
                  ,@(when (plist-get entry :target-table)
                      `((table . ,(plist-get entry :target-table))))
-                 ,@(when schema `((schema . ,schema)))))))
+                 ,@(clutch-jdbc--metadata-scope-params conn)))))
          (plist-get result :columns)))
       ((or "PROCEDURE" "FUNCTION")
        (let ((result
@@ -1178,34 +1185,32 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
                  (name     . ,(plist-get entry :name))
                  ,@(when (plist-get entry :identity)
                      `((identity . ,(plist-get entry :identity))))
-                 ,@(when schema `((schema . ,schema)))))))
+                 ,@(clutch-jdbc--metadata-scope-params conn)))))
          (plist-get result :params)))
       (_ nil))))
 
 (cl-defmethod clutch-db-object-source ((conn clutch-jdbc-conn) entry)
   "Return source text for JDBC object ENTRY."
-  (let* ((schema (clutch-jdbc--conn-schema conn))
-         (result (clutch-jdbc--rpc
+  (let* ((result (clutch-jdbc--rpc
                   "get-object-source"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                     (name    . ,(plist-get entry :name))
                     (type    . ,(plist-get entry :type))
                     ,@(when (plist-get entry :identity)
                         `((identity . ,(plist-get entry :identity))))
-                    ,@(when schema `((schema . ,schema)))))))
+                    ,@(clutch-jdbc--metadata-scope-params conn)))))
     (plist-get result :source)))
 
 (cl-defmethod clutch-db-show-create-object ((conn clutch-jdbc-conn) entry)
   "Return DDL text for JDBC non-table ENTRY."
-  (let* ((schema (clutch-jdbc--conn-schema conn))
-         (result (clutch-jdbc--rpc
+  (let* ((result (clutch-jdbc--rpc
                   "get-object-ddl"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                     (name    . ,(plist-get entry :name))
                     (type    . ,(plist-get entry :type))
                     ,@(when (plist-get entry :identity)
                         `((identity . ,(plist-get entry :identity))))
-                    ,@(when schema `((schema . ,schema)))))))
+                    ,@(clutch-jdbc--metadata-scope-params conn)))))
     (plist-get result :ddl)))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-jdbc-conn) _table)
@@ -1214,22 +1219,20 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 (cl-defmethod clutch-db-primary-key-columns ((conn clutch-jdbc-conn) table)
   "Return primary key columns for TABLE on JDBC CONN."
-  (let* ((schema (clutch-jdbc--conn-schema conn))
-         (result (clutch-jdbc--rpc
+  (let* ((result (clutch-jdbc--rpc
                   "get-primary-keys"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                     (table   . ,table)
-                    ,@(when schema `((schema . ,schema)))))))
+                    ,@(clutch-jdbc--metadata-scope-params conn)))))
     (plist-get result :primary-keys)))
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-jdbc-conn) table)
   "Return foreign key info for TABLE on JDBC CONN."
-  (let* ((schema (clutch-jdbc--conn-schema conn))
-         (result (clutch-jdbc--rpc
+  (let* ((result (clutch-jdbc--rpc
                   "get-foreign-keys"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                     (table   . ,table)
-                    ,@(when schema `((schema . ,schema)))))))
+                    ,@(clutch-jdbc--metadata-scope-params conn)))))
     (mapcar (lambda (fk)
               (cons (plist-get fk :fk-column)
                     (list :ref-table  (plist-get fk :pk-table)
@@ -1238,12 +1241,11 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 (cl-defmethod clutch-db-referencing-objects ((conn clutch-jdbc-conn) table)
   "Return objects that reference TABLE on JDBC CONN."
-  (let* ((schema (clutch-jdbc--conn-schema conn))
-         (result (clutch-jdbc--rpc
+  (let* ((result (clutch-jdbc--rpc
                   "get-referencing-objects"
                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                     (table   . ,table)
-                    ,@(when schema `((schema . ,schema)))))))
+                    ,@(clutch-jdbc--metadata-scope-params conn)))))
     (mapcar (lambda (entry)
               (list :name (plist-get entry :name)
                     :type "TABLE"
@@ -1254,14 +1256,13 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 (cl-defmethod clutch-db-column-details ((conn clutch-jdbc-conn) table)
   "Return detailed column info for TABLE on JDBC CONN."
-  (let* ((schema  (clutch-jdbc--conn-schema conn))
-         (pk-cols (clutch-db-primary-key-columns conn table))
+  (let* ((pk-cols (clutch-db-primary-key-columns conn table))
          (fks     (clutch-db-foreign-keys conn table))
          (result  (clutch-jdbc--rpc
                    "get-columns"
                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                      (table   . ,table)
-                     ,@(when schema `((schema . ,schema))))))
+                     ,@(clutch-jdbc--metadata-scope-params conn))))
          (cols    (plist-get result :columns)))
     (mapcar (lambda (col)
               (let ((name (plist-get col :name)))

@@ -486,6 +486,81 @@
                 (:name "USER_SYM" :type "SYNONYM" :schema "SCOTT"
                         :target-schema "APP" :target-name "USERS")))))))
 
+(ert-deftest clutch-db-test-jdbc-conn-catalog-clickhouse-defaults-to-database ()
+  "ClickHouse JDBC metadata should use :database as the default catalog."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver clickhouse
+                                               :database "default"))))
+    (should (equal (clutch-jdbc--conn-catalog conn) "default"))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-list-table-entries-sends-catalog ()
+  "ClickHouse table discovery should pass catalog to JDBC metadata RPC."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver clickhouse
+                                               :database "default")))
+        captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (setq captured-op op
+                       captured-params params)
+                 '(:tables ((:name "events" :type "TABLE" :schema "")
+                            (:name "daily_mv" :type "VIEW" :schema ""))))))
+      (should
+       (equal (clutch-db-list-table-entries conn)
+              '((:name "events" :type "TABLE" :schema "")
+                (:name "daily_mv" :type "VIEW" :schema ""))))
+      (should (equal captured-op "get-tables"))
+      (should (equal (alist-get 'catalog captured-params) "default"))
+      (should-not (alist-get 'schema captured-params)))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-search-table-entries-sends-catalog ()
+  "ClickHouse table search should pass catalog to JDBC metadata RPC."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver clickhouse
+                                               :database "default")))
+        captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (setq captured-op op
+                       captured-params params)
+                 '(:tables ((:name "clutch_live_smoke" :type "TABLE"
+                              :schema "" :source-schema ""))))))
+      (should
+       (equal (clutch-db-search-table-entries conn "clutch")
+              '((:name "clutch_live_smoke" :type "TABLE"
+                 :schema "" :source-schema ""))))
+      (should (equal captured-op "search-tables"))
+      (should (equal (alist-get 'catalog captured-params) "default"))
+      (should (equal (alist-get 'prefix captured-params) "clutch"))
+      (should-not (alist-get 'schema captured-params)))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-column-details-send-catalog ()
+  "ClickHouse column metadata RPCs should carry catalog through all metadata calls."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver clickhouse
+                                               :database "default")))
+        calls)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (push (cons op params) calls)
+                 (pcase op
+                   ("get-primary-keys" '(:primary-keys ("id")))
+                   ("get-foreign-keys" '(:foreign-keys nil))
+                   ("get-columns" `(:columns ((:name "id" :type "UInt64"
+                                               :nullable ,clutch-jdbc--json-false)
+                                              (:name "name" :type "String"
+                                               :nullable t))))
+                   (_ (ert-fail (format "unexpected op: %s" op)))))))
+      (should
+       (equal (clutch-db-column-details conn "events")
+              '((:name "id" :type "UInt64" :nullable nil
+                 :primary-key t :foreign-key nil :comment nil)
+                (:name "name" :type "String" :nullable t
+                 :primary-key nil :foreign-key nil :comment nil))))
+      (dolist (call calls)
+        (should (equal (alist-get 'catalog (cdr call)) "default"))
+        (should-not (alist-get 'schema (cdr call)))))))
+
 ;;;; Unit tests — clutch-db-complete-tables (Oracle, cache-first)
 
 (ert-deftest clutch-db-test-jdbc-complete-tables-uses-cache ()

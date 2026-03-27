@@ -5749,6 +5749,67 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (should (equal clutch--connection-params '(:backend mysql :database "cjh_test")))
         (should (equal cleared-keys '("current" "user@host:3306/zj_test")))))))
 
+(ert-deftest clutch-test-switch-schema-clickhouse-reconnects-to-selected-database ()
+  "ClickHouse switching should reconnect with the selected database."
+  (let ((old-conn 'old-conn)
+        (new-conn 'new-conn)
+        built-params disconnected primed tx-cleared cleared-keys message-text)
+    (with-temp-buffer
+      (setq-local clutch-connection old-conn
+                  clutch--connection-params '(:backend clickhouse
+                                              :host "127.0.0.1"
+                                              :port 8123
+                                              :database "default"
+                                              :user "default"))
+      (cl-letf (((symbol-function 'clutch--list-clickhouse-databases)
+                 (lambda (_conn) '("default" "demo")))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--confirm-disconnect-transaction-loss)
+                 (lambda (&rest _) t))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _args) "demo"))
+                ((symbol-function 'clutch--build-conn)
+                 (lambda (params)
+                   (setq built-params params)
+                   new-conn))
+                ((symbol-function 'clutch-db-disconnect)
+                 (lambda (conn) (setq disconnected conn)))
+                ((symbol-function 'clutch--prime-schema-cache)
+                 (lambda (conn) (setq primed conn)))
+                ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
+                ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
+                ((symbol-function 'clutch--clear-tx-dirty)
+                 (lambda (conn) (setq tx-cleared conn)))
+                ((symbol-function 'clutch--clear-connection-metadata-caches)
+                 (lambda (_conn &optional key)
+                   (push (or key "current") cleared-keys)))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (conn)
+                   (if (eq conn old-conn)
+                       "default-key"
+                     "demo-key")))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq message-text (apply #'format fmt args)))))
+        (clutch-switch-schema)
+        (should (eq clutch-connection new-conn))
+        (should (equal built-params '(:backend clickhouse
+                                      :host "127.0.0.1"
+                                      :port 8123
+                                      :database "demo"
+                                      :user "default")))
+        (should (equal clutch--connection-params '(:backend clickhouse
+                                                   :host "127.0.0.1"
+                                                   :port 8123
+                                                   :database "demo"
+                                                   :user "default")))
+        (should (eq disconnected old-conn))
+        (should (eq primed new-conn))
+        (should (eq tx-cleared old-conn))
+        (should (equal cleared-keys '("current" "default-key")))
+        (should (equal message-text "Current database: demo"))))))
+
 (ert-deftest clutch-test-clear-connection-metadata-caches-cancels-explicit-key-timers ()
   "Clearing metadata for an explicit key should cancel timers for that key."
   (let ((clutch--schema-cache (make-hash-table :test 'equal))
@@ -5819,6 +5880,25 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (should (string-match-p "user@host" line))
         (should (string-match-p "\\[schema\\] zj_test" line))
         (should-not (string-match-p "Schema:" line))))))
+
+(ert-deftest clutch-test-header-line-shows-clickhouse-database ()
+  "Connection header line should show the current ClickHouse database."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--connection-clickhouse-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--icon) (lambda (&rest _) "[schema]"))
+              ((symbol-function 'clutch--db-backend-icon-for-key) (lambda (_key) nil))
+              ((symbol-function 'clutch-db-display-name) (lambda (_conn) "ClickHouse"))
+              ((symbol-function 'clutch--connection-display-key) (lambda (_conn) "default@127.0.0.1"))
+              ((symbol-function 'clutch-db-database) (lambda (_conn) "demo"))
+              ((symbol-function 'clutch-db-current-schema) (lambda (_conn) nil))
+              ((symbol-function 'clutch--schema-status-header-line-segment) (lambda (_conn) nil))
+              ((symbol-function 'clutch--tx-header-line-segment) (lambda (_conn) nil))
+              ((symbol-function 'clutch--header-line-indent) (lambda () "")))
+      (let ((line (clutch--build-connection-header-line)))
+        (should (string-match-p "default@127.0.0.1" line))
+        (should (string-match-p "\\[schema\\] demo" line))))))
 
 (ert-deftest clutch-test-disconnected-header-line-shows-backend-and-warning-state ()
   "Disconnected header line should keep backend context and warn loudly."

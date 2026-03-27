@@ -65,7 +65,7 @@ For backend-specific implementation notes, see
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
 - Schema refresh state is explicit: eager backends refresh on connect, lazy backends start stale, query console buffer names surface =schema...= / =schema~= / =schema!= / =schema 42t= style state markers; here =Nt= means "the current schema-cache snapshot contains N browseable table/object names". =schema 0t= is therefore a successful empty snapshot, not an error. Schema errors also appear in the console header-line (see below)
-- Console header-line shows live connection context: database-type icon + backend name, a dedicated connection-state icon before the compact connection key (=user@host=, with =:port= only when non-default), a separate schema segment with =nf-md-sitemap_outline= + schema name whenever the effective schema is known, and =Tx: Auto= / =Tx: Manual= / =Tx: Manual*= for the current commit mode; disconnected state keeps the backend context visible and warns explicitly instead of dimming it away
+- Console header-line shows live connection context: database-type icon + backend name, a dedicated connection-state icon before the compact connection key (=user@host=, with =:port= only when non-default), a separate namespace segment with =nf-md-sitemap_outline= + the current schema/database whenever the effective namespace is known, and =Tx: Auto= / =Tx: Manual= / =Tx: Manual*= for the current commit mode; disconnected state keeps the backend context visible and warns explicitly instead of dimming it away
 - Cache-backed schema actions also warn when the schema cache is stale, failed, or still refreshing, so completion / table prompts do not silently pretend cached metadata is current
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
 - Value viewer (=v=): auto-detects JSON (pretty-printed with =json-ts-mode=), XML (formatted via =xmllint= if available, rendered with =nxml-mode=), or BLOB (concise text/hex preview); XML/BLOB size is shown in viewer header-line (without polluting content highlighting)
@@ -535,10 +535,12 @@ intentionally small and shared across Embark and Transient:
 - =f=: copy fully-qualified object name
 
 =C-c C-l= switches the current schema/database on the active connection and
-refreshes metadata for the new context.  The first implementation targets
-Oracle/JDBC connections that can switch business schemas such as =zj_test= and
-=cjh_test= within one connection, and MySQL connections where switching schema
-maps to =USE database=.
+refreshes metadata for the new context.  Oracle/JDBC connections can switch
+business schemas such as =zj_test= and =cjh_test= within one connection, and
+MySQL connections map schema switching to =USE database=.  ClickHouse is
+handled separately: it has databases rather than runtime schemas, so =C-c C-l=
+prompts with =SHOW DATABASES= and reconnects to the selected =:database=
+instead of attempting session-level schema switching.
 
 For JDBC backends, clutch-jdbc-agent now isolates foreground SQL from metadata
 traffic by keeping separate primary and metadata JDBC sessions under one
