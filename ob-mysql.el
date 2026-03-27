@@ -1,6 +1,6 @@
 ;;; ob-mysql.el --- Org-Babel mysql entry via ob-clutch -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Free Software Foundation, Inc.
+;; Copyright (C) 2025-2026 Lucius Chen
 
 ;;; Commentary:
 

@@ -1,6 +1,6 @@
 ;;; ob-clutch.el --- Org-Babel support via clutch-db -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Free Software Foundation, Inc.
+;; Copyright (C) 2025-2026 Lucius Chen
 
 ;; This file is part of clutch.
 

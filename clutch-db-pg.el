@@ -1,6 +1,6 @@
 ;;; clutch-db-pg.el --- PostgreSQL backend for clutch-db -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Free Software Foundation, Inc.
+;; Copyright (C) 2025-2026 Lucius Chen
 
 ;; This file is part of clutch.
 

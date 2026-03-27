@@ -1,6 +1,13 @@
-;;; clutch.el --- Interactive database lens -*- lexical-binding: t; -*-
+;;; clutch.el --- Interactive database client for Emacs -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Free Software Foundation, Inc.
+;; Copyright (C) 2025-2026 Lucius Chen
+
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1"))
+;; Keywords: comm, data, tools
+;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -19,7 +26,7 @@
 
 ;;; Commentary:
 
-;; Interactive SQL client built on mysql.el.
+;; Interactive database client with native and JDBC backends.
 ;;
 ;; Provides:
 ;; - `clutch-mode': SQL editing major mode (derived from `sql-mode')

@@ -1,11 +1,12 @@
 ;;; mysql.el --- Pure Elisp MySQL client -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Free Software Foundation, Inc.
+;; Copyright (C) 2025-2026 Lucius Chen
 
-;; Author: Lucius Chen
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1"))
-;; Keywords: databases, mysql, comm
+;; Keywords: comm, data
 ;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of mysql.el.
