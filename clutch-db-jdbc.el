@@ -134,8 +134,8 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 ;;;; Drivers that default to JDBC backend
 
 (defconst clutch-jdbc--jdbc-drivers
-  '(oracle sqlserver db2 snowflake redshift)
-  "Driver symbols that are automatically routed to the JDBC backend.")
+  '(jdbc oracle sqlserver db2 snowflake redshift)
+  "Backend/driver symbols that are routed to the JDBC backend.")
 
 (defconst clutch-jdbc--driver-companions
   '((oracle oracle-i18n)
@@ -1289,13 +1289,14 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 (cl-defmethod clutch-db-display-name ((conn clutch-jdbc-conn))
   "Return a display name based on the JDBC driver type."
-  (pcase (plist-get (clutch-jdbc-conn-params conn) :driver)
-    ('oracle    "Oracle")
-    ('sqlserver "SQL Server")
-    ('db2       "DB2")
-    ('snowflake "Snowflake")
-    ('redshift  "Redshift")
-    (_          "JDBC")))
+  (or (plist-get (clutch-jdbc-conn-params conn) :display-name)
+      (pcase (plist-get (clutch-jdbc-conn-params conn) :driver)
+        ('oracle    "Oracle")
+        ('sqlserver "SQL Server")
+        ('db2       "DB2")
+        ('snowflake "Snowflake")
+        ('redshift  "Redshift")
+        (_          "JDBC"))))
 
 ;;;; Agent installation helpers
 

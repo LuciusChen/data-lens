@@ -222,11 +222,12 @@ Underlined to indicate clickable (RET to follow)."
 Each entry has the form:
   (NAME . (:host H :port P :user U [:password P] :database D
            [:backend SYM] [:sql-product SYM] [:pass-entry STR]
-           [:url STR] [:props ALIST]
+           [:url STR] [:display-name STR] [:props ALIST]
            [:connect-timeout N] [:read-idle-timeout N]
            [:query-timeout N] [:rpc-timeout N]))
 NAME is a string used for `completing-read'.
-:backend is a symbol (\\='mysql, \\='pg, or \\='sqlite, default \\='mysql).
+:backend is a symbol (\\='mysql, \\='pg, \\='sqlite, or \\='jdbc;
+default \\='mysql).
 :sql-product overrides `clutch-sql-product' for this connection.
 
 Password resolution order:
@@ -248,6 +249,7 @@ Password resolution order:
                                     (:sql-product symbol)
                                     (:pass-entry string)
                                     (:url string)
+                                    (:display-name string)
                                     (:props (alist :key-type string :value-type string))
                                     (:connect-timeout natnum)
                                     (:read-idle-timeout natnum)
@@ -903,6 +905,7 @@ Returns nil when the schema is ready (no noise for the happy path)."
   '((mysql      . ((devicon . "nf-dev-mysql")              ""  :color "#469AD7"))
     (pg         . ((devicon . "nf-dev-postgresql")         ""  :color "#336791"))
     (sqlite     . ((devicon . "nf-dev-sqlite")             ""  :color "#3A7EC6"))
+    (jdbc       . ((mdicon  . "nf-md-database")            ""  :color "#59636e"))
     (oracle     . ((mdicon  . "nf-md-alpha_o_circle")      "O" :color "#C74634"))
     (sqlserver  . ((devicon . "nf-dev-microsoftsqlserver") ""  :color "#CC2927"))
     (snowflake  . ((mdicon  . "nf-md-snowflake")           "❄" :color "#29B5E8"))
@@ -941,6 +944,7 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
         (driver  (plist-get params :driver)))
     (or driver
         (pcase backend
+          ('jdbc 'jdbc)
           ((or 'pg 'postgresql) 'pg)
           ((or 'mysql 'mariadb) 'mysql)
           ('sqlite 'sqlite)
@@ -953,16 +957,18 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
 
 (defun clutch--backend-display-name-from-params (params)
   "Return UI backend name for connection PARAMS, or nil."
-  (pcase (clutch--backend-key-from-params params)
-    ('mysql "MySQL")
-    ('pg "PostgreSQL")
-    ('sqlite "SQLite")
-    ('oracle "Oracle")
-    ('sqlserver "SQL Server")
-    ('snowflake "Snowflake")
-    ('db2 "DB2")
-    ('redshift "Redshift")
-    (_ nil)))
+  (or (plist-get params :display-name)
+      (pcase (clutch--backend-key-from-params params)
+        ('mysql "MySQL")
+        ('pg "PostgreSQL")
+        ('sqlite "SQLite")
+        ('jdbc "JDBC")
+        ('oracle "Oracle")
+        ('sqlserver "SQL Server")
+        ('snowflake "Snowflake")
+        ('db2 "DB2")
+        ('redshift "Redshift")
+        (_ nil))))
 
 (defun clutch--connection-backend-segment (&optional conn params)
   "Return the shared backend segment for CONN or PARAMS, or nil.
@@ -1035,7 +1041,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   (force-mode-line-update))
 
 (defconst clutch--jdbc-backends
-  '(oracle sqlserver db2 snowflake redshift)
+  '(jdbc oracle sqlserver db2 snowflake redshift)
   "Backends routed through the JDBC agent.")
 
 (defun clutch--jdbc-backend-p (backend)

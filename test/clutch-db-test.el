@@ -884,7 +884,8 @@
 (ert-deftest clutch-db-test-backend-features ()
   "Test that backend features are correctly registered."
   (let ((mysql-features (alist-get 'mysql clutch-db--backend-features))
-        (pg-features (alist-get 'pg clutch-db--backend-features)))
+        (pg-features (alist-get 'pg clutch-db--backend-features))
+        (jdbc-features (alist-get 'jdbc clutch-db--backend-features)))
     ;; MySQL backend
     (should mysql-features)
     (should (eq (plist-get mysql-features :require) 'clutch-db-mysql))
@@ -892,7 +893,48 @@
     ;; PostgreSQL backend
     (should pg-features)
     (should (eq (plist-get pg-features :require) 'clutch-db-pg))
-    (should (eq (plist-get pg-features :connect-fn) 'clutch-db-pg-connect))))
+    (should (eq (plist-get pg-features :connect-fn) 'clutch-db-pg-connect))
+    ;; Generic JDBC backend
+    (should jdbc-features)
+    (should (eq (plist-get jdbc-features :require) 'clutch-db-jdbc))
+    (should (functionp (plist-get jdbc-features :connect-fn)))))
+
+(ert-deftest clutch-db-test-generic-jdbc-display-name-prefers-custom-label ()
+  "Generic JDBC connections should honor a user-facing display label."
+  (require 'clutch)
+  (let ((conn (make-clutch-jdbc-conn
+               :params '(:driver jdbc :display-name "KingbaseES"))))
+    (should (clutch--jdbc-backend-p 'jdbc))
+    (should (equal (clutch--backend-display-name-from-params
+                    '(:backend jdbc :display-name "KingbaseES"))
+                   "KingbaseES"))
+    (should (equal (clutch-db-display-name conn) "KingbaseES"))))
+
+(ert-deftest clutch-db-test-build-conn-routes-generic-jdbc-through-jdbc-backend ()
+  "The generic JDBC backend should pass :url through to `clutch-db-connect'."
+  (require 'clutch)
+  (let (captured-backend captured-params)
+    (cl-letf (((symbol-function 'clutch--normalize-timeout-params)
+               (lambda (_backend params) params))
+              ((symbol-function 'clutch--resolve-password)
+               (lambda (_params) "secret"))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (backend params)
+                 (setq captured-backend backend
+                       captured-params params)
+                 'fake-conn)))
+      (should (eq (clutch--build-conn
+                   '(:backend jdbc
+                     :url "jdbc:kingbase8://127.0.0.1:54321/test"
+                     :display-name "KingbaseES"
+                     :user "system"))
+                  'fake-conn))
+      (should (eq captured-backend 'jdbc))
+      (should (equal (plist-get captured-params :url)
+                     "jdbc:kingbase8://127.0.0.1:54321/test"))
+      (should (equal (plist-get captured-params :display-name) "KingbaseES"))
+      (should (equal (plist-get captured-params :password) "secret"))
+      (should-not (plist-member captured-params :backend)))))
 
 (ert-deftest clutch-db-test-unknown-backend ()
   "Test that connecting with unknown backend signals error."

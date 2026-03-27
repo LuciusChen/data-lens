@@ -610,9 +610,11 @@ semantics, see [[file:docs/jdbc-agent-protocol.md][docs/jdbc-agent-protocol.md]]
 | =snowflake=    | Snowflake           | Maven Central       | —            |
 | =db2=          | IBM DB2             | Manual download     | 50000        |
 
-Any other JDBC-compatible database (ClickHouse, TiDB, Hive, etc.) can be used
-by passing =:url "jdbc:xxx://..."= directly and placing the driver jar in the
-drivers directory.
+Any other JDBC-compatible database (ClickHouse, TiDB, Hive, KingbaseES, etc.)
+can be used through the generic =jdbc= backend by passing
+=:url "jdbc:xxx://..."= directly and placing the driver jar in the drivers
+directory.  Use =:display-name= if you want the UI to show a friendly backend
+label instead of plain =JDBC=.
 
 *** Setup
 
@@ -707,11 +709,21 @@ artifact from Maven Central rather than a nonexistent plain
                               :user "myuser" :pass-entry "prod-snowflake"))
 
         ;; Generic JDBC (any database with a JDBC driver jar in drivers/)
-        ;; Use :url to bypass URL construction; pick any registered JDBC symbol as :backend.
-        ("clickhouse" . (:backend sqlserver
+        ;; Use :backend jdbc with a full JDBC URL.
+        ("clickhouse" . (:backend jdbc
                           :url "jdbc:clickhouse://ch.corp.com:8123/default"
+                          :display-name "ClickHouse"
                           :user "default" :password ""
-                          :rpc-timeout 10))))
+                          :rpc-timeout 10))
+
+        ;; KingbaseES via JDBC
+        ;; The PostgreSQL-form URL also works in many setups; use whichever
+        ;; driver line your environment standardizes on.
+        ("kingbase" . (:backend jdbc
+                        :url "jdbc:kingbase8://db.corp.com:54321/test"
+                        :display-name "KingbaseES"
+                        :user "system" :pass-entry "kingbase"
+                        :rpc-timeout 15))))
 #+end_src
 
 JDBC connections use the same =:pass-entry= auth-source integration as other
