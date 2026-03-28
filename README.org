@@ -247,7 +247,9 @@ global connection picker.  To switch to another saved connection, use
 For JDBC failures, use =M-x clutch-show-error-details=.  The detailed
 troubleshooting workflow is documented below in the interrupt/error handling
 section.  Inside the details buffer, use =w= to copy the raw backend error and
-=W= to copy the full rendered report.
+=W= to copy the full rendered report.  When you need a deeper trace, enable
+=M-x clutch-debug-mode=, reproduce the failure, then reopen the same details
+buffer.
 
 To activate =clutch-mode= automatically for =.sql= files, add to your config:
 
@@ -488,6 +490,9 @@ db> SELECT * FROM users;     ;; Type SQL, auto-executes on ;
 =clutch-query-console= opens a dedicated buffer =*clutch: NAME*= for a saved
 connection, enables =clutch-mode=, and connects automatically.  Repeated calls
 with the same name switch to the existing buffer rather than creating a new one.
+Connection happens before the buffer is shown: if the initial connect or a
+reconnect of an existing disconnected console fails, clutch raises the error
+without leaving a visible disconnected console buffer behind.
 
 Inside a query console, =C-c C-e= reconnects only that console's saved
 connection.  It does not reopen the full connection list.  If that saved
@@ -956,6 +961,12 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
   that triggered the failure together with the related JDBC agent stderr tail.
   Use =w= inside that buffer to copy the raw backend message, or =W= to copy
   the full rendered diagnostics report for issue filing.
+- =M-x clutch-debug-mode= is the opt-in deep-debug workflow and is off by
+  default.  When enabled, clutch records a bounded redacted trace of recent
+  connect/query/interrupt events for the current buffer context, and JDBC also
+  requests an additional redacted backend debug payload (currently stack trace +
+  request context).  The same =clutch-show-error-details= buffer shows that
+  extra capture; no separate debug UI is required.
 - High-risk DML (=UPDATE/DELETE= without top-level =WHERE=) requires typed
   confirmation (=YES=) before execution.
 

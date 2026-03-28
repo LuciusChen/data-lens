@@ -38,11 +38,12 @@
 (require 'json)
 (require 'sql)
 
-;; `clutch--connection-key' and `clutch--schema-cache' live in clutch.el (the UI
-;; layer).  They are always loaded before any JDBC method is dispatched, so we
-;; declare them here to silence the byte-compiler without creating a hard
-;; `require' dependency that would invert the dependency graph.
-(declare-function clutch--connection-key "clutch" (conn))
+;; `clutch--schema-cache' lives in clutch.el, and `clutch--connection-key' now
+;; lives in clutch-connection.el.  They are always loaded before any JDBC
+;; method is dispatched, so we declare them here to silence the byte-compiler
+;; without creating a hard `require' dependency that would invert the
+;; dependency graph.
+(declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch--schema-status-entry "clutch-schema" (conn))
 (defvar clutch--schema-cache)
 
@@ -106,6 +107,9 @@ Set this to nil to keep Oracle in auto-commit by default.  Per-connection
 
 (defvar clutch-jdbc-rpc-timeout-seconds 30
   "Forward declaration; defined as `defcustom' in clutch.el.")
+
+(defvar clutch-debug-mode nil
+  "Forward declaration; defined as a global minor mode in clutch.el.")
 
 ;;;; Driver sources (for automatic installation from Maven Central)
 
@@ -404,10 +408,19 @@ Defaults to 8 lines.  Return nil when stderr is empty."
 (defvar clutch-jdbc--next-request-id 1
   "Auto-incrementing request id counter.")
 
+(defun clutch-jdbc--request-params (params)
+  "Return PARAMS with opt-in debug capture flags when enabled."
+  (if (or (not clutch-debug-mode)
+          (assq 'debug params))
+      params
+    (append params '((debug . t)))))
+
 (defun clutch-jdbc--send (op params)
   "Send OP with PARAMS to the agent and return the request id."
   (let* ((id (cl-incf clutch-jdbc--next-request-id))
-         (msg (json-encode `((id . ,id) (op . ,op) (params . ,params)))))
+         (msg (json-encode `((id . ,id)
+                             (op . ,op)
+                             (params . ,(clutch-jdbc--request-params params))))))
     (process-send-string clutch-jdbc--agent-process (concat msg "\n"))
     id))
 
@@ -440,7 +453,8 @@ OP, when non-nil, names the RPC for context-sensitive timeout errors."
                  (not (process-live-p clutch-jdbc--agent-process)))
             (setq failure-message (clutch-jdbc--agent-exit-error-message)
                   response :agent-exited)
-          (accept-process-output clutch-jdbc--agent-process 0.05))))
+          (accept-process-output clutch-jdbc--agent-process 0.05)
+          (sit-for 0 t))))
     (when (eq response :agent-exited)
       (setq response nil))
     (when (and (not response)
@@ -465,6 +479,50 @@ OP, when non-nil, names the RPC for context-sensitive timeout errors."
                           "Connection lost — reconnect with C-c C-e")))))
     response))
 
+(defun clutch-jdbc--recv-response-nonfatal (id timeout-seconds)
+  "Wait for response ID up to TIMEOUT-SECONDS.
+Return the response plist, or nil on timeout/quit.
+Unlike `clutch-jdbc--recv-response', this never kills the agent process."
+  (let ((inhibit-quit t))
+    (let ((deadline (+ (float-time) timeout-seconds))
+          response
+          agent-exited
+          gave-up)
+      (while (and (not response) (not agent-exited) (not gave-up)
+                  (< (float-time) deadline))
+        ;; Drain any queued responses while preserving unmatched entries.
+        (when clutch-jdbc--response-queue
+          (let (remaining)
+            (while (and (not response) clutch-jdbc--response-queue)
+              (let ((parsed (pop clutch-jdbc--response-queue)))
+                (cond
+                 ((and parsed
+                       (gethash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
+                  (remhash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
+                 ((and parsed (eql (plist-get parsed :id) id))
+                  (setq response parsed))
+                 (t
+                  (push parsed remaining)))))
+            (setq clutch-jdbc--response-queue
+                  (nconc (nreverse remaining) clutch-jdbc--response-queue))))
+        (unless response
+          (if (or (null clutch-jdbc--agent-process)
+                  (not (process-live-p clutch-jdbc--agent-process)))
+              (setq agent-exited t)
+            (let ((output
+                   (with-local-quit
+                     (accept-process-output clutch-jdbc--agent-process 0.05))))
+              (sit-for 0 t)
+              (when (and (not output) quit-flag)
+                (setq gave-up t
+                      quit-flag nil))))))
+      (when (and (not response)
+                 (not agent-exited)
+                 clutch-jdbc--agent-process
+                 (not (process-live-p clutch-jdbc--agent-process)))
+        (setq agent-exited t))
+      (unless agent-exited
+        response))))
 (defun clutch-jdbc--rpc (op params &optional timeout-seconds)
   "Send OP with PARAMS to the agent and return the result plist.
 TIMEOUT-SECONDS overrides the default wait time.  Signals
@@ -497,6 +555,7 @@ TIMEOUT-SECONDS overrides the default wait time.  Signals
           :summary (or (plist-get response :error)
                        (and op (format "agent error on op %s" op)))
           :diag (copy-tree diag)
+          :debug (copy-tree (plist-get response :debug))
           :stderr-tail (clutch-jdbc--agent-stderr-tail))))
 
 (defun clutch-jdbc--remember-error-response (conn op response)

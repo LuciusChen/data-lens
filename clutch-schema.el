@@ -53,12 +53,12 @@
 (defvar clutch-connection)
 (defvar clutch-schema-cache-install-batch-size)
 
-(declare-function clutch--connection-alive-p "clutch" (conn))
-(declare-function clutch--connection-key "clutch" (conn))
+(declare-function clutch--connection-alive-p "clutch-connection" (conn))
+(declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch--cancel-object-warmup "clutch-object" (conn &optional key))
 (declare-function clutch--schedule-object-warmup "clutch-object" (conn))
 (declare-function clutch--refresh-schema-status-ui "clutch" (conn))
-(declare-function clutch--run-db-query "clutch" (conn sql))
+(declare-function clutch--run-db-query "clutch-connection" (conn sql))
 (declare-function clutch--set-schema-status "clutch" (conn state &optional table-count error-message))
 
 (defun clutch--schema-status-entry (conn)

@@ -902,6 +902,10 @@ C-c C-e  (or  M-x clutch-connect)
 ;; In the details buffer: w copies the raw backend message, W copies the full report.
 M-x clutch-show-error-details
 
+;; Opt-in deeper troubleshooting capture; reproduce the failure, then reopen
+;; `clutch-show-error-details` for recent event trace and backend debug payload.
+M-x clutch-debug-mode
+
 ;; Object jump / describe / actions / schema switch
 C-c C-j
 C-c C-d

@@ -235,6 +235,17 @@ stderr tail, and generated/internal SQL when the failing path used hidden SQL.
 The details buffer is also the copy surface: `w` copies the raw backend
 message, and `W` copies the full rendered report.
 
+The next step is also now implemented: `clutch-debug-mode` is the single opt-in
+deep-debug switch.  It does not add a second troubleshooting UI.  Instead, it
+extends the same `clutch-show-error-details` workflow with two extra layers:
+
+- a bounded redacted recent-event trace for the current buffer / connection
+  context
+- an opt-in JDBC backend `debug` payload for failures
+
+This keeps the default UX short while giving maintainers and users a reproducible
+"turn it on, reproduce, inspect the same buffer" workflow.
+
 ### Phase 4 — Documentation
 
 - add a Troubleshooting section to `README.org`

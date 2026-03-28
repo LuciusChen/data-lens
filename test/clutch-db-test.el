@@ -1836,6 +1836,32 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
       (let ((result (clutch-db-query conn "SELECT 42 AS answer FROM DUAL")))
         (should (equal (caar (clutch-db-result-rows result)) "42"))))))
 
+(ert-deftest clutch-db-test-jdbc-oracle-live-wire-query-error-carries-debug-payload ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Wire-level Oracle JDBC errors should carry opt-in backend debug payloads."
+  (let ((clutch-debug-mode t))
+    (clutch-db-test--with-oracle conn
+      (let* ((token (format "definitely_missing_%d" (abs (random 999999))))
+             (request-id
+              (clutch-jdbc--send
+               "execute"
+               `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                 (sql . ,(format "SELECT %s FROM DUAL" token))
+                 (fetch-size . ,clutch-jdbc-fetch-size))))
+             (response (clutch-jdbc--recv-response
+                        request-id
+                        (clutch-jdbc--conn-rpc-timeout conn)
+                        "execute")))
+        (should-not (eq t (plist-get response :ok)))
+        (let ((debug (plist-get response :debug)))
+          (should (stringp (plist-get debug :stack-trace)))
+          (should (string-match-p "java\\.sql\\."
+                                  (plist-get debug :stack-trace)))
+          (should (= (plist-get (plist-get debug :request-context) :fetch-size)
+                     clutch-jdbc-fetch-size)))
+        (let ((result (clutch-db-query conn "SELECT 44 AS answer FROM DUAL")))
+          (should (equal (caar (clutch-db-result-rows result)) "44")))))))
+
 (ert-deftest clutch-db-test-jdbc-oracle-live-query-error-caches-diagnostics ()
   :tags '(:db-live :jdbc-live :oracle-live)
   "High-level Oracle JDBC query errors should stay on the current connection."
@@ -1858,6 +1884,26 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
                       (upcase (plist-get (plist-get details :diag) :raw-message))))))))
       (let ((result (clutch-db-query conn "SELECT 43 AS answer FROM DUAL")))
         (should (equal (caar (clutch-db-result-rows result)) "43"))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-query-error-caches-debug-payload ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "High-level Oracle JDBC query errors should cache opt-in debug payloads."
+  (let ((clutch-debug-mode t)
+        (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
+    (clutch-db-test--with-oracle conn
+      (let ((token (format "definitely_missing_%d" (abs (random 999999)))))
+        (condition-case err
+            (progn
+              (clutch-db-query conn (format "SELECT %s FROM DUAL" token))
+              (should nil))
+          (clutch-db-error
+           (should (stringp (cadr err)))
+           (let ((debug (plist-get (clutch-db-error-details conn) :debug)))
+             (should (stringp (plist-get debug :stack-trace)))
+             (should (string-match-p "java\\.sql\\."
+                                     (plist-get debug :stack-trace)))))))
+      (let ((result (clutch-db-query conn "SELECT 45 AS answer FROM DUAL")))
+        (should (equal (caar (clutch-db-result-rows result)) "45"))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-wire-schema-switch-error-carries-generated-sql ()
   :tags '(:db-live :jdbc-live :oracle-live)
@@ -2304,6 +2350,18 @@ immediately without touching the agent process."
        (should (string-match-p "diag-token-2038" (cadr err)))
        (should (string-match-p "clutch-show-error-details" (cadr err)))))))
 
+(ert-deftest clutch-db-test-jdbc-send-adds-debug-flag-when-debug-mode-enabled ()
+  "JDBC requests should opt into backend debug payloads only in debug mode."
+  (let ((clutch-jdbc--next-request-id 0)
+        (clutch-debug-mode t)
+        sent)
+    (cl-letf (((symbol-function 'process-send-string)
+               (lambda (_proc msg)
+                 (setq sent msg))))
+      (let ((clutch-jdbc--agent-process 'fake-proc))
+        (clutch-jdbc--send "connect" '((url . "jdbc:clickhouse://127.0.0.1:8123/testdb"))))
+      (should (string-match-p "\"debug\":true" sent)))))
+
 (ert-deftest clutch-db-test-jdbc-rpc-connect-error-carries-structured-details ()
   "Connect errors should carry structured details in the condition data."
   (let ((diag '(:category "connect"
@@ -2346,6 +2404,34 @@ immediately without touching the agent process."
                                    (plist-get context :redacted-url))))
          (should-not (string-match-p "cookie-secret-71"
                                      (prin1-to-string (nth 2 err)))))))))
+
+(ert-deftest clutch-db-test-jdbc-rpc-connect-error-carries-debug-payload ()
+  "Structured JDBC details should preserve opt-in backend debug payloads."
+  (let ((diag '(:category "connect"
+                :op "connect"
+                :request-id 72))
+        (debug '(:thread "clutch-jdbc-request"
+                 :request-context (:redacted-url "jdbc:clickhouse://127.0.0.1:8123/testdb?password=<redacted>")
+                 :stack-trace "java.sql.SQLNonTransientConnectionException: boom")))
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 72))
+              ((symbol-function 'clutch-jdbc--recv-response)
+               (lambda (&rest _args)
+                 `(:ok nil
+                   :error "summary-72"
+                   :diag ,diag
+                   :debug ,debug))))
+      (condition-case err
+          (progn
+            (clutch-jdbc--rpc "connect" '((url . "jdbc:clickhouse://127.0.0.1:8123/testdb")))
+            (should nil))
+        (clutch-db-error
+         (let ((details (nth 2 err)))
+           (should (equal (plist-get details :summary) "summary-72"))
+           (should (equal (plist-get (plist-get details :debug) :thread)
+                          "clutch-jdbc-request"))
+           (should (string-match-p "SQLNonTransientConnectionException"
+                                   (plist-get (plist-get details :debug) :stack-trace)))))))))
 
 (ert-deftest clutch-db-test-jdbc-rpc-on-conn-stores-structured-diagnostics-on-connection ()
   "Connection-scoped JDBC errors should stay on that connection."

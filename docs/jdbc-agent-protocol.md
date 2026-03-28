@@ -64,14 +64,24 @@ Error responses:
 {"id":1,"ok":false,"error":"connect failed","diag":{"category":"connect","op":"connect","request-id":1,"context":{"redacted-url":"jdbc:oracle:thin:@//db:1521/FREEPDB1"}}}
 ```
 
+Error responses with opt-in debug payload:
+
+```json
+{"id":1,"ok":false,"error":"connect failed","diag":{"category":"connect","op":"connect","request-id":1},"debug":{"thread":"pool-1-thread-2","request-context":{"params":{"url":"jdbc:oracle:thin:@//db:1521/FREEPDB1?password=<redacted>"}},"stack-trace":"java.sql.SQLException: connect failed\n..."}}
+```
+
 Rules:
 
 - `id` is client-generated and matched exactly in the response
 - `op` is a string RPC name
 - `params` is an object whose fields depend on the operation
+- `params.debug=true` opts into an additional redacted `debug` payload on
+  failures; normal requests should leave it unset
 - `ok=true` carries a `result` object
 - `ok=false` carries an `error` string
 - `ok=false` may also carry a `diag` object with structured troubleshooting data
+- `ok=false` may also carry a `debug` object with redacted verbose debugging
+  data when the request explicitly asked for it
 - `diag.context` may include `generated-sql` when the failing operation ran
   hidden/internal SQL rather than user-authored SQL
 
@@ -183,9 +193,12 @@ The short `error` string and the optional `diag` payload serve different roles:
 
 - `error`: concise default summary suitable for normal user-facing display
 - `diag`: richer request diagnostics for troubleshooting UI / logs / tests
+- `debug`: opt-in verbose debugging payload; may include redacted request
+  context and a redacted stack trace, but is omitted unless the client sent
+  `params.debug=true`
 
 stderr remains for process/runtime logging and should not be treated as the
-only source of request-level diagnostics.
+primary source of request-level diagnostics.
 
 ## Java requirement
 
