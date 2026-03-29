@@ -944,7 +944,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                     ((symbol-function 'clutch-result--detect-table)
                      (lambda () "shipping_incidents"))
                     ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table)
+                     (lambda (_conn _table &optional _strict)
                        (list (list :name "severity"
                                    :type "enum('low','medium','high')"))))
                     ((symbol-function 'pop-to-buffer)
@@ -976,7 +976,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                     ((symbol-function 'clutch-result--detect-table)
                      (lambda () "shipping_incidents"))
                     ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table)
+                     (lambda (_conn _table &optional _strict)
                        (list (list :name "opened_at" :type "datetime"))))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args) buf)))
@@ -1003,7 +1003,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                     ((symbol-function 'clutch-result--detect-table)
                      (lambda () "shipping_incidents"))
                     ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table)
+                     (lambda (_conn _table &optional _strict)
                        (list (list :name "payload" :type "json"))))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args) buf)))
@@ -1037,7 +1037,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                     ((symbol-function 'clutch-result--detect-table)
                      (lambda () "shipping_incidents"))
                     ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table)
+                     (lambda (_conn _table &optional _strict)
                        (list (list :name "payload" :type "json"))))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args) buf)))
@@ -1072,7 +1072,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                     ((symbol-function 'clutch-result--detect-table)
                      (lambda () "shipping_incidents"))
                     ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table)
+                     (lambda (_conn _table &optional _strict)
                        (list (list :name "payload" :type "json"))))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args) buf)))
@@ -2175,7 +2175,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
               ((symbol-function 'clutch--result-pk-indices-or-user-error)
                (lambda (_table _op) '(0)))
               ((symbol-function 'clutch--ensure-column-details)
-               (lambda (_conn _table)
+               (lambda (_conn _table &optional _strict)
                  (list (list :name "id")
                        (list :name "name")))))
       (let ((err (should-error
@@ -2196,7 +2196,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
               ((symbol-function 'clutch--result-pk-indices-or-user-error)
                (lambda (_table _op) '(0)))
               ((symbol-function 'clutch--ensure-column-details)
-               (lambda (_conn _table)
+               (lambda (_conn _table &optional _strict)
                  (list (list :name "id")
                        (list :name "generated_name" :generated t)))))
       (let ((err (should-error
@@ -3476,6 +3476,121 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   (let ((result (clutch--humanize-db-error "Database error: ORA-00942: table does not exist")))
     (should-not (string-prefix-p "Database error:" result))
     (should (string-match-p "ORA-00942" result))))
+
+(ert-deftest clutch-test-show-error-details-renders-connection-diagnostics ()
+  "The error details command should render current-connection diagnostics."
+  (let ((details '(:backend jdbc
+                   :summary "Connection failed [check host and port]"
+                   :diag (:category "connect"
+                          :op "connect"
+                          :request-id 71
+                          :exception-class "java.sql.SQLNonTransientConnectionException"
+                          :sql-state "08071"
+                          :context (:redacted-url "jdbc:clickhouse://127.0.0.1:8123/testdb?password=<redacted>"
+                                    :generated-sql "ALTER SESSION SET CURRENT_SCHEMA = \"REPORTING\""
+                                    :property-keys ("http_header_COOKIE" "socket_timeout"))
+                          :cause-chain ((:exception-class "java.sql.SQLNonTransientConnectionException"
+                                         :message "reason-71")
+                                        (:exception-class "java.net.ConnectException"
+                                         :message "root-71")))
+                   :stderr-tail "Connect request 71 failed")))
+    (with-temp-buffer
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch-db-error-details)
+                 (lambda (conn)
+                   (and (eq conn 'fake-conn) details)))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buf &rest _args) buf)))
+        (let ((buf (clutch-show-error-details)))
+          (with-current-buffer buf
+            (should (eq major-mode 'clutch-error-details-mode))
+            (should (string-match-p "Connection failed" (buffer-string)))
+            (should (string-match-p "SQLState" (buffer-string)))
+            (should (string-match-p "08071" (buffer-string)))
+            (should (string-match-p "Generated SQL" (buffer-string)))
+            (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" (buffer-string)))
+            (should (string-match-p "http_header_COOKIE" (buffer-string)))
+            (should (string-match-p "<redacted>" (buffer-string)))
+            (should (string-match-p "Connect request 71 failed" (buffer-string)))))))))
+
+(ert-deftest clutch-test-show-error-details-renders-buffer-details-without-connection ()
+  "The error details command should use current-buffer details before connect."
+  (let ((details '(:backend jdbc
+                   :summary "Connect failed"
+                   :diag (:category "connect"
+                          :op "connect"
+                          :request-id 17
+                          :context (:redacted-url "jdbc:clickhouse://127.0.0.1:8123/testdb"))
+                   :stderr-tail "Connect request 17 failed")))
+    (with-temp-buffer
+      (setq-local clutch--buffer-error-details details)
+      (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (buf &rest _args) buf)))
+        (let ((buf (clutch-show-error-details)))
+          (with-current-buffer buf
+            (should (string-match-p "Connect failed" (buffer-string)))
+            (should (string-match-p "Request ID" (buffer-string)))
+            (should (string-match-p "17" (buffer-string)))
+            (should (string-match-p "Connect request 17 failed" (buffer-string)))))))))
+
+(ert-deftest clutch-test-show-error-details-errors-when-unavailable ()
+  "The error details command should fail clearly without current-buffer details."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'clutch-db-error-details)
+               (lambda (_conn) '(:summary "should-not-fallback"))))
+      (should-error (clutch-show-error-details) :type 'user-error))))
+
+(ert-deftest clutch-test-show-error-details-does-not-keep-old-command-name ()
+  "The old last-error command name should not remain defined."
+  (should-not (fboundp 'clutch-show-last-error-details)))
+
+(ert-deftest clutch-test-execute-error-populates-copyable-details ()
+  "SQL execution failures should populate current-buffer error details."
+  (let ((source (generate-new-buffer " *clutch-error-source*")))
+    (unwind-protect
+        (with-current-buffer source
+          (set-window-buffer (selected-window) source)
+          (setq-local clutch-connection 'fake-conn
+                      clutch--source-window (selected-window))
+          (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_conn sql _page-num _page-size) sql))
+                    ((symbol-function 'clutch--run-db-query)
+                     (lambda (_conn _sql)
+                       (signal 'clutch-db-error
+                               (list "ORA-00942: table or view does not exist"))))
+                    ((symbol-function 'clutch-db-error-details)
+                     (lambda (_conn) nil))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args) buf)))
+            (catch 'clutch--execution-aborted
+              (clutch--execute-select "SELECT * FROM missing_table" 'fake-conn))
+            (let ((buf (clutch-show-error-details)))
+              (with-current-buffer buf
+                (should (string-match-p "ORA-00942" (buffer-string)))
+                (should (string-match-p "SELECT \\* FROM missing_table" (buffer-string)))))))
+      (kill-buffer source))))
+
+(ert-deftest clutch-test-error-details-copy-message-prefers-raw-message ()
+  "The details buffer should copy the raw backend message when available."
+  (with-temp-buffer
+    (let ((details '(:summary "Friendly summary"
+                     :diag (:raw-message "raw backend message"))))
+      (clutch--render-error-details-buffer details)
+      (clutch-error-details-copy-message)
+      (should (equal (current-kill 0) "raw backend message")))))
+
+(ert-deftest clutch-test-error-details-copy-all-copies-rendered-buffer ()
+  "The details buffer should copy its rendered content as plain text."
+  (with-temp-buffer
+    (let ((details '(:summary "Friendly summary"
+                     :diag (:raw-message "raw backend message"
+                            :context (:sql "SELECT * FROM demo")))))
+      (clutch--render-error-details-buffer details)
+      (clutch-error-details-copy-all)
+      (let ((copied (current-kill 0)))
+        (should (string-match-p "Friendly summary" copied))
+        (should (string-match-p "raw backend message" copied))
+        (should (string-match-p "SELECT \\* FROM demo" copied))))))
 
 (ert-deftest clutch-test-parse-error-position-supports-pg-and-oracle ()
   "Error position parsing should handle PG and Oracle/JDBC formats."
@@ -4938,6 +5053,64 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                    (buffer-string))))
       (kill-buffer console))))
 
+(ert-deftest clutch-test-object-browse-preserves-schema-qualification ()
+  "Object browse should keep schema-qualified object names."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'derived-mode-p)
+               (lambda (&rest modes) (memq 'clutch-mode modes)))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn name) (format "\"%s\"" name)))
+              ((symbol-function 'pop-to-buffer)
+               (lambda (buf &rest _args)
+                 (set-buffer buf)
+                 buf)))
+      (clutch-object-browse
+       '(:name "background_schedule_pool_log"
+         :type "TABLE"
+         :source-schema "system")))
+    (should (equal (buffer-string)
+                   "SELECT * FROM \"system\".\"background_schedule_pool_log\";"))))
+
+(ert-deftest clutch-test-object-browse-uses-object-schema-before-source-schema ()
+  "Object browse should prefer the object's real schema over discovery schema."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'derived-mode-p)
+               (lambda (&rest modes) (memq 'clutch-mode modes)))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn name) (format "\"%s\"" name)))
+              ((symbol-function 'pop-to-buffer)
+               (lambda (buf &rest _args)
+                 (set-buffer buf)
+                 buf)))
+      (clutch-object-browse
+       '(:name "ORDERS"
+         :type "SYNONYM"
+         :schema "DATA_OWNER"
+         :source-schema "APP")))
+    (should (equal (buffer-string)
+                   "SELECT * FROM \"DATA_OWNER\".\"ORDERS\";"))))
+
+(ert-deftest clutch-test-object-browse-clickhouse-uses-unquoted-identifiers ()
+  "ClickHouse browse SQL should avoid double quotes for simple identifiers."
+  (require 'clutch-db-jdbc)
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver clickhouse))))
+    (with-temp-buffer
+      (setq-local clutch-connection conn)
+      (cl-letf (((symbol-function 'derived-mode-p)
+                 (lambda (&rest modes) (memq 'clutch-mode modes)))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buf &rest _args)
+                   (set-buffer buf)
+                   buf)))
+        (clutch-object-browse
+         '(:name "background_schedule_pool_log"
+           :type "TABLE"
+           :source-schema "system")))
+      (should (equal (buffer-string)
+                     "SELECT * FROM system.background_schedule_pool_log;")))))
+
 (ert-deftest clutch-test-object-browse-inserts-at-first-line-in-empty-console ()
   "Object browse should insert at line 1 when the console has no content."
   (let ((console (generate-new-buffer " *clutch-test-console-empty*")))
@@ -6199,6 +6372,23 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
              "\n\nSELECT * FROM \"order-items\";"
              (buffer-string)))))
 
+(ert-deftest clutch-test-browse-table-interactive-preserves-entry-schema ()
+  "Interactive browse-table should preserve schema-qualified entries."
+  (let (captured-entry)
+    (cl-letf (((symbol-function 'clutch-object-read)
+               (lambda (&rest _args)
+                 '(:name "background_schedule_pool_log"
+                   :type "TABLE"
+                   :source-schema "system")))
+              ((symbol-function 'clutch-object-browse)
+               (lambda (entry)
+                 (setq captured-entry entry))))
+      (call-interactively #'clutch-browse-table))
+    (should (equal captured-entry
+                   '(:name "background_schedule_pool_log"
+                     :type "TABLE"
+                     :source-schema "system")))))
+
 (ert-deftest clutch-test-object-entry-label-uses-lowercase-type ()
   "Object-entry labels should keep schema uppercase and type lowercase."
   (should (equal (clutch--object-entry-label
@@ -6969,6 +7159,35 @@ database.  Only a query re-execution should discard them."
      (clutch--object-describe-text 'fake-conn '(:name "IDX_USERS" :type "INDEX"))
      :type 'clutch-db-error)))
 
+(ert-deftest clutch-test-object-describe-table-propagates-column-detail-errors ()
+  "Table describe should not hide column-detail failures behind list-columns."
+  (let ((clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--column-details-status-cache (make-hash-table :test 'equal))
+        (detail-calls 0)
+        (list-columns-calls 0))
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch-db-column-details)
+               (lambda (_conn _table)
+                 (cl-incf detail-calls)
+                 (signal 'clutch-db-error '("column detail boom"))))
+              ((symbol-function 'clutch-db-list-columns)
+               (lambda (&rest _args)
+                 (cl-incf list-columns-calls)
+                 '("id" "name")))
+              ((symbol-function 'clutch--ensure-table-comment)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch--object-related-entries)
+               (lambda (&rest _args) nil)))
+      (should-error
+       (clutch--object-describe-text 'fake-conn '(:name "USERS" :type "TABLE"))
+       :type 'clutch-db-error)
+      (should-error
+       (clutch--object-describe-text 'fake-conn '(:name "USERS" :type "TABLE"))
+       :type 'clutch-db-error)
+      (should (= detail-calls 1))
+      (should (= list-columns-calls 0)))))
+
 (ert-deftest clutch-test-object-describe-propagates-related-object-errors ()
   "Describe rendering should not silently swallow related-object lookup failures."
   (cl-letf (((symbol-function 'clutch--ensure-table-comment) (lambda (&rest _) nil))
@@ -7181,6 +7400,44 @@ database.  Only a query re-execution should discard them."
       (should (eq (plist-get (clutch--column-details-status 'fake-conn "users")
                              :state)
                   'failed)))))
+
+(ert-deftest clutch-test-ensure-table-comment-does-not-cache-db-errors ()
+  "Transient table-comment failures should not be memoized as missing comments."
+  (let ((clutch--table-comment-cache (make-hash-table :test 'equal))
+        (calls 0))
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch-db-table-comment)
+               (lambda (_conn _table)
+                 (cl-incf calls)
+                 (if (= calls 1)
+                     (signal 'clutch-db-error '("comment boom"))
+                   "Orders table"))))
+      (should-not (clutch--ensure-table-comment 'fake-conn "orders"))
+      (should (equal (clutch--ensure-table-comment 'fake-conn "orders")
+                     "Orders table"))
+      (should (= calls 2)))))
+
+(ert-deftest clutch-test-ensure-help-doc-does-not-cache-transient-query-errors ()
+  "Transient HELP lookup failures should not be memoized as missing docs."
+  (let ((clutch--help-doc-cache (make-hash-table :test 'equal))
+        (calls 0))
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch--run-db-query)
+               (lambda (_conn _sql)
+                 (cl-incf calls)
+                 (if (= calls 1)
+                     (signal 'clutch-db-error '("help boom"))
+                   (make-clutch-db-result
+                    :columns '("name" "description" "example")
+                    :rows '(("ABS"
+                             "Syntax:\n\nABS(X)\n\nReturns absolute value."
+                             "")))))))
+      (should-not (clutch--ensure-help-doc 'fake-conn "abs"))
+      (should (string-match-p "ABS(X)"
+                              (clutch--ensure-help-doc 'fake-conn "abs")))
+      (should (= calls 2)))))
 
 (ert-deftest clutch-test-ensure-columns-failure-is-memoized ()
   "Repeated sync column-name loads should not reissue the same failing RPC."

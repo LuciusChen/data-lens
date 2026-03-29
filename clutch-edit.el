@@ -24,7 +24,7 @@
 (defvar clutch-insert-validation-idle-delay)
 (defvar clutch-connection)
 
-(declare-function clutch--ensure-column-details "clutch-schema" (conn table))
+(declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--execute "clutch" (sql &optional conn))
 (declare-function clutch--format-value "clutch" (value))
 (declare-function clutch--json-value-to-string "clutch" (value))
@@ -141,7 +141,7 @@ Scans text properties across the line."
   "Return schema detail plist for COL-NAME in RESULT-BUF, or nil."
   (with-current-buffer result-buf
     (when-let* ((table (clutch-result--detect-table))
-                (details (clutch--ensure-column-details clutch-connection table)))
+                (details (clutch--ensure-column-details clutch-connection table t)))
       (cl-find-if (lambda (detail)
                     (equal (plist-get detail :name) col-name))
                   details))))

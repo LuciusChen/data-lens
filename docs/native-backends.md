@@ -177,6 +177,6 @@ Relevant variables:
 The interactive object workflow is shared across native and JDBC backends:
 
 - `C-c C-j` — jump to object
-- `C-c C-d` — describe object
+- `C-c C-d` — describe object at point, or prompt with the shared object picker
 - `C-c C-o` — object actions
 - `C-c C-l` — switch current schema/database when supported

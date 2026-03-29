@@ -61,7 +61,7 @@ Success responses:
 Error responses:
 
 ```json
-{"id":1,"ok":false,"error":"connect: 'url' is required"}
+{"id":1,"ok":false,"error":"connect failed","diag":{"category":"connect","op":"connect","request-id":1,"context":{"redacted-url":"jdbc:oracle:thin:@//db:1521/FREEPDB1"}}}
 ```
 
 Rules:
@@ -71,6 +71,9 @@ Rules:
 - `params` is an object whose fields depend on the operation
 - `ok=true` carries a `result` object
 - `ok=false` carries an `error` string
+- `ok=false` may also carry a `diag` object with structured troubleshooting data
+- `diag.context` may include `generated-sql` when the failing operation ran
+  hidden/internal SQL rather than user-authored SQL
 
 ## Core operations
 
@@ -159,6 +162,9 @@ There are three distinct failure classes:
 1. A normal request-level database error.
    - Examples: SQL syntax error, object-not-found, cancelled statement.
    - The agent stays up and Elisp surfaces the database error normally.
+   - The response may also include a structured `diag` object with fields such
+     as category, request id, connection id, exception class, SQLState, cause
+     chain, and redacted request context.
 
 2. The agent is running but a request times out or the underlying JDBC session
    wedges.
@@ -172,6 +178,14 @@ There are three distinct failure classes:
 
 This distinction matters because a JVM startup failure should not look like a
 normal database disconnect.
+
+The short `error` string and the optional `diag` payload serve different roles:
+
+- `error`: concise default summary suitable for normal user-facing display
+- `diag`: richer request diagnostics for troubleshooting UI / logs / tests
+
+stderr remains for process/runtime logging and should not be treated as the
+only source of request-level diagnostics.
 
 ## Java requirement
 

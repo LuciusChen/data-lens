@@ -202,6 +202,11 @@ ORDER-BY is (COL . DIR) or nil.  ESCAPE-FN escapes the column name."
   (ignore conn)
   nil)
 
+(cl-defgeneric clutch-db-error-details (conn)
+  "Return structured error details for CONN, or nil."
+  (ignore conn)
+  nil)
+
 (cl-defgeneric clutch-db-init-connection (conn)
   "Perform post-connect initialization on CONN.
 For example, SET NAMES utf8mb4 on MySQL.")

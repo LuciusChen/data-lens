@@ -244,6 +244,11 @@ saved connection already associated with that console, without reopening the
 global connection picker.  To switch to another saved connection, use
 =M-x clutch-query-console=.
 
+For JDBC failures, use =M-x clutch-show-error-details=.  The detailed
+troubleshooting workflow is documented below in the interrupt/error handling
+section.  Inside the details buffer, use =w= to copy the raw backend error and
+=W= to copy the full rendered report.
+
 To activate =clutch-mode= automatically for =.sql= files, add to your config:
 
 #+begin_src emacs-lisp
@@ -525,7 +530,7 @@ then keeps warming slower categories such as indexes, sequences, and routines
 in the background after schema refreshes.  Once an object is resolved, =RET=
 runs the object's default action.
 
-=C-c C-d= is a convenience wrapper over the same resolution logic.  It resolves
+=C-c C-d= is a describe-focused wrapper over the same resolution logic.  It resolves
 the object at point when possible; otherwise it prompts with the same flat
 picker.  It opens the shared describe buffer for the target object.  That
 buffer is only a view over the same object model; it does not define a second
@@ -940,6 +945,17 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
     dead.
   - Backends without explicit interrupt support still fall back to
     disconnect/reconnect semantics.
+- After a JDBC failure, run =M-x clutch-show-error-details= from the relevant
+  buffer.  This is the supported troubleshooting path for JDBC errors.  The
+  details view is strict to the current buffer context: connected buffers show
+  details for their current connection, while unconnected buffers show their
+  own last structured JDBC failure.  Early startup validation errors such as a
+  missing agent jar or Java executable still surface inline at the command
+  boundary.  When the failing path involved
+  hidden/internal SQL, the same details view also shows the generated SQL text
+  that triggered the failure together with the related JDBC agent stderr tail.
+  Use =w= inside that buffer to copy the raw backend message, or =W= to copy
+  the full rendered diagnostics report for issue filing.
 - High-risk DML (=UPDATE/DELETE= without top-level =WHERE=) requires typed
   confirmation (=YES=) before execution.
 

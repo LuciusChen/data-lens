@@ -303,10 +303,11 @@ Fetches from the backend if not yet cached.  Returns column list."
                                            (error-message-string err))
                nil)))))))
 
-(defun clutch--ensure-column-details (conn table)
+(defun clutch--ensure-column-details (conn table &optional strict)
   "Return column details for TABLE on CONN, loading lazily if needed.
 Returns a list of plists with :name :type :nullable :primary-key :foreign-key,
-or nil on error."
+or nil on error.  When STRICT is non-nil, signal `clutch-db-error' instead of
+silently returning nil."
   (let* ((key (clutch--connection-key conn))
          (cache (or (gethash key clutch--column-details-cache)
                     (let ((h (make-hash-table :test 'equal)))
@@ -316,16 +317,23 @@ or nil on error."
          (status (clutch--column-details-status conn table)))
     (if (not (eq cached 'missing))
         cached
-      (unless (eq (plist-get status :state) 'failed)
+      (if (eq (plist-get status :state) 'failed)
+          (when strict
+            (signal 'clutch-db-error
+                    (list (or (plist-get status :error)
+                              (format "Failed to load column details for %s"
+                                      table)))))
         (condition-case err
             (let ((details (clutch-db-column-details conn table)))
               (puthash table details cache)
               (clutch--clear-column-details-status conn table)
               details)
           (clutch-db-error
-           (clutch--set-column-details-status conn table 'failed
-                                              (error-message-string err))
-           nil))))))
+           (let ((message (error-message-string err)))
+             (clutch--set-column-details-status conn table 'failed message)
+             (when strict
+               (signal 'clutch-db-error (list message)))
+             nil)))))))
 
 (defun clutch--drain-column-details-async (conn)
   "Start the next queued async column-details fetch for CONN."
@@ -389,11 +397,11 @@ Returns a string or nil."
          (cached (gethash table cache 'missing)))
     (if (not (eq cached 'missing))
         cached
-      (let ((comment (condition-case nil
-                         (clutch-db-table-comment conn table)
-                       (clutch-db-error nil))))
-        (puthash table comment cache)
-        comment))))
+      (condition-case nil
+          (let ((comment (clutch-db-table-comment conn table)))
+            (puthash table comment cache)
+            comment)
+        (clutch-db-error nil)))))
 
 (defun clutch--parse-mysql-help-text (text)
   "Parse a MySQL HELP description TEXT into a (:sig SIG :desc DESC) plist.
@@ -424,16 +432,14 @@ Returns nil if TEXT cannot be parsed (no Syntax: section)."
 
 (defun clutch--mysql-help-query (conn sym)
   "Query MySQL HELP for SYM on CONN and return a doc plist or nil.
-Returns nil when the symbol is unrecognised or the query fails."
-  (condition-case nil
-      (let* ((result  (clutch--run-db-query conn (format "HELP '%s'" (upcase sym))))
-             (columns (clutch-db-result-columns result))
-             (rows    (clutch-db-result-rows result)))
-        (when (and rows (>= (length columns) 3))
-          (pcase-let ((`(,_name ,desc ,_example) (car rows)))
-            (when (stringp desc)
-              (clutch--parse-mysql-help-text desc)))))
-    (error nil)))
+Returns nil when the symbol is unrecognised."
+  (let* ((result  (clutch--run-db-query conn (format "HELP '%s'" (upcase sym))))
+         (columns (clutch-db-result-columns result))
+         (rows    (clutch-db-result-rows result)))
+    (when (and rows (>= (length columns) 3))
+      (pcase-let ((`(,_name ,desc ,_example) (car rows)))
+        (when (stringp desc)
+          (clutch--parse-mysql-help-text desc))))))
 
 (defun clutch--format-help-doc (doc)
   "Format a DOC plist (:sig SIG :desc DESC) as a propertized eldoc string."
@@ -456,9 +462,11 @@ Returns nil when SYM is not a known built-in on this server."
          (entry (gethash uname cache 'missing)))
     (cond
      ((eq entry 'missing)
-      (let ((doc (clutch--mysql-help-query conn sym)))
-        (puthash uname (or doc 'not-found) cache)
-        (when doc (clutch--format-help-doc doc))))
+      (condition-case nil
+          (let ((doc (clutch--mysql-help-query conn sym)))
+            (puthash uname (or doc 'not-found) cache)
+            (when doc (clutch--format-help-doc doc)))
+        (clutch-db-error nil)))
      ((eq entry 'not-found) nil)
      (t (clutch--format-help-doc entry)))))
 

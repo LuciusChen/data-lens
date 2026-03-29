@@ -34,7 +34,7 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
 (declare-function clutch--connection-alive-p "clutch" (conn))
 (declare-function clutch--effective-sql-product "clutch" (params))
-(declare-function clutch--ensure-column-details "clutch-schema" (conn table))
+(declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--ensure-connection "clutch" ())
 (declare-function clutch--ensure-table-comment "clutch-schema" (conn table))
 (declare-function clutch--icon-with-face "clutch-ui"
@@ -837,6 +837,20 @@ selection can surface objects from different Oracle sources and types."
         (format "%s.%s" schema name)
       name)))
 
+(defun clutch--object-sql-name (conn entry)
+  "Return SQL-ready object name for ENTRY on CONN.
+Preserve object schema qualification, falling back to source schema only
+when the real object schema is unavailable."
+  (let* ((schema (or (plist-get entry :schema)
+                     (plist-get entry :source-schema)))
+         (name (or (plist-get entry :name) "")))
+    (mapconcat
+     (lambda (part) (clutch-db-escape-identifier conn part))
+     (if (and schema (not (string-empty-p schema)))
+         (list schema name)
+       (list name))
+     ".")))
+
 (defun clutch--show-object-text-buffer (conn entry text &optional params product)
   "Display TEXT for ENTRY using CONN's SQL product."
   (let* ((product (or product
@@ -1024,7 +1038,7 @@ selection can surface objects from different Oracle sources and types."
              (when-let* ((comment (and (string= (clutch--object-type-string entry) "TABLE")
                                         (clutch--ensure-table-comment conn name))))
                 (cons "Comment" (list (format "  %s" comment))))
-              (when-let* ((details (or (clutch--ensure-column-details conn name)
+              (when-let* ((details (or (clutch--ensure-column-details conn name t)
                                        (clutch-db-list-columns conn name))))
                 (cons "Columns"
                       (mapcar (if (and details (plist-get (car-safe details) :name))
@@ -1221,8 +1235,7 @@ selection can surface objects from different Oracle sources and types."
                      (plist-get context :connection)
                      (user-error "No active connection")))
            (sql (format "SELECT * FROM %s;"
-                        (clutch-db-escape-identifier conn
-                                                     (plist-get entry :name))))
+                        (clutch--object-sql-name conn entry)))
            (console (or (and (derived-mode-p 'clutch-mode)
                              (eq clutch-connection conn)
                              (current-buffer))
@@ -1344,11 +1357,14 @@ only resolve table-like objects."
   (interactive)
   (clutch-describe-dwim))
 
-(defun clutch-browse-table (table)
-  "Insert SELECT * FROM TABLE at the end of a query console."
+(defun clutch-browse-table (table-or-entry)
+  "Insert SELECT * FROM TABLE-OR-ENTRY at the end of a query console."
   (interactive
-   (list (plist-get (clutch-object-read "Browse object: " t) :name)))
-  (clutch-object-browse (list :name table :type "TABLE")))
+   (list (clutch-object-read "Browse object: " t)))
+  (clutch-object-browse
+   (if (stringp table-or-entry)
+       (list :name table-or-entry :type "TABLE")
+     table-or-entry)))
 
 
 (defconst clutch--object-action-registry

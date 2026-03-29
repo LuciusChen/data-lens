@@ -898,6 +898,10 @@ M-x clutch-repl
 ;; Connect (generic in clutch-mode/REPL; query consoles reconnect their own saved connection)
 C-c C-e  (or  M-x clutch-connect)
 
+;; Show structured error details for the current buffer context
+;; In the details buffer: w copies the raw backend message, W copies the full report.
+M-x clutch-show-error-details
+
 ;; Object jump / describe / actions / schema switch
 C-c C-j
 C-c C-d

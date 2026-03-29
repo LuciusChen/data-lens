@@ -6,7 +6,7 @@ clutch originally accumulated several metadata entry points:
 
 - schema refresh for cached table names
 - `C-c C-j` for browse-object selection
-- `C-c C-d` for describe-at-point
+- `C-c C-d` for describe-object resolution
 - a tree-style schema buffer for exploratory browsing
 - optional Embark actions for tables
 
@@ -28,7 +28,7 @@ The resulting shape is:
 - `clutch-db-*` remains the backend/metadata interface
 - `clutch.el` owns the interactive object workflow
 - `C-c C-j` is the main object picker
-- `C-c C-d` describes the current object
+- `C-c C-d` is the describe-focused wrapper over the shared object resolver
 - `C-c C-o` is the no-Embark action fallback
 - Embark extends the same object actions instead of defining a parallel path
 
@@ -72,7 +72,8 @@ collapsing into the same DDL/source path as the default action.
 
 The practical outcome is:
 
-- `C-c C-d` remains a describe/inspect view
+- `C-c C-d` remains a describe/inspect view, resolving at point when possible
+  and otherwise prompting with the shared picker
 - `clutch-object-show-ddl-or-source` remains a separate action
 - Transient and Embark expose both through the same object-action model
 

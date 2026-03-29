@@ -374,6 +374,9 @@ after async metadata refreshes."
 (defvar-local clutch-connection nil
   "Current database connection for this buffer.")
 
+(defvar-local clutch--buffer-error-details nil
+  "Structured error details scoped to this buffer when no connection exists.")
+
 (defvar-local clutch--executing-p nil
   "Non-nil while a query is executing in this buffer.
 Used to update the mode-line with a spinner during execution.")
@@ -813,6 +816,7 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
 (defun clutch--bind-connection-context (conn &optional params product)
   "Bind CONN and related reconnect context in the current buffer."
   (setq-local clutch-connection conn)
+  (setq-local clutch--buffer-error-details nil)
   (when params
     (setq-local clutch--connection-params params))
   (when (or params product)
@@ -1176,6 +1180,7 @@ Returns a live connection object or signals a `user-error'."
     (condition-case err
         (clutch-db-connect backend db-params)
       (clutch-db-error
+       (setq-local clutch--buffer-error-details (nth 2 err))
        (user-error "%s" (clutch--humanize-db-error
                          (or (car (cdr err))
                              (error-message-string err))))))))
@@ -1789,9 +1794,14 @@ Returns the query result."
          (result (condition-case err
                      (clutch--run-db-query connection paged-sql)
                    (clutch-db-error
-                    (let ((msg (error-message-string err)))
-                      (clutch--mark-sql-error (window-buffer clutch--source-window)
-                                              sql msg)
+                    (let* ((msg (error-message-string err))
+                           (source-buffer
+                            (if (window-live-p clutch--source-window)
+                                (window-buffer clutch--source-window)
+                              (current-buffer))))
+                      (clutch--remember-buffer-query-error-details
+                       source-buffer connection sql err)
+                      (clutch--mark-sql-error source-buffer sql msg)
                       (throw 'clutch--execution-aborted nil)))))
          (elapsed (- (float-time) start))
          (buf (get-buffer-create (clutch--result-buffer-name)))
@@ -1817,9 +1827,14 @@ Returns the query result."
          (result (condition-case err
                      (clutch--run-db-query connection sql)
                    (clutch-db-error
-                    (let ((msg (error-message-string err)))
-                      (clutch--mark-sql-error (window-buffer clutch--source-window)
-                                              sql msg)
+                    (let* ((msg (error-message-string err))
+                           (source-buffer
+                            (if (window-live-p clutch--source-window)
+                                (window-buffer clutch--source-window)
+                              (current-buffer))))
+                      (clutch--remember-buffer-query-error-details
+                       source-buffer connection sql err)
+                      (clutch--mark-sql-error source-buffer sql msg)
                       (throw 'clutch--execution-aborted nil)))))
          (elapsed (- (float-time) start)))
     (when (clutch--schema-affecting-query-p sql)
@@ -1864,6 +1879,7 @@ For SELECT queries, applies pagination (LIMIT/OFFSET).
 Prompts for confirmation on destructive operations."
   (clutch--ensure-connection)
   (clutch--clear-error-position-overlay)
+  (setq-local clutch--buffer-error-details nil)
   (clutch--check-pending-changes)
   (let ((connection (or conn clutch-connection))
         (source-win (selected-window)))
@@ -1988,6 +2004,193 @@ Handles PG \\='(position N)\\=' suffix and Oracle-style \\='line N, column M\\='
   (when (overlayp clutch--error-banner-overlay)
     (delete-overlay clutch--error-banner-overlay)
     (setq clutch--error-banner-overlay nil)))
+
+(defvar-local clutch-error-details--fetcher nil
+  "Thunk that returns the latest structured error details for this buffer.")
+
+(defvar-local clutch-error-details--details nil
+  "Last structured error details rendered in this details buffer.")
+
+(defvar clutch-error-details-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "g") #'clutch-error-details-refresh)
+    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "w") #'clutch-error-details-copy-message)
+    (define-key map (kbd "W") #'clutch-error-details-copy-all)
+    map)
+  "Keymap for `clutch-error-details-mode'.")
+
+(define-derived-mode clutch-error-details-mode special-mode "clutch-error-details"
+  "Mode for inspecting the latest structured database error details.")
+
+(defun clutch--current-buffer-error-details ()
+  "Return structured error details for the current buffer, or nil.
+Current-buffer failures take precedence.  Connected buffers otherwise use
+their current `clutch-connection'."
+  (or clutch--buffer-error-details
+      (and clutch-connection
+           (clutch-db-error-details clutch-connection))))
+
+(defun clutch--insert-error-details-section (title body)
+  "Insert TITLE and BODY into the current details buffer."
+  (when body
+    (insert (propertize title 'face 'bold) "\n")
+    (insert body "\n\n")))
+
+(defun clutch--insert-error-details-field (label value)
+  "Insert LABEL and VALUE as one diagnostics line."
+  (when value
+    (insert (format "%-12s %s\n" label value))))
+
+(defun clutch--error-details-format-plist (plist)
+  "Return a human-readable string for PLIST."
+  (pp-to-string plist))
+
+(defun clutch--error-details-context-without-inline-sql (context)
+  "Return CONTEXT plist without inline SQL payload entries."
+  (when context
+    (cl-loop for (key val) on context by #'cddr
+             unless (memq key '(:generated-sql :sql))
+             append (list key val))))
+
+(defun clutch--error-details-copyable-message (details)
+  "Return the best single-message summary from DETAILS."
+  (or (plist-get (plist-get details :diag) :raw-message)
+      (plist-get details :summary)))
+
+(defun clutch-error-details-copy-message ()
+  "Copy the most useful single error message from the details buffer."
+  (interactive)
+  (unless clutch-error-details--details
+    (user-error "No error details are available in this buffer"))
+  (let ((message (clutch--error-details-copyable-message
+                  clutch-error-details--details)))
+    (unless message
+      (user-error "No copyable error message is available"))
+    (kill-new message)
+    (message "Copied error message")))
+
+(defun clutch-error-details-copy-all ()
+  "Copy the fully rendered error-details buffer as plain text."
+  (interactive)
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    (unless (string-empty-p text)
+      (kill-new text)
+      (message "Copied error details"))))
+
+(defun clutch--make-buffer-query-error-details (connection sql err)
+  "Return structured error details for a failed SQL execution on CONNECTION.
+SQL is the user-visible statement.  ERR is the original signaled condition."
+  (let* ((message (or (cadr err) (error-message-string err)))
+         (details (copy-tree (nth 2 err)))
+         (diag (copy-tree (plist-get details :diag)))
+         (context (copy-tree (plist-get diag :context))))
+    (unless details
+      (setq details (list :summary (clutch--humanize-db-error message))))
+    (when-let* ((backend (and connection
+                              (condition-case nil
+                                  (clutch--backend-key-from-conn connection)
+                                (error nil)))))
+      (unless (plist-member details :backend)
+        (setq details (plist-put details :backend backend))))
+    (unless (plist-get details :summary)
+      (setq details (plist-put details :summary
+                               (clutch--humanize-db-error message))))
+    (unless diag
+      (setq diag (list :raw-message message)))
+    (unless (plist-get diag :raw-message)
+      (setq diag (plist-put diag :raw-message message)))
+    (unless (or (plist-get context :generated-sql)
+                (plist-get context :sql))
+      (setq context (plist-put context :sql sql)))
+    (setq diag (plist-put diag :context context))
+    (plist-put details :diag diag)))
+
+(defun clutch--remember-buffer-query-error-details (buffer connection sql err)
+  "Store the failed SQL execution details for BUFFER.
+CONNECTION, SQL and ERR describe the failed query."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq-local clutch--buffer-error-details
+                  (clutch--make-buffer-query-error-details connection sql err)))))
+
+(defun clutch--render-error-details-buffer (details)
+  "Render structured error DETAILS into the current buffer."
+  (let ((inhibit-read-only t)
+        (summary (plist-get details :summary))
+        (backend (plist-get details :backend))
+        (diag (plist-get details :diag))
+        (stderr-tail (plist-get details :stderr-tail)))
+    (erase-buffer)
+    (clutch-error-details-mode)
+    (setq-local clutch-error-details--details (copy-tree details))
+    (setq-local header-line-format
+                (format " Error Details%s"
+                        (if backend
+                            (format " [%s]" (upcase (symbol-name backend)))
+                          "")))
+    (clutch--insert-error-details-section "Summary" (or summary "No summary available"))
+    (when diag
+      (let* ((context (plist-get diag :context))
+             (sql (plist-get context :sql))
+             (generated-sql (plist-get context :generated-sql))
+             (display-context
+              (clutch--error-details-context-without-inline-sql context)))
+        (insert (propertize "Diagnostics" 'face 'bold) "\n")
+        (clutch--insert-error-details-field "Category" (plist-get diag :category))
+        (clutch--insert-error-details-field "Operation" (plist-get diag :op))
+        (clutch--insert-error-details-field "Request ID" (plist-get diag :request-id))
+        (clutch--insert-error-details-field "Conn ID" (plist-get diag :conn-id))
+        (clutch--insert-error-details-field "Exception" (plist-get diag :exception-class))
+        (clutch--insert-error-details-field "SQLState" (plist-get diag :sql-state))
+        (clutch--insert-error-details-field "Vendor code" (plist-get diag :vendor-code))
+        (clutch--insert-error-details-field "Raw message" (plist-get diag :raw-message))
+        (insert "\n")
+        (when sql
+          (clutch--insert-error-details-section "SQL" sql))
+        (when generated-sql
+          (clutch--insert-error-details-section
+           "Generated SQL"
+           generated-sql))
+        (when display-context
+          (clutch--insert-error-details-section
+           "Context"
+           (clutch--error-details-format-plist display-context)))
+        (when-let* ((cause-chain (plist-get diag :cause-chain)))
+          (clutch--insert-error-details-section
+           "Cause chain"
+           (clutch--error-details-format-plist cause-chain)))))
+    (when stderr-tail
+      (clutch--insert-error-details-section "Agent stderr tail" stderr-tail))
+    (goto-char (point-min))))
+
+(defun clutch-error-details-refresh ()
+  "Refresh the current error details buffer."
+  (interactive)
+  (unless clutch-error-details--fetcher
+    (user-error "No error-details provider is associated with this buffer"))
+  (let ((details (funcall clutch-error-details--fetcher)))
+    (unless details
+      (user-error "No error details are available for this buffer"))
+    (clutch--render-error-details-buffer details)))
+
+(defun clutch-show-error-details ()
+  "Show structured error details for the current buffer context."
+  (interactive)
+  (let ((source-buffer (current-buffer)))
+    (unless (clutch--current-buffer-error-details)
+      (user-error "No error details are available for this buffer"))
+    (let ((buf (get-buffer-create "*clutch-error-details*")))
+      (with-current-buffer buf
+        (setq-local clutch-error-details--fetcher
+                    (lambda ()
+                      (when (buffer-live-p source-buffer)
+                        (with-current-buffer source-buffer
+                          (clutch--current-buffer-error-details)))))
+        (clutch-error-details-refresh))
+      (pop-to-buffer buf '((display-buffer-at-bottom)))
+      buf)))
 
 (defun clutch--format-error-banner (msg)
   "Return a compact single-line banner string for error MSG."
@@ -4782,7 +4985,7 @@ Selects JSON, XML, or binary string view based on column type and content."
 
 (defun clutch-result--ensure-update-source-columns (table col-indices op)
   "Ensure COL-INDICES map to writable source columns for TABLE during OP."
-  (let* ((details (or (clutch--ensure-column-details clutch-connection table)
+  (let* ((details (or (clutch--ensure-column-details clutch-connection table t)
                       (user-error "Cannot %s: source column metadata is unavailable"
                                   op)))
          (detail-map
@@ -5525,6 +5728,7 @@ Accumulates input until a semicolon is found, then executes."
 
 (defun clutch-repl--execute-and-print (sql)
   "Execute SQL and print results inline in the REPL."
+  (setq-local clutch--buffer-error-details nil)
   (condition-case err
       (progn
         (clutch--ensure-connection)
@@ -5550,6 +5754,8 @@ Accumulates input until a semicolon is found, then executes."
        (clutch-query-interrupted
         (clutch-repl--output "\nERROR: Query interrupted\n\ndb> "))))
     (error
+     (clutch--remember-buffer-query-error-details
+      (current-buffer) clutch-connection sql err)
      (clutch-repl--output
       (format "\nERROR: %s\n\ndb> "
               (clutch--humanize-db-error (error-message-string err)))))))

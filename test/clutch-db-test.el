@@ -39,6 +39,7 @@
 ;; `mysql-tls-verify-server' is defined in mysql.el; declare it special here so
 ;; local test bindings remain dynamic even before the backend requires mysql.el.
 (defvar mysql-tls-verify-server)
+(defvar clutch-jdbc--error-details-by-conn)
 (defvar clutch-jdbc--busy-request-ids)
 (defvar clutch-jdbc--ignored-response-ids)
 
@@ -388,7 +389,7 @@
                                                :rpc-timeout ,clutch-jdbc-rpc-timeout-seconds)))
         callback-result)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (_op _params callback &optional errback _timeout-seconds)
+               (lambda (_op _params callback &optional errback _timeout-seconds _conn)
                  (should-not errback)
                  (funcall callback '(:cursor-id nil
                                     :columns ("name" "type" "schema" "source_schema")
@@ -427,7 +428,7 @@
                                                :rpc-timeout 7)))
         captured-timeout)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (_op _params _callback &optional _errback timeout-seconds)
+               (lambda (_op _params _callback &optional _errback timeout-seconds _conn)
                  (setq captured-timeout timeout-seconds)
                  42)))
       (should (clutch-db-refresh-schema-async conn #'ignore))
@@ -492,8 +493,8 @@
                                                :database "default"))))
     (should (equal (clutch-jdbc--conn-catalog conn) "default"))))
 
-(ert-deftest clutch-db-test-jdbc-clickhouse-list-table-entries-sends-catalog ()
-  "ClickHouse table discovery should pass catalog to JDBC metadata RPC."
+(ert-deftest clutch-db-test-jdbc-clickhouse-list-table-entries-omits-catalog ()
+  "ClickHouse table discovery should omit catalog from JDBC metadata RPC."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver clickhouse
                                                :database "default")))
@@ -509,11 +510,11 @@
               '((:name "events" :type "TABLE" :schema "")
                 (:name "daily_mv" :type "VIEW" :schema ""))))
       (should (equal captured-op "get-tables"))
-      (should (equal (alist-get 'catalog captured-params) "default"))
+      (should-not (alist-get 'catalog captured-params))
       (should-not (alist-get 'schema captured-params)))))
 
-(ert-deftest clutch-db-test-jdbc-clickhouse-search-table-entries-sends-catalog ()
-  "ClickHouse table search should pass catalog to JDBC metadata RPC."
+(ert-deftest clutch-db-test-jdbc-clickhouse-search-table-entries-omits-catalog ()
+  "ClickHouse table search should omit catalog from JDBC metadata RPC."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver clickhouse
                                                :database "default")))
@@ -529,12 +530,12 @@
               '((:name "clutch_live_smoke" :type "TABLE"
                  :schema "" :source-schema ""))))
       (should (equal captured-op "search-tables"))
-      (should (equal (alist-get 'catalog captured-params) "default"))
+      (should-not (alist-get 'catalog captured-params))
       (should (equal (alist-get 'prefix captured-params) "clutch"))
       (should-not (alist-get 'schema captured-params)))))
 
-(ert-deftest clutch-db-test-jdbc-clickhouse-column-details-send-catalog ()
-  "ClickHouse column metadata RPCs should carry catalog through all metadata calls."
+(ert-deftest clutch-db-test-jdbc-clickhouse-column-details-omit-catalog ()
+  "ClickHouse column metadata RPCs should omit catalog from metadata calls."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver clickhouse
                                                :database "default")))
@@ -557,7 +558,7 @@
                 (:name "name" :type "String" :nullable t
                  :primary-key nil :foreign-key nil :comment nil))))
       (dolist (call calls)
-        (should (equal (alist-get 'catalog (cdr call)) "default"))
+        (should-not (alist-get 'catalog (cdr call)))
         (should-not (alist-get 'schema (cdr call)))))))
 
 ;;;; Unit tests — clutch-db-complete-tables (Oracle, cache-first)
@@ -668,6 +669,32 @@
       (funcall timer-fn)
       (should (string-match-p "timeout waiting for async response" timeout-message))
       (should-not (gethash 77 clutch-jdbc--async-callbacks)))))
+
+(ert-deftest clutch-db-test-jdbc-dispatch-async-response-remembers-conn-scoped-errors ()
+  "Async JDBC failures should remember diagnostics and call ERRBACK."
+  (let ((clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+        remembered
+        errback-message)
+    (puthash 77 (list :errback (lambda (message)
+                                 (setq errback-message message))
+                      :conn 'conn-77
+                      :op 'get-tables)
+             clutch-jdbc--async-callbacks)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_secs _repeat fn &rest args)
+                 (apply fn args)
+                 nil))
+              ((symbol-function 'clutch-jdbc--remember-error-response)
+               (lambda (conn op response)
+                 (setq remembered (list conn op response))))
+              ((symbol-function 'message)
+               (lambda (&rest _args) nil)))
+      (should (clutch-jdbc--dispatch-async-response
+               '(:id 77 :ok :json-false :error "metadata blew up")))
+      (should (equal remembered
+                     '(conn-77 get-tables
+                               (:id 77 :ok :json-false :error "metadata blew up"))))
+      (should (equal errback-message "metadata blew up")))))
 
 (ert-deftest clutch-db-test-jdbc-validate-agent-jar-rejects-mismatch ()
   "JDBC agent startup should reject a jar with the wrong checksum."
@@ -1263,6 +1290,16 @@
     (should (equal (clutch-db-escape-literal conn "it's")
                    "'it''s'"))))
 
+(ert-deftest clutch-db-test-jdbc-clickhouse-escape ()
+  "ClickHouse JDBC should leave simple identifiers bare and backtick-escape others."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver clickhouse))))
+    (should (equal (clutch-db-escape-identifier conn "background_schedule_pool_log")
+                   "background_schedule_pool_log"))
+    (should (equal (clutch-db-escape-identifier conn "order-items")
+                   "`order-items`"))
+    (should (equal (clutch-db-escape-identifier conn "my`table")
+                   "`my``table`"))))
+
 ;;;; Unit tests — metadata accessors
 
 (ert-deftest clutch-db-test-mysql-metadata ()
@@ -1483,7 +1520,7 @@ Skips if `clutch-db-test-mysql-password' is nil."
     ;; show-create-table
     (let ((ddl (clutch-db-show-create-table conn "user")))
       (should (stringp ddl))
-      (should (string-match-p "CREATE TABLE" ddl)))))
+      (should (string-match-p "CREATE\\( TABLE\\| .* VIEW\\)" ddl)))))
 
 (ert-deftest clutch-db-test-mysql-show-create-table-empty-rows-errors-cleanly ()
   "MySQL show-create-table should signal `clutch-db-error' on empty row sets."
@@ -1571,6 +1608,28 @@ Skips if `clutch-db-test-pg-password' is nil."
 (defvar clutch-db-test-jdbc-oracle-service "freepdb1"
   "Service name for Oracle JDBC live tests (gvenzl/oracle-free default).")
 
+(defvar clutch-db-test-jdbc-mssql-host "127.0.0.1"
+  "Host for SQL Server JDBC live tests.")
+(defvar clutch-db-test-jdbc-mssql-port 1433
+  "Port for SQL Server JDBC live tests.")
+(defvar clutch-db-test-jdbc-mssql-user "sa"
+  "User for SQL Server JDBC live tests.")
+(defvar clutch-db-test-jdbc-mssql-password nil
+  "Password for SQL Server JDBC live tests.  Non-nil enables the :mssql-live suite.")
+(defvar clutch-db-test-jdbc-mssql-database "master"
+  "Database name for SQL Server JDBC live tests.")
+
+(defvar clutch-db-test-jdbc-clickhouse-host "127.0.0.1"
+  "Host for ClickHouse JDBC live tests.")
+(defvar clutch-db-test-jdbc-clickhouse-port 8123
+  "Port for ClickHouse JDBC live tests.")
+(defvar clutch-db-test-jdbc-clickhouse-user "default"
+  "User for ClickHouse JDBC live tests.")
+(defvar clutch-db-test-jdbc-clickhouse-password nil
+  "Password for ClickHouse JDBC live tests.  Non-nil enables the :clickhouse-live suite.")
+(defvar clutch-db-test-jdbc-clickhouse-database "default"
+  "Database name for ClickHouse JDBC live tests.")
+
 (defmacro clutch-db-test--with-oracle (var &rest body)
   "Execute BODY with VAR bound to a live Oracle JDBC connection.
 Skips if `clutch-db-test-jdbc-oracle-password' is nil."
@@ -1585,6 +1644,43 @@ Skips if `clutch-db-test-jdbc-oracle-password' is nil."
                         :user clutch-db-test-jdbc-oracle-user
                         :password clutch-db-test-jdbc-oracle-password
                         :database clutch-db-test-jdbc-oracle-service))))
+       (unwind-protect
+           (progn ,@body)
+         (clutch-db-disconnect ,var)))))
+
+(defmacro clutch-db-test--with-mssql (var &rest body)
+  "Execute BODY with VAR bound to a live SQL Server JDBC connection.
+Skips if `clutch-db-test-jdbc-mssql-password' is nil."
+  (declare (indent 1))
+  `(if (null clutch-db-test-jdbc-mssql-password)
+       (ert-skip "Set clutch-db-test-jdbc-mssql-password to enable SQL Server live tests")
+     (require 'clutch-db-jdbc)
+     (let ((,var (clutch-db-connect
+                  'sqlserver
+                  (list :host clutch-db-test-jdbc-mssql-host
+                        :port clutch-db-test-jdbc-mssql-port
+                        :user clutch-db-test-jdbc-mssql-user
+                        :password clutch-db-test-jdbc-mssql-password
+                        :database clutch-db-test-jdbc-mssql-database
+                        :props '(("trustServerCertificate" . "true"))))))
+       (unwind-protect
+           (progn ,@body)
+         (clutch-db-disconnect ,var)))))
+
+(defmacro clutch-db-test--with-clickhouse (var &rest body)
+  "Execute BODY with VAR bound to a live ClickHouse JDBC connection.
+Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
+  (declare (indent 1))
+  `(if (null clutch-db-test-jdbc-clickhouse-password)
+       (ert-skip "Set clutch-db-test-jdbc-clickhouse-password to enable ClickHouse live tests")
+     (require 'clutch-db-jdbc)
+     (let ((,var (clutch-db-connect
+                  'clickhouse
+                  (list :host clutch-db-test-jdbc-clickhouse-host
+                        :port clutch-db-test-jdbc-clickhouse-port
+                        :user clutch-db-test-jdbc-clickhouse-user
+                        :password clutch-db-test-jdbc-clickhouse-password
+                        :database clutch-db-test-jdbc-clickhouse-database))))
        (unwind-protect
            (progn ,@body)
          (clutch-db-disconnect ,var)))))
@@ -1713,6 +1809,110 @@ Skips if `clutch-db-test-jdbc-oracle-password' is nil."
         (should (equal (caar (clutch-db-result-rows result)) "42")))
       (should-not (gethash request-id clutch-jdbc--ignored-response-ids)))))
 
+(ert-deftest clutch-db-test-jdbc-oracle-live-wire-query-error-carries-diagnostics ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Wire-level Oracle JDBC errors should return structured diagnostics."
+  (clutch-db-test--with-oracle conn
+    (let* ((token (format "definitely_missing_%d" (abs (random 999999))))
+           (request-id
+            (clutch-jdbc--send
+             "execute"
+             `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+               (sql . ,(format "SELECT %s FROM DUAL" token))
+               (fetch-size . ,clutch-jdbc-fetch-size))))
+           (response (clutch-jdbc--recv-response
+                      request-id
+                      (clutch-jdbc--conn-rpc-timeout conn)
+                      "execute")))
+      (should-not (eq t (plist-get response :ok)))
+      (let ((diag (plist-get response :diag)))
+        (should (equal (plist-get diag :op) "execute"))
+        (should (= (plist-get diag :request-id) request-id))
+        (should (= (plist-get diag :conn-id) (clutch-jdbc-conn-conn-id conn)))
+        (should (equal (plist-get diag :category) "query"))
+        (should (string-match-p
+                 (upcase token)
+                 (upcase (plist-get diag :raw-message)))))
+      (let ((result (clutch-db-query conn "SELECT 42 AS answer FROM DUAL")))
+        (should (equal (caar (clutch-db-result-rows result)) "42"))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-query-error-caches-diagnostics ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "High-level Oracle JDBC query errors should stay on the current connection."
+  (let ((clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
+    (clutch-db-test--with-oracle conn
+      (let ((token (format "definitely_missing_%d" (abs (random 999999)))))
+        (condition-case err
+            (progn
+              (clutch-db-query conn (format "SELECT %s FROM DUAL" token))
+              (should nil))
+          (clutch-db-error
+           (should (stringp (cadr err)))
+           (let ((details (clutch-db-error-details conn)))
+             (should (equal (plist-get (plist-get details :diag) :op) "execute"))
+             (should (= (plist-get (plist-get details :diag) :conn-id)
+                        (clutch-jdbc-conn-conn-id conn)))
+             (should (equal (plist-get (plist-get details :diag) :category) "query"))
+             (should (string-match-p
+                      (upcase token)
+                      (upcase (plist-get (plist-get details :diag) :raw-message))))))))
+      (let ((result (clutch-db-query conn "SELECT 43 AS answer FROM DUAL")))
+        (should (equal (caar (clutch-db-result-rows result)) "43"))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-wire-schema-switch-error-carries-generated-sql ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Wire-level Oracle schema-switch failures should expose generated SQL."
+  (clutch-db-test--with-oracle conn
+    (let* ((token (format "MISSING_SCHEMA_%d" (abs (random 999999))))
+           (request-id
+            (clutch-jdbc--send
+             "set-current-schema"
+             `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+               (schema . ,token))))
+           (response (clutch-jdbc--recv-response
+                      request-id
+                      (clutch-jdbc--conn-rpc-timeout conn)
+                      "set-current-schema")))
+      (should-not (eq t (plist-get response :ok)))
+      (let* ((diag (plist-get response :diag))
+             (context (plist-get diag :context))
+             (generated-sql (plist-get context :generated-sql)))
+        (should (equal (plist-get diag :op) "set-current-schema"))
+        (should (= (plist-get diag :request-id) request-id))
+        (should (= (plist-get diag :conn-id) (clutch-jdbc-conn-conn-id conn)))
+        (should (equal (plist-get diag :category) "metadata"))
+        (should (equal (plist-get context :schema) token))
+        (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" generated-sql))
+        (should (string-match-p token generated-sql)))
+      (let ((result (clutch-db-query conn "SELECT 42 AS answer FROM DUAL")))
+        (should (equal (caar (clutch-db-result-rows result)) "42"))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-schema-switch-error-caches-generated-sql ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "High-level Oracle schema-switch failures should stay on the current connection."
+  (let ((clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
+    (clutch-db-test--with-oracle conn
+      (let ((token (format "MISSING_SCHEMA_%d" (abs (random 999999)))))
+        (condition-case err
+            (progn
+              (clutch-db-set-current-schema conn token)
+              (should nil))
+          (clutch-db-error
+           (should (stringp (cadr err)))
+           (let* ((details (clutch-db-error-details conn))
+                  (diag (plist-get details :diag))
+                  (context (plist-get diag :context))
+                  (generated-sql (plist-get context :generated-sql)))
+             (should (equal (plist-get diag :op) "set-current-schema"))
+             (should (= (plist-get diag :conn-id)
+                        (clutch-jdbc-conn-conn-id conn)))
+             (should (equal (plist-get diag :category) "metadata"))
+             (should (equal (plist-get context :schema) token))
+             (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" generated-sql))
+             (should (string-match-p token generated-sql))))))
+      (let ((result (clutch-db-query conn "SELECT 43 AS answer FROM DUAL")))
+        (should (equal (caar (clutch-db-result-rows result)) "43"))))))
+
 (ert-deftest clutch-db-test-jdbc-oracle-live-low-priv-completion ()
   :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC low-privilege users should still get table completion and discovery."
@@ -1763,6 +1963,68 @@ Skips if `clutch-db-test-jdbc-oracle-password' is nil."
         (ignore-errors
           (clutch-db-query admin (format "DROP USER %s CASCADE" user)))
         (clutch-db-disconnect admin)))))
+
+(ert-deftest clutch-db-test-jdbc-mssql-live-connect ()
+  :tags '(:db-live :jdbc-live :mssql-live)
+  "SQL Server JDBC connection should return a live conn."
+  (clutch-db-test--with-mssql conn
+    (should (clutch-db-live-p conn))
+    (should (equal (clutch-db-display-name conn) "SQL Server"))))
+
+(ert-deftest clutch-db-test-jdbc-mssql-live-query ()
+  :tags '(:db-live :jdbc-live :mssql-live)
+  "SQL Server JDBC query should return one row for SELECT 1."
+  (clutch-db-test--with-mssql conn
+    (let ((result (clutch-db-query conn "SELECT 1 AS n")))
+      (should (clutch-db-result-p result))
+      (should (= (length (clutch-db-result-rows result)) 1))
+      (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1")))))
+
+(ert-deftest clutch-db-test-jdbc-mssql-live-dml ()
+  :tags '(:db-live :jdbc-live :mssql-live)
+  "SQL Server JDBC should handle temporary-table DML."
+  (clutch-db-test--with-mssql conn
+    (let ((tbl (format "#cc_test_%d" (abs (random 9999)))))
+      (clutch-db-query conn
+       (format "CREATE TABLE %s (id INT PRIMARY KEY, val NVARCHAR(32))" tbl))
+      (let ((result (clutch-db-query conn
+                     (format "INSERT INTO %s VALUES (1, 'a')" tbl))))
+        (should (= (clutch-db-result-affected-rows result) 1)))
+      (let ((result (clutch-db-query conn
+                     (format "SELECT COUNT(*) AS n FROM %s" tbl))))
+        (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1"))))))
+
+(ert-deftest clutch-db-test-jdbc-mssql-live-schema ()
+  :tags '(:db-live :jdbc-live :mssql-live)
+  "SQL Server JDBC schema introspection should return table entries."
+  (clutch-db-test--with-mssql conn
+    (let ((entries (clutch-db-list-table-entries conn)))
+      (should (listp entries))
+      (should (> (length entries) 0)))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-live-connect ()
+  :tags '(:db-live :jdbc-live :clickhouse-live)
+  "ClickHouse JDBC connection should return a live conn."
+  (clutch-db-test--with-clickhouse conn
+    (should (clutch-db-live-p conn))
+    (should (equal (clutch-db-display-name conn) "ClickHouse"))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-live-query ()
+  :tags '(:db-live :jdbc-live :clickhouse-live)
+  "ClickHouse JDBC query should return one row for SELECT 1."
+  (clutch-db-test--with-clickhouse conn
+    (let ((result (clutch-db-query conn "SELECT 1 AS n")))
+      (should (clutch-db-result-p result))
+      (should (= (length (clutch-db-result-rows result)) 1))
+      (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1")))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-live-schema ()
+  :tags '(:db-live :jdbc-live :clickhouse-live)
+  "ClickHouse JDBC schema introspection should return table entries."
+  (clutch-db-test--with-clickhouse conn
+    (let ((entries (clutch-db-list-table-entries conn)))
+      (should (listp entries))
+      (should (> (length entries) 0)))))
 
 ;;;; Unit tests — clutch--format-value and clutch--value-to-literal
 
@@ -2024,6 +2286,98 @@ immediately without touching the agent process."
                  (should (string-match-p "requires a newer Java runtime" (cadr err)))
                  (should (string-match-p "`java'" (cadr err))))))))
       (kill-buffer stderr))))
+
+(ert-deftest clutch-db-test-jdbc-rpc-connect-error-points-to-error-details-command ()
+  "Connect errors should point users at the unified error-details command."
+  (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+            ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 7))
+            ((symbol-function 'clutch-jdbc--recv-response)
+             (lambda (&rest _args)
+               '(:ok nil
+                 :error "diag-token-2038"
+                 :diag (:category "connect")))))
+    (condition-case err
+        (progn
+          (clutch-jdbc--rpc "connect" '((url . "jdbc:clickhouse://127.0.0.1:8123/testdb")))
+          (should nil))
+      (clutch-db-error
+       (should (string-match-p "diag-token-2038" (cadr err)))
+       (should (string-match-p "clutch-show-error-details" (cadr err)))))))
+
+(ert-deftest clutch-db-test-jdbc-rpc-connect-error-carries-structured-details ()
+  "Connect errors should carry structured details in the condition data."
+  (let ((diag '(:category "connect"
+                :op "connect"
+                :request-id 71
+                :exception-class "java.sql.SQLNonTransientConnectionException"
+                :sql-state "08071"
+                :context (:redacted-url "jdbc:clickhouse://127.0.0.1:8123/testdb?password=<redacted>"
+                          :generated-sql "ALTER SESSION SET CURRENT_SCHEMA = \"REPORTING\""
+                          :property-keys ("http_header_COOKIE" "socket_timeout"))
+                :cause-chain ((:exception-class "java.sql.SQLNonTransientConnectionException"
+                               :message "reason-71")
+                              (:exception-class "java.net.ConnectException"
+                               :message "root-71")))))
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 71))
+              ((symbol-function 'clutch-jdbc--recv-response)
+               (lambda (&rest _args)
+                 `(:ok nil
+                   :error "summary-71"
+                   :diag ,diag))))
+      (condition-case err
+          (progn
+            (clutch-jdbc--rpc "connect" '((url . "jdbc:clickhouse://127.0.0.1:8123/testdb")))
+            (should nil))
+        (clutch-db-error
+         (should (string-match-p "summary-71" (cadr err)))
+         (let* ((details (nth 2 err))
+                (diag (plist-get details :diag))
+                (context (plist-get diag :context)))
+           (should (equal (plist-get details :backend) 'jdbc))
+           (should (equal (plist-get details :summary) "summary-71"))
+           (should (equal (plist-get diag :category) "connect"))
+           (should (= (plist-get diag :request-id) 71))
+           (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA"
+                                   (plist-get context :generated-sql)))
+           (should (equal (plist-get context :property-keys)
+                          '("http_header_COOKIE" "socket_timeout")))
+           (should (string-match-p "<redacted>"
+                                   (plist-get context :redacted-url))))
+         (should-not (string-match-p "cookie-secret-71"
+                                     (prin1-to-string (nth 2 err)))))))))
+
+(ert-deftest clutch-db-test-jdbc-rpc-on-conn-stores-structured-diagnostics-on-connection ()
+  "Connection-scoped JDBC errors should stay on that connection."
+  (let ((clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+        (conn (make-clutch-jdbc-conn :process 'proc :conn-id 11 :params '(:driver oracle)))
+        (diag '(:category "query"
+                :op "execute"
+                :request-id 88
+                :conn-id 11
+                :raw-message "reason-88"
+                :context (:generated-sql "SELECT * FROM hidden_table"))))
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 88))
+              ((symbol-function 'clutch-jdbc--recv-response)
+               (lambda (&rest _args)
+                 `(:ok nil
+                   :error "summary-88"
+                   :diag ,diag))))
+      (condition-case err
+          (progn
+            (clutch-jdbc--rpc-on-conn conn "execute" '((conn-id . 11) (sql . "SELECT 1")))
+            (should nil))
+        (clutch-db-error
+         (should (string-match-p "summary-88" (cadr err)))
+         (let* ((details (clutch-db-error-details conn))
+                (stored-diag (plist-get details :diag))
+                (context (plist-get stored-diag :context)))
+           (should (equal (plist-get details :summary) "summary-88"))
+           (should (equal (plist-get stored-diag :op) "execute"))
+           (should (= (plist-get stored-diag :conn-id) 11))
+           (should (string-match-p "hidden_table"
+                                   (plist-get context :generated-sql)))))))))
 
 (ert-deftest clutch-db-test-jdbc-interrupt-query-sends-cancel-and-ignores-late-response ()
   "Interrupting a JDBC query should send cancel and ignore the late response."

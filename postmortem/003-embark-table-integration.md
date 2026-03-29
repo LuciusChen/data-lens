@@ -13,9 +13,9 @@ When a user invoked `C-c C-j`, selected a table in completing-read, then
 wanted to describe it instead, they had to cancel and re-invoke `C-c C-d`.
 No way to switch action mid-flight.
 
-`C-c C-d`'s fallback to completing-read when not on a symbol silently
-duplicated `C-c C-j`'s completing-read, creating two paths to the same
-UX with no distinction the user could reason about.
+The harder problem was that these entry points each carried slightly different
+object-resolution rules.  Users had to predict which command would act at
+point, which one would prompt, and which metadata was already available.
 
 ## Decision
 
@@ -34,7 +34,9 @@ Action map (`clutch-embark-table-actions`, inheriting `embark-general-map`):
 - `d` describe-table
 - `w` copy table name to kill ring
 
-`C-c C-d` made strict: errors if not on a symbol (no fallback).
+`C-c C-d` remains a describe-focused wrapper over the same object resolution
+pipeline.  It resolves the object at point when possible and otherwise prompts
+with the shared picker.
 
 ## Why `category` Metadata for completing-read
 
@@ -51,20 +53,20 @@ command-name-agnostic.
 completing-reads go through it; none need to add category metadata
 individually.
 
-## Why Remove `C-c C-d` Fallback
+## Why Keep Shared Resolution Logic
 
-Before: `C-c C-d` not on symbol → completing-read for describe.
-After: `C-c C-d` not on symbol → `user-error "No table name at point"`.
+`C-c C-j`, `C-c C-d`, and `C-c C-o` now all sit on the same object model and
+resolution path.  The difference is the action they run after resolution:
 
-The fallback created two identical workflows to the same outcome
-(completing-read → describe). With Embark, the unified path is:
-`C-c C-j` (completing-read) → Embark `d` (describe). A second
-completing-read entry point adds no value and confuses the mental model
-of what `C-c C-d` is for.
+- `C-c C-j` prefers browse
+- `C-c C-d` prefers describe
+- `C-c C-o` prefers the action picker
 
-`C-c C-d` now has a single, precise semantics: act on the table whose
-name the cursor is already on. This makes it a genuine complement to
-`C-c C-j`, not a redundant alias.
+Keeping the fallback prompt for `C-c C-d` is intentional.  It preserves the
+direct "describe this object" workflow while still benefiting from the same
+flat picker, object warming, and Embark integration as the other entry points.
+The simplification is in the shared resolver and action model, not in forcing
+every command into an at-point-only contract.
 
 ## Optional Dependency Design
 
