@@ -244,12 +244,12 @@ saved connection already associated with that console, without reopening the
 global connection picker.  To switch to another saved connection, use
 =M-x clutch-query-console=.
 
-For JDBC failures, use =M-x clutch-show-error-details=.  The detailed
-troubleshooting workflow is documented below in the interrupt/error handling
-section.  Inside the details buffer, use =w= to copy the raw backend error and
-=W= to copy the full rendered report.  When you need a deeper trace, enable
-=M-x clutch-debug-mode=, reproduce the failure, then reopen the same details
-buffer.
+For deeper troubleshooting, enable =M-x clutch-debug-mode=, reproduce the
+failure, then inspect =*clutch-debug*=.  Enabling the mode starts a fresh
+capture window and creates that dedicated buffer automatically.  It is the only
+supported debug UI, and it shows problem records, generated/internal SQL when
+relevant, recent redacted debug events, and JDBC stderr/debug payload when
+available.
 
 To activate =clutch-mode= automatically for =.sql= files, add to your config:
 
@@ -935,6 +935,14 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
 - =clutch-read-idle-timeout-seconds= controls query I/O idle timeout (default: 30s).
 - =clutch-query-timeout-seconds= controls database-side statement timeout for JDBC and native PostgreSQL queries (default: 30s).
 - =clutch-jdbc-rpc-timeout-seconds= controls Emacs <-> JDBC agent RPC timeout (default: 30s).
+- =clutch-jdbc-cancel-timeout-seconds= controls how long clutch waits for a JDBC
+  =cancel= acknowledgement (default: 5s).  This is intentionally shorter than
+  the normal JDBC RPC timeout; if cancel does not finish in time, clutch
+  degrades to disconnecting the current connection instead of blocking longer or
+  killing the agent.
+- =clutch-jdbc-disconnect-timeout-seconds= controls how long clutch waits for a
+  JDBC =disconnect= acknowledgement (default: 5s).  A stuck disconnect detaches
+  the local connection state without killing the shared JDBC agent.
 - MySQL connections can override via =:connect-timeout= and =:read-idle-timeout=.
 - PostgreSQL connections can override via =:connect-timeout=, =:read-idle-timeout=, and =:query-timeout=.
 - JDBC connections can override via =:connect-timeout=, =:read-idle-timeout=, =:query-timeout=, and =:rpc-timeout=.
@@ -950,23 +958,21 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
     dead.
   - Backends without explicit interrupt support still fall back to
     disconnect/reconnect semantics.
-- After a JDBC failure, run =M-x clutch-show-error-details= from the relevant
-  buffer.  This is the supported troubleshooting path for JDBC errors.  The
-  details view is strict to the current buffer context: connected buffers show
-  details for their current connection, while unconnected buffers show their
-  own last structured JDBC failure.  Early startup validation errors such as a
-  missing agent jar or Java executable still surface inline at the command
-  boundary.  When the failing path involved
-  hidden/internal SQL, the same details view also shows the generated SQL text
-  that triggered the failure together with the related JDBC agent stderr tail.
-  Use =w= inside that buffer to copy the raw backend message, or =W= to copy
-  the full rendered diagnostics report for issue filing.
 - =M-x clutch-debug-mode= is the opt-in deep-debug workflow and is off by
   default.  When enabled, clutch records a bounded redacted trace of recent
-  connect/query/interrupt events for the current buffer context, and JDBC also
-  requests an additional redacted backend debug payload (currently stack trace +
-  request context).  The same =clutch-show-error-details= buffer shows that
-  extra capture; no separate debug UI is required.
+  connect/query/interrupt/object/metadata events in =*clutch-debug*=, and JDBC
+  also requests an additional redacted backend debug payload (currently stack
+  trace + request context).  Turning the mode on starts a fresh capture window.
+- The supported troubleshooting workflow is:
+  1. enable =M-x clutch-debug-mode=
+  2. reproduce the failure
+  3. inspect =*clutch-debug*=
+- =*clutch-debug*= is the sole supported troubleshooting surface.  It is a
+  single session log, not a per-buffer report command, and it should be read
+  instead of raw stderr buffers.
+- When the failing path involved hidden/internal SQL, the same debug buffer
+  also shows generated SQL together with the related JDBC agent stderr tail and
+  backend debug payload.
 - High-risk DML (=UPDATE/DELETE= without top-level =WHERE=) requires typed
   confirmation (=YES=) before execution.
 

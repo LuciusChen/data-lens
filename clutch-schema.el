@@ -51,11 +51,16 @@
 
 (defvar clutch--object-cache)
 (defvar clutch-connection)
+(defvar clutch-debug-mode nil)
 (defvar clutch-schema-cache-install-batch-size)
 
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
+(declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
 (declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch--cancel-object-warmup "clutch-object" (conn &optional key))
+(declare-function clutch--humanize-db-error "clutch-query" (msg))
+(declare-function clutch--remember-debug-event "clutch" (&rest event))
+(declare-function clutch--remember-problem-record "clutch" (&rest args))
 (declare-function clutch--schedule-object-warmup "clutch-object" (conn))
 (declare-function clutch--refresh-schema-status-ui "clutch" (conn))
 (declare-function clutch--run-db-query "clutch-connection" (conn sql))
@@ -261,7 +266,21 @@ Return non-nil when an asynchronous refresh was started."
        (clutch--install-schema-cache conn table-names ticket))
      (lambda (message)
        (when (clutch--schema-refresh-ticket-current-p conn ticket)
-         (clutch--set-schema-status conn 'failed nil message))))))
+         (clutch--set-schema-status conn 'failed nil message)
+         (clutch--remember-problem-record
+          :connection conn
+          :problem (list :backend (clutch--backend-key-from-conn conn)
+                         :summary (clutch--humanize-db-error message)
+                         :diag (list :category "metadata"
+                                     :op "schema-refresh"
+                                     :raw-message message)))
+         (when clutch-debug-mode
+           (clutch--remember-debug-event
+            :connection conn
+            :op "schema-refresh"
+            :phase "error"
+            :backend (clutch--backend-key-from-conn conn)
+            :summary message)))))))
 
 (defun clutch--refresh-schema-cache (conn)
   "Refresh schema cache for CONN.
@@ -270,12 +289,50 @@ Only loads table names (fast). Column info is loaded lazily."
     (clutch--set-schema-status conn 'refreshing)
     (condition-case err
         (let ((table-names (clutch-db-list-tables conn)))
-          (clutch--install-schema-cache conn table-names ticket))
+          (prog1
+              (clutch--install-schema-cache conn table-names ticket)
+            (when clutch-debug-mode
+              (clutch--remember-debug-event
+               :connection conn
+               :op "schema-refresh"
+               :phase "success"
+               :backend (clutch--backend-key-from-conn conn)
+               :summary (format "Loaded %d tables" (length table-names))))))
       (clutch-db-error
        (clutch--set-schema-status conn 'failed nil (error-message-string err))
+       (clutch--remember-problem-record
+        :connection conn
+        :problem (list :backend (clutch--backend-key-from-conn conn)
+                       :summary (clutch--humanize-db-error
+                                 (error-message-string err))
+                       :diag (list :category "metadata"
+                                   :op "schema-refresh"
+                                   :raw-message (error-message-string err))))
+       (when clutch-debug-mode
+         (clutch--remember-debug-event
+          :connection conn
+          :op "schema-refresh"
+          :phase "error"
+          :backend (clutch--backend-key-from-conn conn)
+          :summary (error-message-string err)))
        nil)
       (error
-      (clutch--set-schema-status conn 'failed nil (error-message-string err))
+       (clutch--set-schema-status conn 'failed nil (error-message-string err))
+       (clutch--remember-problem-record
+        :connection conn
+        :problem (list :backend (clutch--backend-key-from-conn conn)
+                       :summary (clutch--humanize-db-error
+                                 (error-message-string err))
+                       :diag (list :category "metadata"
+                                   :op "schema-refresh"
+                                   :raw-message (error-message-string err))))
+       (when clutch-debug-mode
+         (clutch--remember-debug-event
+          :connection conn
+          :op "schema-refresh"
+          :phase "error"
+          :backend (clutch--backend-key-from-conn conn)
+          :summary (error-message-string err)))
        nil))))
 
 (defun clutch--prime-schema-cache (conn)
@@ -319,20 +376,29 @@ silently returning nil."
         cached
       (if (eq (plist-get status :state) 'failed)
           (when strict
-            (signal 'clutch-db-error
-                    (list (or (plist-get status :error)
-                              (format "Failed to load column details for %s"
-                                      table)))))
+            (let* ((message (or (plist-get status :error)
+                                (format "Failed to load column details for %s"
+                                        table)))
+                   (details (clutch-db-error-details conn)))
+              (signal 'clutch-db-error
+                      (if details
+                          (list message (copy-tree details))
+                        (list message)))))
         (condition-case err
             (let ((details (clutch-db-column-details conn table)))
               (puthash table details cache)
               (clutch--clear-column-details-status conn table)
               details)
           (clutch-db-error
-           (let ((message (error-message-string err)))
+           (let* ((message (error-message-string err))
+                  (details (or (nth 2 err)
+                               (clutch-db-error-details conn))))
              (clutch--set-column-details-status conn table 'failed message)
              (when strict
-               (signal 'clutch-db-error (list message)))
+               (signal 'clutch-db-error
+                       (if details
+                           (list message (copy-tree details))
+                         (list message))))
              nil)))))))
 
 (defun clutch--drain-column-details-async (conn)

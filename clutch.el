@@ -370,13 +370,19 @@ Only recorded while `clutch-debug-mode' is enabled."
   :type 'natnum
   :group 'clutch)
 
+(defconst clutch-debug-buffer-name "*clutch-debug*"
+  "Name of the dedicated clutch debug buffer.")
+
 ;;;; Buffer-local variables
 
 (defvar-local clutch-connection nil
   "Current database connection for this buffer.")
 
 (defvar-local clutch--buffer-error-details nil
-  "Structured error details scoped to this buffer when no connection exists.")
+  "Current problem record scoped to this buffer.")
+
+(defvar clutch--problem-records-by-conn (make-hash-table :test 'eq :weakness 'key)
+  "Current problem records keyed by live connection object.")
 
 (defvar-local clutch--executing-p nil
   "Non-nil while a query is executing in this buffer.
@@ -434,23 +440,282 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar clutch--debug-events-by-conn (make-hash-table :test 'eq :weakness 'key)
   "Recent redacted debug events keyed by live connection object.")
 
+(defvar clutch-debug-buffer-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `clutch-debug-buffer-mode'.")
+
+(define-derived-mode clutch-debug-buffer-mode special-mode "clutch-debug"
+  "Mode for inspecting the dedicated clutch debug buffer.")
+
+(defun clutch--debug-buffer ()
+  "Return the dedicated clutch debug buffer, creating it if needed."
+  (let ((buf (get-buffer-create clutch-debug-buffer-name)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'clutch-debug-buffer-mode)
+        (clutch-debug-buffer-mode))
+      (setq-local header-line-format " Clutch debug capture"))
+    buf))
+
+(defun clutch--reset-debug-buffer ()
+  "Reset the dedicated clutch debug buffer for a new capture window."
+  (with-current-buffer (clutch--debug-buffer)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert (format "Clutch debug capture started %s\n\n"
+                      (format-time-string "%Y-%m-%d %H:%M:%S"))))))
+
+(defun clutch--debug-buffer-source-label (buffer)
+  "Return a human-readable source label for BUFFER."
+  (when (buffer-live-p buffer)
+    (buffer-name buffer)))
+
+(defun clutch--debug-buffer-connection-label (connection)
+  "Return a human-readable connection label for CONNECTION."
+  (when connection
+    (condition-case nil
+        (clutch--connection-key connection)
+      (error nil))))
+
+(defun clutch--format-debug-plist (plist)
+  "Return a human-readable string for PLIST."
+  (string-trim-right (pp-to-string plist)))
+
+(defun clutch--debug-context-without-inline-sql (context)
+  "Return CONTEXT plist without inline SQL payload entries."
+  (when context
+    (cl-loop for (key val) on context by #'cddr
+             unless (memq key '(:generated-sql :sql))
+             append (list key val))))
+
+(defun clutch--append-debug-buffer-entry (heading body)
+  "Append HEADING and BODY to the dedicated debug buffer."
+  (with-current-buffer (clutch--debug-buffer)
+    (let ((inhibit-read-only t))
+      (goto-char (point-max))
+      (unless (bobp)
+        (insert "\n"))
+      (insert heading "\n")
+      (when body
+        (insert body))
+      (unless (or (bobp) (eq (char-before) ?\n))
+        (insert "\n")))))
+
+(defun clutch--append-problem-record-to-debug-buffer (buffer connection problem)
+  "Append PROBLEM for BUFFER and CONNECTION to the dedicated debug buffer."
+  (when (and clutch-debug-mode problem)
+    (let* ((backend (plist-get problem :backend))
+           (diag (plist-get problem :diag))
+           (debug-payload (plist-get problem :debug))
+           (stderr-tail (plist-get problem :stderr-tail))
+           (context (copy-tree (plist-get diag :context)))
+           (sql (plist-get context :sql))
+           (generated-sql (plist-get context :generated-sql))
+           (display-context
+            (clutch--debug-context-without-inline-sql context))
+           (heading
+            (string-join
+             (delq nil
+                   (list (format "[%s] problem"
+                                 (format-time-string "%Y-%m-%d %H:%M:%S"))
+                         (and backend (upcase (symbol-name backend)))
+                         (clutch--debug-buffer-source-label buffer)
+                         (clutch--debug-buffer-connection-label connection)
+                         (plist-get problem :summary)))
+             " | "))
+           (body
+            (with-temp-buffer
+              (when-let* ((category (plist-get diag :category)))
+                (insert (format "Category: %s\n" category)))
+              (when-let* ((op (plist-get diag :op)))
+                (insert (format "Operation: %s\n" op)))
+              (when-let* ((request-id (plist-get diag :request-id)))
+                (insert (format "Request ID: %s\n" request-id)))
+              (when-let* ((conn-id (plist-get diag :conn-id)))
+                (insert (format "Conn ID: %s\n" conn-id)))
+              (when-let* ((exception-class (plist-get diag :exception-class)))
+                (insert (format "Exception: %s\n" exception-class)))
+              (when-let* ((sql-state (plist-get diag :sql-state)))
+                (insert (format "SQLState: %s\n" sql-state)))
+              (when-let* ((vendor-code (plist-get diag :vendor-code)))
+                (insert (format "Vendor code: %s\n" vendor-code)))
+              (when-let* ((raw-message (plist-get diag :raw-message)))
+                (insert (format "Raw message: %s\n" raw-message)))
+              (when sql
+                (insert "\nSQL\n" sql "\n"))
+              (when generated-sql
+                (insert "\nGenerated SQL\n" generated-sql "\n"))
+              (when display-context
+                (insert "\nContext\n"
+                        (clutch--format-debug-plist display-context)
+                        "\n"))
+              (when-let* ((cause-chain (plist-get diag :cause-chain)))
+                (insert "\nCause chain\n"
+                        (clutch--format-debug-plist cause-chain)
+                        "\n"))
+              (when debug-payload
+                (insert "\nBackend debug\n"
+                        (clutch--format-debug-plist debug-payload)
+                        "\n"))
+              (when stderr-tail
+                (insert "\nAgent stderr tail\n" stderr-tail "\n"))
+              (string-trim-right (buffer-string)))))
+      (clutch--append-debug-buffer-entry heading body))))
+
+(defun clutch--append-debug-event-to-buffer (buffer connection event)
+  "Append EVENT for BUFFER and CONNECTION to the dedicated debug buffer."
+  (when clutch-debug-mode
+    (let* ((backend (plist-get event :backend))
+           (heading
+            (string-join
+             (delq nil
+                   (list (format "[%s] %s"
+                                 (or (plist-get event :time)
+                                     (format-time-string "%Y-%m-%d %H:%M:%S"))
+                                 (if-let* ((phase (plist-get event :phase)))
+                                     (format "%s/%s" (plist-get event :op) phase)
+                                   (plist-get event :op)))
+                         (and backend (upcase (symbol-name backend)))
+                         (clutch--debug-buffer-source-label buffer)
+                         (clutch--debug-buffer-connection-label connection)
+                         (when-let* ((elapsed (plist-get event :elapsed)))
+                           (clutch--format-elapsed elapsed))
+                         (plist-get event :summary)
+                         (plist-get event :sql-preview)))
+             " | "))
+           (body
+            (when-let* ((context (plist-get event :context)))
+              (concat "Context\n"
+                      (clutch--format-debug-plist context)))))
+      (clutch--append-debug-buffer-entry heading body))))
+
+(defun clutch--clear-problem-capture ()
+  "Forget all captured problem records across buffers and connections."
+  (let (connections)
+    (setq clutch--problem-records-by-conn
+          (make-hash-table :test 'eq :weakness 'key))
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when clutch-connection
+            (push clutch-connection connections))
+          (setq-local clutch--buffer-error-details nil))))
+    (dolist (conn (cl-delete-duplicates connections :test #'eq))
+      (clutch-db-clear-error-details conn))))
+
 (defun clutch--clear-debug-capture ()
-  "Forget all captured debug events across buffers and connections."
+  "Forget captured debug events and reset the dedicated debug buffer."
   (setq clutch--debug-events-by-conn (make-hash-table :test 'eq :weakness 'key))
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (setq-local clutch--debug-events nil)))))
+        (setq-local clutch--debug-events nil))))
+  (clutch--reset-debug-buffer))
+
+(defun clutch--replay-problem-records-to-debug-buffer ()
+  "Replay stored problem records into the dedicated debug buffer.
+This preserves historical failure context when debug capture starts after a
+problem was already recorded."
+  (let (records seen)
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when clutch--buffer-error-details
+            (let ((entry (list :buffer buf
+                               :connection clutch-connection
+                               :problem (copy-tree clutch--buffer-error-details))))
+              (unless (member entry seen)
+                (push entry seen)
+                (push entry records)))))))
+    (maphash
+     (lambda (connection problem)
+       (let ((entry (list :buffer (clutch--attached-buffer-for-connection connection)
+                          :connection connection
+                          :problem (copy-tree problem))))
+         (unless (member entry seen)
+           (push entry seen)
+           (push entry records))))
+     clutch--problem-records-by-conn)
+    (when records
+      (clutch--append-debug-buffer-entry
+       "[historical] Problem records captured before debug mode was enabled"
+       nil)
+      (dolist (entry (nreverse records))
+        (clutch--append-problem-record-to-debug-buffer
+         (plist-get entry :buffer)
+         (plist-get entry :connection)
+         (plist-get entry :problem))))))
 
 (define-minor-mode clutch-debug-mode
   "Capture additional redacted troubleshooting data for clutch workflows.
 When enabled, clutch records a bounded recent-event trace per buffer and per
-connection.  JDBC requests also ask the agent for an optional debug payload.
-Inspect captured data through `clutch-show-error-details'."
+connection.  JDBC requests also ask the agent for an optional debug payload,
+and captured output is appended to the dedicated `*clutch-debug*' buffer."
   :global t
   :lighter " ClutchDbg"
   (when clutch-debug-mode
-    (clutch--clear-debug-capture)))
+    (clutch--clear-debug-capture)
+    (clutch--replay-problem-records-to-debug-buffer)))
+
+(defun clutch--remember-problem-record (&rest args)
+  "Store the current problem record described by ARGS.
+Recognized keys are :buffer, :connection, and :problem.  Problem records are
+stored buffer-locally and, when CONNECTION is non-nil, in the shared
+connection-scoped registry."
+  (let* ((buffer (or (plist-get args :buffer) (current-buffer)))
+         (connection (plist-get args :connection))
+         (problem (copy-tree (plist-get args :problem))))
+    (when (and buffer (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (setq-local clutch--buffer-error-details problem)))
+    (when connection
+      (if problem
+          (puthash connection problem clutch--problem-records-by-conn)
+        (remhash connection clutch--problem-records-by-conn)))
+    (when problem
+      (clutch--append-problem-record-to-debug-buffer buffer connection problem))
+    problem))
+
+(defun clutch--forget-problem-record (&optional buffer connection)
+  "Forget the current problem record for BUFFER and CONNECTION."
+  (when (and buffer (buffer-live-p buffer))
+    (with-current-buffer buffer
+      (setq-local clutch--buffer-error-details nil)))
+  (when connection
+    (remhash connection clutch--problem-records-by-conn)))
+
+(defun clutch--forget-problem-records-for-connection (connection)
+  "Forget problem records for CONNECTION across all attached buffers."
+  (when connection
+    (remhash connection clutch--problem-records-by-conn)
+    (dolist (buf (buffer-list))
+      (when (and (buffer-live-p buf)
+                 (eq (buffer-local-value 'clutch-connection buf) connection))
+        (with-current-buffer buf
+          (setq-local clutch--buffer-error-details nil))))))
+
+(defun clutch--clear-connection-problem-capture (connection)
+  "Forget problem records and backend-local diagnostics for CONNECTION."
+  (when connection
+    (clutch--forget-problem-records-for-connection connection)
+    (clutch-db-clear-error-details connection)))
+
+(defun clutch--problem-record-for-connection (connection)
+  "Return the current problem record for CONNECTION, or nil."
+  (when connection
+    (copy-tree (gethash connection clutch--problem-records-by-conn))))
+
+(defun clutch--attached-buffer-for-connection (connection)
+  "Return one live buffer attached to CONNECTION, or nil."
+  (when connection
+    (or (and (eq clutch-connection connection)
+             (current-buffer))
+        (cl-loop for buf in (buffer-list)
+                 when (and (buffer-live-p buf)
+                           (eq (buffer-local-value 'clutch-connection buf) connection))
+                 return buf))))
 
 (defun clutch--debug-sql-preview (sql)
   "Return a compact single-line preview of SQL."
@@ -499,18 +764,8 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
                  (clutch--debug-trim-events
                   (cons normalized (gethash conn clutch--debug-events-by-conn)))
                  clutch--debug-events-by-conn))
+      (clutch--append-debug-event-to-buffer buffer conn normalized)
       normalized)))
-
-(defun clutch--debug-events-for-current-buffer ()
-  "Return the debug event trace relevant to the current buffer."
-  (let ((events (copy-tree clutch--debug-events)))
-    (when clutch-connection
-      (setq events (append events
-                           (copy-tree
-                            (gethash clutch-connection
-                                     clutch--debug-events-by-conn)))))
-    (clutch--debug-trim-events
-     (cl-delete-duplicates events :test #'equal))))
 
 (defun clutch--effective-sql-product (params)
   "Return the SQL product to use for connection PARAMS."
@@ -542,11 +797,34 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
     (puthash message-text t clutch--completion-metadata-warning-cache)
     (message "Completion metadata unavailable: %s" message-text)))
 
+(defun clutch--remember-recoverable-metadata-warning (connection op err &optional context)
+  "Record a recoverable metadata warning for CONNECTION and operation OP.
+ERR is the original condition object.  Optional CONTEXT is attached to the
+debug event when `clutch-debug-mode' is enabled."
+  (when clutch-debug-mode
+    (let* ((buffer (or (clutch--attached-buffer-for-connection connection)
+                       (current-buffer)))
+           (summary (clutch--humanize-db-error (error-message-string err)))
+           (backend (and connection
+                         (condition-case nil
+                             (clutch--backend-key-from-conn connection)
+                           (error nil)))))
+      (clutch--remember-debug-event
+       :buffer buffer
+       :connection connection
+       :op op
+       :phase "warning"
+       :backend backend
+       :summary summary
+       :context context))))
+
 (defun clutch--safe-completion-call (thunk)
   "Call THUNK for completion and swallow recoverable metadata errors."
   (condition-case err
       (funcall thunk)
     (clutch-db-error
+     (clutch--remember-recoverable-metadata-warning
+      clutch-connection "completion" err)
      (if (clutch--oracle-i18n-missing-p err)
          (clutch--warn-oracle-i18n-once)
        (clutch--warn-completion-metadata-error-once
@@ -852,17 +1130,36 @@ executed outside clutch that would otherwise leave stale completions."
           (unless (string-empty-p schema)
             (if (and current (string-equal-ignore-case schema current))
                 (message "Already on schema %s" current)
-              (clutch-db-set-current-schema conn schema)
-              (clutch--update-connection-params-for-buffers
-               conn
-               (lambda (params)
-                 (if (eq (plist-get params :backend) 'mysql)
-                     (plist-put params :database schema)
-                   (plist-put params :schema schema))))
-              (clutch--clear-connection-metadata-caches conn old-key)
-              (clutch--clear-connection-metadata-caches conn)
-              (clutch--refresh-current-schema t)
-              (message "Current schema: %s" schema))))))))
+              (condition-case err
+                  (progn
+                    (clutch-db-set-current-schema conn schema)
+                    (clutch--clear-connection-problem-capture conn)
+                    (clutch--update-connection-params-for-buffers
+                     conn
+                     (lambda (params)
+                       (if (eq (plist-get params :backend) 'mysql)
+                           (plist-put params :database schema)
+                         (plist-put params :schema schema))))
+                    (clutch--clear-connection-metadata-caches conn old-key)
+                    (clutch--clear-connection-metadata-caches conn)
+                    (clutch--refresh-current-schema t)
+                    (message "Current schema: %s" schema))
+                (clutch-db-error
+                 (let* ((message (error-message-string err))
+                        (summary (clutch--humanize-db-error message)))
+                   (clutch--remember-buffer-query-error-details
+                    (current-buffer) conn nil err)
+                   (when clutch-debug-mode
+                     (clutch--remember-debug-event
+                      :connection conn
+                      :op "schema-switch"
+                      :phase "error"
+                      :backend (clutch--backend-key-from-conn conn)
+                      :summary summary
+                      :context (list :schema schema
+                                     :current-schema current)))
+                   (user-error "%s"
+                               (clutch--debug-workflow-message summary))))))))))))
 
 (defun clutch--eldoc-column-extras (col)
   "Return a space-joined string of constraint annotations for COL plist."
@@ -2302,8 +2599,30 @@ Uses the rewrite layer so complex SQL is handled via derived-table count."
            (result (condition-case err
                        (clutch--run-db-query conn count-sql)
                      (clutch-db-error
-                      (user-error "COUNT query error: %s"
-                                  (error-message-string err)))))
+                      (clutch--remember-problem-record
+                       :buffer (current-buffer)
+                       :connection conn
+                       :problem (list :backend (clutch--backend-key-from-conn conn)
+                                      :summary (clutch--humanize-db-error
+                                                (error-message-string err))
+                                      :diag (list :category "query"
+                                                  :op "count"
+                                                  :raw-message (error-message-string err)
+                                                  :context (list :generated-sql count-sql))))
+                      (when clutch-debug-mode
+                        (clutch--remember-debug-event
+                         :buffer (current-buffer)
+                         :connection conn
+                         :op "count"
+                         :phase "error"
+                         :backend (clutch--backend-key-from-conn conn)
+                         :summary (error-message-string err)
+                         :sql count-sql))
+                      (user-error "%s"
+                                  (clutch--debug-workflow-message
+                                   (format "COUNT query error: %s"
+                                           (clutch--humanize-db-error
+                                            (error-message-string err))))))))
            (count-val (caar (clutch-db-result-rows result))))
       (setq-local clutch--page-total-rows
                   (if (numberp count-val) count-val

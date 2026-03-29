@@ -2727,6 +2727,63 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should ensured)
         (should (eq captured-conn 'new-conn))))))
 
+(ert-deftest clutch-test-execute-page-remembers-error-details-and-debug-event ()
+  "Paging failures should populate current-buffer error details and trace."
+  (with-temp-buffer
+    (let ((clutch-debug-mode t)
+          (raw-message "Connection refused (host=db.example.com, port=3306)"))
+      (setq-local clutch-connection 'fake-conn
+                  clutch--base-query "SELECT * FROM t"
+                  clutch-result-max-rows 100)
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch--build-paged-sql)
+                 (lambda (_sql _page-num _page-size &optional _order-by)
+                   "SELECT * FROM t LIMIT 100 OFFSET 0"))
+                ((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn) 'pg))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn _sql)
+                   (signal 'clutch-db-error (list raw-message)))))
+        (let ((display-summary
+               (condition-case err
+                   (signal 'clutch-db-error (list raw-message))
+                 (clutch-db-error
+                  (clutch--humanize-db-error (error-message-string err))))))
+          (should-error (clutch--execute-page 0) :type 'user-error)
+          (let* ((details clutch--buffer-error-details)
+                 (diag (plist-get details :diag))
+                 (event (car clutch--debug-events)))
+            (should details)
+            (should (eq (plist-get details :backend) 'pg))
+            (should (equal (plist-get details :summary)
+                           (clutch--humanize-db-error raw-message)))
+            (should (equal (plist-get diag :raw-message) raw-message))
+            (should (equal (plist-get (plist-get diag :context) :sql)
+                           "SELECT * FROM t"))
+            (should event)
+            (should (equal (plist-get event :phase) "error"))
+            (should (equal (plist-get event :summary)
+                           display-summary))))))))
+
+(ert-deftest clutch-test-execute-dml-skips-debug-backend-lookup-when-disabled ()
+  "DML execution should not consult debug-only backend state when debug is off."
+  (with-temp-buffer
+    (let ((clutch-debug-mode nil)
+          rendered)
+      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn)
+                   (error "debug-disabled path should not resolve backend key")))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn _sql)
+                   (make-clutch-db-result :affected-rows 1)))
+                ((symbol-function 'clutch--schema-affecting-query-p)
+                 (lambda (_sql) nil))
+                ((symbol-function 'clutch--display-result)
+                 (lambda (result sql _elapsed)
+                   (setq rendered (list result sql)))))
+        (should (clutch--execute-dml "UPDATE demo SET enabled = 1" 'fake-conn))
+        (should rendered)))))
+
 (ert-deftest clutch-test-count-total-ensures-connection-before-query ()
   "COUNT should use the shared reconnect path before querying."
   (with-temp-buffer
@@ -3337,8 +3394,45 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (condition-case err
         (clutch--build-conn '(:backend oracle :host "db" :port 1521 :user "u"))
       (user-error
-       (should (equal (cadr err)
-                      "Connection failed (oracle): Connection attempt timed out"))))))
+       (should (string-match-p
+                "Connection failed [(]oracle[)]: Connection attempt timed out"
+                (cadr err)))
+       (should (string-match-p "clutch-debug-mode" (cadr err)))
+       (should (string-match-p (regexp-quote clutch-debug-buffer-name)
+                               (cadr err)))))))
+
+(ert-deftest clutch-test-build-conn-enriches-buffer-error-details ()
+  "Connect failures should keep enriched current-buffer error details."
+  (with-temp-buffer
+    (let ((raw-message "Connection refused (host=db.example.com, port=3306)"))
+      (cl-letf (((symbol-function 'clutch--resolve-password)
+                 (lambda (_params) nil))
+                ((symbol-function 'clutch-db-connect)
+                 (lambda (&rest _args)
+                   (signal 'clutch-db-error (list raw-message)))))
+        (let (signaled)
+          (condition-case err
+              (clutch--build-conn
+               '(:backend oracle :host "db.example.com" :port 1521
+                 :user "scott" :database "orcl"))
+            (user-error
+             (setq signaled err)))
+          (should signaled)
+          (should (equal (cadr signaled)
+                         (clutch--debug-workflow-message
+                          (clutch--humanize-db-error raw-message))))
+          (let* ((details clutch--buffer-error-details)
+                 (diag (plist-get details :diag))
+                 (context (plist-get diag :context)))
+            (should details)
+            (should (eq (plist-get details :backend) 'oracle))
+            (should (equal (plist-get details :summary)
+                           (clutch--humanize-db-error raw-message)))
+            (should (equal (plist-get diag :raw-message) raw-message))
+            (should (equal (plist-get context :host) "db.example.com"))
+            (should (equal (plist-get context :port) 1521))
+            (should (equal (plist-get context :database) "orcl"))
+            (should (eq (plist-get context :backend) 'oracle))))))))
 
 (ert-deftest clutch-test-build-conn-skips-timeouts-for-sqlite ()
   "Test that `clutch--build-conn' does not pass network timeout keys to sqlite."
@@ -3513,8 +3607,43 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (should-not (string-prefix-p "Database error:" result))
     (should (string-match-p "ORA-00942" result))))
 
-(ert-deftest clutch-test-show-error-details-renders-connection-diagnostics ()
-  "The error details command should render current-connection diagnostics."
+(ert-deftest clutch-test-debug-buffer-removes-old-details-commands ()
+  "The old error-details workflow should be deleted outright."
+  (should-not (fboundp 'clutch-show-last-error-details))
+  (should-not (fboundp 'clutch-show-error-details))
+  (should-not (fboundp 'clutch-debug-buffer))
+  (should-not (fboundp 'clutch-error-details-refresh))
+  (should-not (fboundp 'clutch-error-details-copy-message))
+  (should-not (fboundp 'clutch-error-details-copy-all))
+  (should-not (boundp 'clutch-error-details-mode-map)))
+
+(defun clutch-test--debug-buffer-string ()
+  "Return the current dedicated clutch debug buffer contents."
+  (let ((buf (get-buffer clutch-debug-buffer-name)))
+    (should (buffer-live-p buf))
+    (with-current-buffer buf
+      (buffer-string))))
+
+(ert-deftest clutch-test-debug-mode-creates-dedicated-buffer ()
+  "Enabling debug mode should create the dedicated debug buffer immediately."
+  (when-let* ((buf (get-buffer clutch-debug-buffer-name)))
+    (kill-buffer buf))
+  (let ((clutch-debug-mode nil))
+    (unwind-protect
+        (progn
+          (clutch-debug-mode 1)
+          (let ((buf (get-buffer clutch-debug-buffer-name)))
+            (should (buffer-live-p buf))
+            (with-current-buffer buf
+              (should (derived-mode-p 'clutch-debug-buffer-mode))
+              (should (string-match-p "Clutch debug capture started"
+                                      (buffer-string))))))
+      (clutch-debug-mode -1)
+      (when-let* ((buf (get-buffer clutch-debug-buffer-name)))
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-debug-buffer-appends-current-buffer-failure ()
+  "Problem records should be appended to the dedicated debug buffer."
   (let ((details '(:backend jdbc
                    :summary "Connection failed [check host and port]"
                    :diag (:category "connect"
@@ -3531,46 +3660,38 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                                          :message "root-71")))
                    :stderr-tail "Connect request 71 failed")))
     (with-temp-buffer
-      (setq-local clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch-db-error-details)
-                 (lambda (conn)
-                   (and (eq conn 'fake-conn) details)))
-                ((symbol-function 'pop-to-buffer)
-                 (lambda (buf &rest _args) buf)))
-        (let ((buf (clutch-show-error-details)))
-          (with-current-buffer buf
-            (should (eq major-mode 'clutch-error-details-mode))
-            (should (string-match-p "Connection failed" (buffer-string)))
-            (should (string-match-p "SQLState" (buffer-string)))
-            (should (string-match-p "08071" (buffer-string)))
-            (should (string-match-p "Generated SQL" (buffer-string)))
-            (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" (buffer-string)))
-            (should (string-match-p "http_header_COOKIE" (buffer-string)))
-            (should (string-match-p "<redacted>" (buffer-string)))
-            (should (string-match-p "Connect request 71 failed" (buffer-string)))))))))
+      (let ((clutch-debug-mode t))
+        (clutch--clear-debug-capture)
+        (clutch--remember-problem-record
+         :buffer (current-buffer)
+         :problem details)
+        (let ((text (clutch-test--debug-buffer-string)))
+          (should (string-match-p "Connection failed" text))
+          (should (string-match-p "08071" text))
+          (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" text))
+          (should (string-match-p "Connect request 71 failed" text)))))))
 
-(ert-deftest clutch-test-show-error-details-renders-buffer-details-without-connection ()
-  "The error details command should use current-buffer details before connect."
-  (let ((details '(:backend jdbc
-                   :summary "Connect failed"
-                   :diag (:category "connect"
-                          :op "connect"
-                          :request-id 17
-                          :context (:redacted-url "jdbc:clickhouse://127.0.0.1:8123/testdb"))
-                   :stderr-tail "Connect request 17 failed")))
+(ert-deftest clutch-test-debug-buffer-appends-connection-problem-record ()
+  "Connection-scoped problem records should also be appended to the debug buffer."
+  (let ((problem '(:backend oracle
+                   :summary "Metadata failed"
+                   :diag (:category "metadata"
+                          :op "get-columns"
+                          :conn-id 88
+                          :raw-message "ORA-12592: TNS:bad packet"))))
     (with-temp-buffer
-      (setq-local clutch--buffer-error-details details)
-      (cl-letf (((symbol-function 'pop-to-buffer)
-               (lambda (buf &rest _args) buf)))
-        (let ((buf (clutch-show-error-details)))
-          (with-current-buffer buf
-            (should (string-match-p "Connect failed" (buffer-string)))
-            (should (string-match-p "Request ID" (buffer-string)))
-            (should (string-match-p "17" (buffer-string)))
-            (should (string-match-p "Connect request 17 failed" (buffer-string)))))))))
+      (let ((clutch-debug-mode t))
+        (clutch--clear-debug-capture)
+        (setq-local clutch-connection 'fake-conn)
+        (clutch--remember-problem-record
+         :connection 'fake-conn
+         :problem problem)
+        (let ((text (clutch-test--debug-buffer-string)))
+          (should (string-match-p "Metadata failed" text))
+          (should (string-match-p "get-columns" text)))))))
 
-(ert-deftest clutch-test-show-error-details-renders-debug-trace-when-enabled ()
-  "Debug mode should surface recent captured events in the details buffer."
+(ert-deftest clutch-test-debug-buffer-appends-debug-trace-when-enabled ()
+  "Debug mode should append recent captured events to the debug buffer."
   (let ((details '(:backend jdbc
                    :summary "Query failed"
                    :diag (:category "query"
@@ -3578,6 +3699,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                           :raw-message "ORA-00942"))))
     (with-temp-buffer
       (let ((clutch-debug-mode t))
+        (clutch--clear-debug-capture)
         (setq-local clutch--buffer-error-details details)
         (clutch--remember-debug-event
          :op "execute"
@@ -3585,36 +3707,126 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
          :backend 'oracle
          :summary "Query failed"
          :sql "SELECT * FROM missing_table")
-        (cl-letf (((symbol-function 'pop-to-buffer)
-                   (lambda (buf &rest _args) buf)))
-          (let ((buf (clutch-show-error-details)))
-            (with-current-buffer buf
-              (should (string-match-p "Debug trace" (buffer-string)))
-              (should (string-match-p "execute/error" (buffer-string)))
-              (should (string-match-p "Query failed" (buffer-string)))
-              (should (string-match-p "SELECT \\* FROM missing_table"
-                                      (buffer-string))))))))))
+        (let ((text (clutch-test--debug-buffer-string)))
+          (should (string-match-p "execute/error" text))
+          (should (string-match-p "Query failed" text))
+          (should (string-match-p "SELECT \\* FROM missing_table" text)))))))
 
-(ert-deftest clutch-test-show-error-details-hints-about-debug-mode-when-disabled ()
-  "Details buffers should point users at debug mode when no trace was captured."
-  (with-temp-buffer
-    (let ((details '(:summary "Friendly summary")))
-      (clutch--render-error-details-buffer details)
-      (should (string-match-p "clutch-debug-mode" (buffer-string))))))
+(ert-deftest clutch-test-run-db-query-success-clears-problems-across-connection-buffers ()
+  "Successful queries should clear stale failure state for the whole connection."
+  (let ((conn 'fake-conn)
+        (source (generate-new-buffer " *clutch-debug-source*"))
+        (peer (generate-new-buffer " *clutch-debug-peer*"))
+        cleared)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local clutch-connection conn)
+            (clutch--remember-problem-record
+             :buffer source
+             :connection conn
+             :problem '(:summary "old")))
+          (with-current-buffer peer
+            (setq-local clutch-connection conn)
+            (cl-letf (((symbol-function 'clutch-db-query)
+                       (lambda (_conn _sql) 'ok))
+                      ((symbol-function 'clutch-db-manual-commit-p)
+                       (lambda (_conn) nil))
+                      ((symbol-function 'clutch-db-clear-error-details)
+                       (lambda (clear-conn)
+                         (setq cleared clear-conn))))
+              (should (eq (clutch--run-db-query conn "SELECT 1") 'ok))))
+          (with-current-buffer source
+            (should-not clutch--buffer-error-details)
+            (should-not (clutch--problem-record-for-connection conn)))
+          (should-not (gethash conn clutch--problem-records-by-conn))
+          (should (eq cleared conn)))
+      (kill-buffer source)
+      (kill-buffer peer))))
 
-(ert-deftest clutch-test-show-error-details-errors-when-unavailable ()
-  "The error details command should fail clearly without current-buffer details."
-  (with-temp-buffer
-    (cl-letf (((symbol-function 'clutch-db-error-details)
-               (lambda (_conn) '(:summary "should-not-fallback"))))
-      (should-error (clutch-show-error-details) :type 'user-error))))
+(ert-deftest clutch-test-debug-mode-enable-replays-stored-problem-records ()
+  "Enabling debug mode should replay already-stored problems as history."
+  (let ((source (generate-new-buffer " *clutch-debug-replay*"))
+        (summary "pre-debug failure"))
+    (unwind-protect
+        (progn
+          (when clutch-debug-mode
+            (clutch-debug-mode -1))
+          (clutch--clear-problem-capture)
+          (with-current-buffer source
+            (clutch--remember-problem-record
+             :buffer source
+             :problem `(:backend oracle :summary ,summary)))
+          (clutch-debug-mode 1)
+          (let ((text (clutch-test--debug-buffer-string)))
+            (should (string-match-p "\\[historical\\]" text))
+            (should (string-match-p summary text))))
+      (when clutch-debug-mode
+        (clutch-debug-mode -1))
+      (when (buffer-live-p source)
+        (kill-buffer source))
+      (when-let* ((buf (get-buffer clutch-debug-buffer-name)))
+        (kill-buffer buf)))))
 
-(ert-deftest clutch-test-show-error-details-does-not-keep-old-command-name ()
-  "The old last-error command name should not remain defined."
-  (should-not (fboundp 'clutch-show-last-error-details)))
+(ert-deftest clutch-test-debug-mode-enable-does-not-clear-problem-records ()
+  "Enabling debug mode should keep already-stored problem records."
+  (let ((source (generate-new-buffer " *clutch-debug-problem*")))
+    (unwind-protect
+        (progn
+          (when clutch-debug-mode
+            (clutch-debug-mode -1))
+          (clutch--clear-problem-capture)
+          (with-current-buffer source
+            (clutch--remember-problem-record
+             :buffer source
+             :problem '(:summary "pre-debug")))
+          (clutch-debug-mode 1)
+          (with-current-buffer source
+            (should clutch--buffer-error-details)))
+      (when clutch-debug-mode
+        (clutch-debug-mode -1))
+      (when (buffer-live-p source)
+        (kill-buffer source))
+      (when-let* ((buf (get-buffer clutch-debug-buffer-name)))
+        (kill-buffer buf)))))
 
-(ert-deftest clutch-test-execute-error-populates-copyable-details ()
-  "SQL execution failures should populate current-buffer error details."
+(ert-deftest clutch-test-debug-mode-enable-clears-debug-events-but-keeps-problems ()
+  "Starting a new debug capture should clear events but keep problems."
+  (let ((conn 'fake-conn)
+        (source (generate-new-buffer " *clutch-debug-capture*")))
+    (unwind-protect
+        (progn
+          (when clutch-debug-mode
+            (clutch-debug-mode -1))
+          (clutch--clear-problem-capture)
+          (with-current-buffer source
+            (setq-local clutch-connection conn)
+            (clutch-debug-mode 1)
+            (clutch--remember-problem-record
+             :buffer source
+             :connection conn
+             :problem '(:summary "pre-debug"))
+            (clutch--remember-debug-event
+             :buffer source
+             :connection conn
+             :op "execute"
+             :phase "error"
+             :summary "boom")
+            (should clutch--debug-events)
+            (should clutch--buffer-error-details)
+            (clutch-debug-mode -1)
+            (clutch-debug-mode 1)
+            (should-not clutch--debug-events)
+            (should clutch--buffer-error-details)))
+      (when clutch-debug-mode
+        (clutch-debug-mode -1))
+      (when (buffer-live-p source)
+        (kill-buffer source))
+      (when-let* ((buf (get-buffer clutch-debug-buffer-name)))
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-execute-error-populates-problem-record ()
+  "SQL execution failures should populate the current buffer problem record."
   (let ((source (generate-new-buffer " *clutch-error-source*")))
     (unwind-protect
         (with-current-buffer source
@@ -3633,33 +3845,161 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                      (lambda (buf &rest _args) buf)))
             (catch 'clutch--execution-aborted
               (clutch--execute-select "SELECT * FROM missing_table" 'fake-conn))
-            (let ((buf (clutch-show-error-details)))
-              (with-current-buffer buf
-                (should (string-match-p "ORA-00942" (buffer-string)))
-                (should (string-match-p "SELECT \\* FROM missing_table" (buffer-string)))))))
+            (let* ((details clutch--buffer-error-details)
+                   (diag (plist-get details :diag)))
+              (should details)
+              (should (equal (plist-get details :summary)
+                             (clutch--humanize-db-error
+                              "ORA-00942: table or view does not exist")))
+              (should (equal (plist-get diag :raw-message)
+                             "ORA-00942: table or view does not exist"))
+              (should (equal (plist-get (plist-get diag :context) :sql)
+                             "SELECT * FROM missing_table")))))
       (kill-buffer source))))
 
-(ert-deftest clutch-test-error-details-copy-message-prefers-raw-message ()
-  "The details buffer should copy the raw backend message when available."
-  (with-temp-buffer
-    (let ((details '(:summary "Friendly summary"
-                     :diag (:raw-message "raw backend message"))))
-      (clutch--render-error-details-buffer details)
-      (clutch-error-details-copy-message)
-      (should (equal (current-kill 0) "raw backend message")))))
+(ert-deftest clutch-test-execute-error-points-to-debug-workflow-when-disabled ()
+  "Query failures should point users at the single debug workflow."
+  (let ((source (generate-new-buffer " *clutch-execute-hint-source*"))
+        message-text)
+    (unwind-protect
+        (with-current-buffer source
+          (set-window-buffer (selected-window) source)
+          (setq-local clutch-connection 'fake-conn
+                      clutch--source-window (selected-window))
+          (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_conn sql _page-num _page-size) sql))
+                    ((symbol-function 'clutch--run-db-query)
+                     (lambda (_conn _sql)
+                       (signal 'clutch-db-error
+                               (list "ORA-00942: table or view does not exist"))))
+                    ((symbol-function 'clutch-db-error-details)
+                     (lambda (_conn) nil))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (setq message-text (apply #'format fmt args))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args) buf)))
+            (catch 'clutch--execution-aborted
+              (clutch--execute-select "SELECT * FROM missing_table" 'fake-conn))
+            (should (string-match-p "clutch-debug-mode" message-text))
+            (should (string-match-p (regexp-quote clutch-debug-buffer-name)
+                                    message-text))))
+      (kill-buffer source))))
 
-(ert-deftest clutch-test-error-details-copy-all-copies-rendered-buffer ()
-  "The details buffer should copy its rendered content as plain text."
+(ert-deftest clutch-test-build-conn-failure-points-to-debug-workflow-when-disabled ()
+  "Connect failures should tell users how to capture a debug trace."
+  (cl-letf (((symbol-function 'clutch-db-connect)
+             (lambda (_backend _params)
+               (signal 'clutch-db-error '("Connection refused (host=db.example.com, port=3306)")))))
+    (condition-case err
+        (progn
+          (clutch--build-conn '(:backend mysql :host "db.example.com" :port 3306))
+          (should nil))
+      (user-error
+       (should (string-match-p "check host and port" (cadr err)))
+       (should (string-match-p "clutch-debug-mode" (cadr err)))
+       (should (string-match-p (regexp-quote clutch-debug-buffer-name)
+                               (cadr err)))))))
+
+(ert-deftest clutch-test-build-conn-failure-points-to-debug-buffer-when-enabled ()
+  "Connect failures should point directly at the debug buffer when capture is on."
+  (let ((clutch-debug-mode t))
+    (cl-letf (((symbol-function 'clutch-db-connect)
+               (lambda (_backend _params)
+                 (signal 'clutch-db-error '("Connection refused (host=db.example.com, port=3306)")))))
+      (condition-case err
+          (progn
+            (clutch--build-conn '(:backend mysql :host "db.example.com" :port 3306))
+            (should nil))
+        (user-error
+         (should (string-match-p "check host and port" (cadr err)))
+         (should-not (string-match-p "clutch-debug-mode" (cadr err)))
+         (should (string-match-p (regexp-quote clutch-debug-buffer-name)
+                                 (cadr err))))))))
+
+(ert-deftest clutch-test-execute-statements-remembers-error-details-before-last ()
+  "Earlier failing statements should store details and humanized messages."
   (with-temp-buffer
-    (let ((details '(:summary "Friendly summary"
-                     :diag (:raw-message "raw backend message"
-                            :context (:sql "SELECT * FROM demo")))))
-      (clutch--render-error-details-buffer details)
-      (clutch-error-details-copy-all)
-      (let ((copied (current-kill 0)))
-        (should (string-match-p "Friendly summary" copied))
-        (should (string-match-p "raw backend message" copied))
-        (should (string-match-p "SELECT \\* FROM demo" copied))))))
+    (let ((clutch-debug-mode t)
+          (raw-message "Connection refused (host=db.example.com, port=3306)"))
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn) 'mysql))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn sql)
+                   (if (equal sql "UPDATE first SET x = 1")
+                       (signal 'clutch-db-error (list raw-message))
+                     'ok))))
+        (let ((display-summary
+               (condition-case err
+                   (signal 'clutch-db-error (list raw-message))
+                 (clutch-db-error
+                  (clutch--humanize-db-error (error-message-string err)))))
+              signaled)
+          (condition-case err
+              (clutch--execute-statements
+               '("UPDATE first SET x = 1"
+                 "UPDATE second SET y = 2"))
+            (user-error
+             (setq signaled err)))
+          (should signaled)
+          (should (equal (cadr signaled)
+                         (format "Statement 1 failed: %s"
+                                 (clutch--debug-workflow-message display-summary))))
+          (let* ((details clutch--buffer-error-details)
+                 (diag (plist-get details :diag))
+                 (event (car clutch--debug-events)))
+            (should details)
+            (should (eq (plist-get details :backend) 'mysql))
+            (should (equal (plist-get diag :raw-message) raw-message))
+            (should (equal (plist-get (plist-get diag :context) :sql)
+                           "UPDATE first SET x = 1"))
+            (should event)
+            (should (equal (plist-get event :phase) "error"))
+            (should (equal (plist-get event :summary)
+                           display-summary))))))))
+
+(ert-deftest clutch-test-execute-statements-remembers-error-details-on-last-statement ()
+  "Final DML failures should store details and humanized messages."
+  (with-temp-buffer
+    (let ((clutch-debug-mode t)
+          (raw-message "Connection refused (host=db.example.com, port=3306)"))
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn) 'mysql))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn sql)
+                   (if (equal sql "DELETE FROM broken_rows")
+                       (signal 'clutch-db-error (list raw-message))
+                     'ok))))
+        (let ((display-summary
+               (condition-case err
+                   (signal 'clutch-db-error (list raw-message))
+                 (clutch-db-error
+                  (clutch--humanize-db-error (error-message-string err)))))
+              signaled)
+          (condition-case err
+              (clutch--execute-statements
+               '("UPDATE ok_rows SET enabled = 1"
+                 "DELETE FROM broken_rows"))
+            (user-error
+             (setq signaled err)))
+          (should signaled)
+          (should (equal (cadr signaled)
+                         (format "Statement 2 failed: %s"
+                                 (clutch--debug-workflow-message display-summary))))
+          (let* ((details clutch--buffer-error-details)
+                 (diag (plist-get details :diag))
+                 (event (car clutch--debug-events)))
+            (should details)
+            (should (eq (plist-get details :backend) 'mysql))
+            (should (equal (plist-get diag :raw-message) raw-message))
+            (should (equal (plist-get (plist-get diag :context) :sql)
+                           "DELETE FROM broken_rows"))
+            (should event)
+            (should (equal (plist-get event :phase) "error"))
+            (should (equal (plist-get event :summary)
+                           display-summary))))))))
 
 (ert-deftest clutch-test-parse-error-position-supports-pg-and-oracle ()
   "Error position parsing should handle PG and Oracle/JDBC formats."
@@ -3829,6 +4169,64 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (with-current-buffer buf
           (should (eq clutch-connection conn)))
         (should-not clutch--executing-p)))))
+
+(ert-deftest clutch-test-handle-query-quit-remembers-interrupt-error-details-and-debug-event ()
+  "Interrupt RPC failures should store details and a cancel debug event."
+  (with-temp-buffer
+    (let* ((clutch-debug-mode t)
+           (clutch-connection 'fake-conn)
+           (raw-message "Connection refused (host=db.example.com, port=3306)")
+           (captured-message nil)
+           (disconnected nil))
+      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn) 'pg))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch-db-interrupt-query)
+                 (lambda (_conn)
+                   (signal 'clutch-db-error (list raw-message))))
+                ((symbol-function 'clutch-db-disconnect)
+                 (lambda (_conn)
+                   (setq disconnected t)))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq captured-message (apply #'format fmt args)))))
+        (should-error (clutch--handle-query-quit clutch-connection)
+                      :type 'clutch-query-interrupted)
+        (let* ((summary (clutch--humanize-db-error raw-message))
+               (message-summary
+                (condition-case err
+                    (signal 'clutch-db-error (list raw-message))
+                  (clutch-db-error
+                   (clutch--humanize-db-error (error-message-string err)))))
+               (details clutch--buffer-error-details)
+               (diag (plist-get details :diag))
+               (context (plist-get diag :context))
+               (cancel-event
+                (cl-find-if
+                 (lambda (event)
+                   (and (equal (plist-get event :op) "cancel")
+                        (equal (plist-get event :phase) "error")))
+                 clutch--debug-events))
+               (interrupt-event
+                (cl-find-if
+                 (lambda (event)
+                   (and (equal (plist-get event :op) "interrupt")
+                        (equal (plist-get event :phase) "disconnect")))
+                 clutch--debug-events)))
+          (should disconnected)
+          (should details)
+          (should (eq (plist-get details :backend) 'pg))
+          (should (equal (plist-get details :summary) summary))
+          (should (equal (plist-get diag :raw-message) raw-message))
+          (should (plist-member context :sql))
+          (should-not (plist-get context :sql))
+          (should (equal captured-message
+                         (format "Interrupt failed: %s"
+                                 (clutch--debug-workflow-message message-summary))))
+          (should cancel-event)
+          (should (equal (plist-get cancel-event :summary) message-summary))
+          (should interrupt-event))))))
 
 (ert-deftest clutch-test-disconnect-blocks-dirty-manual-commit-connection ()
   "Disconnect should warn before dropping uncommitted manual-commit work."
@@ -5870,6 +6268,46 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
       (should (= (length timer-fns) 2))
       (should (string-match-p "warmup boom" warned)))))
 
+(ert-deftest clutch-test-object-warmup-records-debug-event-on-recoverable-db-errors ()
+  "Warmup metadata failures should feed the shared debug trace when enabled."
+  (let ((clutch--object-cache (make-hash-table :test 'equal))
+        (clutch--object-warmup-timers (make-hash-table :test 'equal))
+        timer-fns)
+    (with-temp-buffer
+      (let ((clutch-debug-mode t))
+        (setq-local clutch-connection 'fake-conn)
+        (cl-letf (((symbol-function 'clutch--object-cache-key)
+                   (lambda (_conn) "fake-key"))
+                  ((symbol-function 'clutch--backend-key-from-conn)
+                   (lambda (_conn) 'oracle))
+                  ((symbol-function 'clutch--connection-alive-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch--object-cache-loaded-categories)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'clutch-db-busy-p)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'clutch--warn-completion-metadata-error-once)
+                   #'ignore)
+                  ((symbol-function 'run-with-idle-timer)
+                   (lambda (_secs _repeat fn)
+                     (push fn timer-fns)
+                     (intern (format "fake-timer-%d" (length timer-fns)))))
+                  ((symbol-function 'clutch-db-list-objects-async)
+                   (lambda (&rest _args)
+                     nil))
+                  ((symbol-function 'clutch--object-type-entries)
+                   (lambda (&rest _args)
+                     (signal 'clutch-db-error '("warmup boom"))))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args) buf)))
+          (clutch--clear-debug-capture)
+          (clutch--schedule-object-warmup 'fake-conn)
+          (should (= (length timer-fns) 1))
+          (funcall (car timer-fns))
+          (let ((text (clutch-test--debug-buffer-string)))
+            (should (string-match-p "object-warmup/warning" text))
+            (should (string-match-p "warmup boom" text))))))))
+
 (ert-deftest clutch-test-object-warmup-warns-on-connection-liveness-errors ()
   "Warmup should warn instead of silently hiding recoverable liveness failures."
   (let ((clutch--object-cache (make-hash-table :test 'equal))
@@ -5893,6 +6331,26 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
       (clutch--schedule-object-warmup 'fake-conn)
       (should (string-match-p "alive boom" warned))
       (should-not scheduled))))
+
+(ert-deftest clutch-test-safe-completion-call-records-debug-event-on-db-errors ()
+  "Recoverable completion metadata errors should surface in the debug buffer."
+  (with-temp-buffer
+    (let ((clutch-debug-mode t))
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn) 'oracle))
+                ((symbol-function 'clutch--warn-completion-metadata-error-once)
+                 #'ignore)
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buf &rest _args) buf)))
+        (clutch--clear-debug-capture)
+        (should-not
+         (clutch--safe-completion-call
+          (lambda ()
+            (signal 'clutch-db-error '("completion boom")))))
+        (let ((text (clutch-test--debug-buffer-string)))
+          (should (string-match-p "completion/warning" text))
+          (should (string-match-p "completion boom" text)))))))
 
 (ert-deftest clutch-test-object-warmup-propagates-non-db-errors ()
   "Warmup should still expose programming errors that are not db-runtime races."
@@ -6057,6 +6515,52 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (should (equal clutch--connection-params '(:driver oracle :schema "CJH_TEST")))
         (should (equal refresh-called '(cleared t)))
         (should (equal message-text "Current schema: CJH_TEST"))))))
+
+(ert-deftest clutch-test-switch-schema-failure-populates-problem-record-and-debug-trace ()
+  "Schema-switch failures should feed the shared problem/debug workflow."
+  (let ((details '(:backend oracle
+                   :summary "ORA-12592: TNS:bad packet"
+                   :diag (:category "metadata"
+                          :op "set-current-schema"
+                          :conn-id 7
+                          :raw-message "ORA-12592: TNS:bad packet"
+                          :context (:generated-sql
+                                    "ALTER SESSION SET CURRENT_SCHEMA = \"CJH_TEST\"")))))
+    (with-temp-buffer
+      (let ((clutch-debug-mode t))
+        (clutch--clear-debug-capture)
+        (setq-local clutch-connection 'fake-conn
+                    clutch--connection-params '(:driver oracle :schema "ZJ_TEST"))
+        (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                   (lambda (_conn) 'oracle))
+                  ((symbol-function 'clutch--connection-key)
+                   (lambda (_conn) "user@host:1521/ORCL"))
+                  ((symbol-function 'clutch-db-list-schemas)
+                   (lambda (_conn) '("ZJ_TEST" "CJH_TEST")))
+                  ((symbol-function 'clutch-db-current-schema)
+                   (lambda (_conn) "ZJ_TEST"))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _args) "CJH_TEST"))
+                  ((symbol-function 'clutch-db-set-current-schema)
+                   (lambda (_conn _schema)
+                     (signal 'clutch-db-error
+                             (list "ORA-12592: TNS:bad packet" details)))))
+          (condition-case err
+              (progn
+                (clutch-switch-schema)
+                (should nil))
+            (user-error
+             (should (string-match-p "ORA-12592" (cadr err)))
+             (should (string-match-p (regexp-quote clutch-debug-buffer-name)
+                                     (cadr err)))))
+          (let ((problem clutch--buffer-error-details))
+            (should problem)
+            (should (equal (plist-get problem :summary) "ORA-12592: TNS:bad packet"))
+            (should (eq (plist-get problem :backend) 'oracle)))
+          (let ((text (clutch-test--debug-buffer-string)))
+            (should (string-match-p "set-current-schema" text))
+            (should (string-match-p "schema-switch/error" text))
+            (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" text))))))))
 
 (ert-deftest clutch-test-switch-schema-updates-mysql-database-param ()
   "MySQL schema switching should persist the selected database in buffer params."
@@ -7282,6 +7786,36 @@ database.  Only a query re-execution should discard them."
         (clutch-object-show-ddl-or-source '(:name "DEMO_TASKS" :type "TABLE"))))
     (should (eq captured-product 'oracle))))
 
+(ert-deftest clutch-test-object-show-ddl-or-source-populates-problem-record-and-debug-trace ()
+  "Definition/source failures should feed the shared problem/debug workflow."
+  (let ((details '(:backend jdbc
+                   :summary "ORA-04043: object does not exist"
+                   :diag (:category "metadata"
+                          :op "get-object-ddl"
+                          :conn-id 7
+                          :raw-message "ORA-04043: object does not exist"))))
+    (with-temp-buffer
+      (let ((clutch-debug-mode t))
+        (clutch--clear-debug-capture)
+        (setq-local clutch-connection 'fake-conn)
+        (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                   (lambda (_conn) 'oracle))
+                  ((symbol-function 'clutch-db-show-create-table)
+                   (lambda (&rest _args)
+                     (signal 'clutch-db-error
+                             (list "ORA-04043: object does not exist" details))))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args) buf)))
+          (should-error
+           (clutch-object-show-ddl-or-source '(:name "DEMO_TASKS" :type "TABLE"))
+           :type 'clutch-db-error)
+          (should clutch--buffer-error-details)
+          (should (string-match-p "ORA-04043"
+                                  (plist-get clutch--buffer-error-details :summary)))
+          (let ((text (clutch-test--debug-buffer-string)))
+            (should (string-match-p "show-definition/error" text))
+            (should (string-match-p "DEMO_TASKS" text))))))))
+
 (ert-deftest clutch-test-object-describe-propagates-detail-errors ()
   "Describe rendering should not silently swallow object detail failures."
   (cl-letf (((symbol-function 'clutch-db-object-details)
@@ -7319,6 +7853,111 @@ database.  Only a query re-execution should discard them."
        :type 'clutch-db-error)
       (should (= detail-calls 1))
       (should (= list-columns-calls 0)))))
+
+(ert-deftest clutch-test-object-describe-populates-problem-record-in-source-buffer ()
+  "Describe failures should populate a problem record in the invoking buffer."
+  (let ((clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--column-details-status-cache (make-hash-table :test 'equal))
+        (details '(:backend jdbc
+                   :summary "ORA-12592: TNS:bad packet"
+                   :diag (:category "metadata"
+                          :op "get-columns"
+                          :conn-id 7
+                          :raw-message "ORA-12592: TNS:bad packet"))))
+    (with-temp-buffer
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "dev-key"))
+                ((symbol-function 'clutch-db-error-details)
+                 (lambda (_conn) details))
+                ((symbol-function 'clutch-db-column-details)
+                 (lambda (_conn _table)
+                   (signal 'clutch-db-error
+                           (list "ORA-12592: TNS:bad packet" details))))
+                ((symbol-function 'clutch--ensure-table-comment)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'clutch--object-related-entries)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buf &rest _args) buf)))
+        (should-error
+         (clutch-object-describe '(:name "USERS" :type "TABLE"))
+         :type 'clutch-db-error)
+        (let* ((problem clutch--buffer-error-details)
+               (diag (plist-get problem :diag)))
+          (should problem)
+          (should (string-match-p "ORA-12592" (plist-get problem :summary)))
+          (should (equal (plist-get diag :op) "get-columns")))))))
+
+(ert-deftest clutch-test-object-describe-populates-debug-trace-when-enabled ()
+  "Describe failures should contribute debug trace entries when debug mode is on."
+  (let ((clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--column-details-status-cache (make-hash-table :test 'equal))
+        (details '(:backend jdbc
+                   :summary "ORA-12592: TNS:bad packet"
+                   :diag (:category "metadata"
+                          :op "get-columns"
+                          :conn-id 7
+                          :raw-message "ORA-12592: TNS:bad packet"))))
+    (with-temp-buffer
+      (let ((clutch-debug-mode t))
+        (clutch--clear-debug-capture)
+        (setq-local clutch-connection 'fake-conn)
+        (cl-letf (((symbol-function 'clutch--connection-key)
+                   (lambda (_conn) "dev-key"))
+                  ((symbol-function 'clutch--backend-key-from-conn)
+                   (lambda (_conn) 'oracle))
+                  ((symbol-function 'clutch-db-error-details)
+                   (lambda (_conn) details))
+                  ((symbol-function 'clutch-db-column-details)
+                   (lambda (_conn _table)
+                     (signal 'clutch-db-error
+                             (list "ORA-12592: TNS:bad packet" details))))
+                  ((symbol-function 'clutch--ensure-table-comment)
+                   (lambda (&rest _args) nil))
+                  ((symbol-function 'clutch--object-related-entries)
+                   (lambda (&rest _args) nil))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args) buf)))
+          (should-error
+           (clutch-object-describe '(:name "USERS" :type "TABLE"))
+           :type 'clutch-db-error)
+          (let ((text (clutch-test--debug-buffer-string)))
+            (should (string-match-p "describe/error" text))
+            (should (string-match-p "USERS" text))))))))
+
+(ert-deftest clutch-test-object-describe-success-clears-stale-problem-records ()
+  "Successful describe should clear older failure state for the same connection."
+  (let ((source (generate-new-buffer " *clutch-describe-source*")))
+    (unwind-protect
+        (with-current-buffer source
+          (setq-local clutch-connection 'fake-conn
+                      clutch--buffer-error-details '(:summary "old"))
+          (puthash 'fake-conn '(:summary "old") clutch--problem-records-by-conn)
+          (cl-letf (((symbol-function 'clutch--remember-current-object) #'ignore)
+                    ((symbol-function 'clutch--object-fqname)
+                     (lambda (_entry) "USERS"))
+                    ((symbol-function 'clutch--object-describe-text)
+                     (lambda (_conn _entry) "ok"))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args) buf)))
+            (clutch-object-describe '(:name "USERS" :type "TABLE"))
+            (should-not clutch--buffer-error-details)
+            (should-not (gethash 'fake-conn clutch--problem-records-by-conn))))
+      (kill-buffer source))))
+
+(ert-deftest clutch-test-describe-refresh-success-clears-stale-problem-records ()
+  "Refreshing a describe buffer should clear stale failure state on success."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--describe-object-entry '(:name "USERS" :type "TABLE")
+                clutch--buffer-error-details '(:summary "old"))
+    (puthash 'fake-conn '(:summary "old") clutch--problem-records-by-conn)
+    (cl-letf (((symbol-function 'clutch--refresh-current-schema) #'ignore)
+              ((symbol-function 'clutch--render-object-describe) #'ignore))
+      (clutch-describe-refresh)
+      (should-not clutch--buffer-error-details)
+      (should-not (gethash 'fake-conn clutch--problem-records-by-conn)))))
 
 (ert-deftest clutch-test-object-describe-propagates-related-object-errors ()
   "Describe rendering should not silently swallow related-object lookup failures."
@@ -7446,6 +8085,92 @@ database.  Only a query re-execution should discard them."
         (should-error (clutch-connect) :type 'clutch-db-error)
         (should (eq clutch-connection 'old-conn))
         (should-not disconnected)))))
+
+(ert-deftest clutch-test-connect-rebuilds-conn-when-agent-dies-during-disconnect ()
+  "Reconnect should rebuild a dead new connection after old disconnect."
+  (let ((built nil)
+        (activated nil))
+    (with-temp-buffer
+      (clutch-mode)
+      (setq-local clutch-connection 'old-conn)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (conn)
+                   (pcase conn
+                     ('old-conn t)
+                     ('new-conn-1 nil)
+                     (_ t))))
+                ((symbol-function 'clutch--confirm-disconnect-transaction-loss)
+                 #'ignore)
+                ((symbol-function 'clutch--connect-params-for-current-buffer)
+                 (lambda () '(:backend jdbc :database "newdb")))
+                ((symbol-function 'clutch--effective-sql-product)
+                 (lambda (_params) 'jdbc))
+                ((symbol-function 'clutch--build-conn)
+                 (lambda (params)
+                   (push params built)
+                   (pcase (length built)
+                     (1 'new-conn-1)
+                     (2 'new-conn-2)
+                     (_ 'unexpected-conn))))
+                ((symbol-function 'clutch--do-disconnect)
+                 #'ignore)
+                ((symbol-function 'clutch--activate-current-buffer-connection)
+                 (lambda (conn params product)
+                   (setq activated (list conn params product))))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "test-conn"))
+                ((symbol-function 'message) #'ignore))
+        (clutch-connect)
+        (should (= (length built) 2))
+        (should (equal (nreverse built)
+                       '((:backend jdbc :database "newdb")
+                         (:backend jdbc :database "newdb"))))
+        (should (equal activated
+                       '(new-conn-2 (:backend jdbc :database "newdb") jdbc)))))))
+
+(ert-deftest clutch-test-replace-connection-rebuilds-dead-conn-after-disconnect ()
+  "Replacing a connection should rebuild if the first new conn dies during disconnect."
+  (let (built rebound finalized disconnected cleared)
+    (cl-letf (((symbol-function 'clutch--effective-sql-product)
+               (lambda (_params) 'clickhouse))
+              ((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "default-key"))
+              ((symbol-function 'clutch--build-conn)
+               (lambda (params)
+                 (push params built)
+                 (pcase (length built)
+                   (1 'new-conn-1)
+                   (2 'new-conn-2)
+                   (_ 'unexpected-conn))))
+              ((symbol-function 'clutch--clear-tx-dirty)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (conn)
+                 (pcase conn
+                   ('old-conn t)
+                   ('new-conn-1 nil)
+                   ('new-conn-2 t)
+                   (_ nil))))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (conn) (setq disconnected conn)))
+              ((symbol-function 'clutch--rebind-connection-buffers)
+               (lambda (_old new params product)
+                 (setq rebound (list new params product))))
+              ((symbol-function 'clutch--clear-connection-metadata-caches)
+               (lambda (conn &optional key)
+                 (push (list conn key) cleared)))
+              ((symbol-function 'clutch--finalize-rebound-connection)
+               (lambda (conn) (setq finalized conn) conn)))
+      (clutch--replace-connection 'old-conn '(:backend clickhouse :database "demo") 'clickhouse)
+      (should (equal (nreverse built)
+                     '((:backend clickhouse :database "demo")
+                       (:backend clickhouse :database "demo"))))
+      (should (eq disconnected 'old-conn))
+      (should (equal rebound '(new-conn-2 (:backend clickhouse :database "demo") clickhouse)))
+      (should (eq finalized 'new-conn-2))
+      (should (equal (nreverse cleared)
+                     '((old-conn "default-key")
+                       (new-conn-2 nil)))))))
 
 (ert-deftest clutch-test-connect-in-query-console-reuses-saved-connection ()
   "Query console reconnect should reuse that console's saved connection."

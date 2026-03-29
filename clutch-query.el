@@ -50,6 +50,7 @@
 (defvar clutch--executing-sql-start)
 (defvar clutch--executing-sql-end)
 (defvar clutch-debug-mode nil)
+(defvar clutch-debug-buffer-name "*clutch-debug*")
 (defvar clutch-connection-alist nil)
 (defvar clutch-result-window-height 0.33)
 (defvar clutch-result-max-rows 500)
@@ -84,8 +85,8 @@
 ;; Forward declarations — functions defined in clutch.el
 (declare-function clutch--console-buffer-base-name "clutch" (name))
 (declare-function clutch--debug-sql-preview "clutch" (sql))
-(declare-function clutch--debug-events-for-current-buffer "clutch" ())
 (declare-function clutch--remember-debug-event "clutch" (&rest event))
+(declare-function clutch--remember-problem-record "clutch" (&rest args))
 (declare-function clutch--find-console-buffer "clutch" (name))
 (declare-function clutch--update-console-buffer-name "clutch" ())
 (declare-function clutch--console-file "clutch" (name))
@@ -499,7 +500,8 @@ COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the new page."
   "Execute the query for PAGE-NUM and refresh the result buffer display.
 Uses the current effective result SQL, including active WHERE filters.
 Signals an error if pagination is not available."
-  (let ((effective-sql (clutch-result--effective-query)))
+  (let* ((source-buffer (current-buffer))
+         (effective-sql (clutch-result--effective-query)))
     (unless effective-sql
       (user-error "Pagination not available for this query"))
     (clutch--ensure-connection)
@@ -515,9 +517,17 @@ Signals an error if pagination is not available."
            (result (condition-case err
                        (clutch--run-db-query clutch-connection paged-sql)
                      (clutch-db-error
-                      (user-error "%s"
-                                  (clutch--humanize-db-error
-                                   (error-message-string err))))))
+                      (let* ((failure
+                              (clutch--remember-execute-error
+                               source-buffer
+                               clutch-connection
+                               effective-sql
+                               err
+                               (list :page-num page-num
+                                     :paged-sql
+                                     (clutch--debug-sql-preview paged-sql))))
+                             (summary (cdr failure)))
+                        (user-error "%s" (clutch--debug-workflow-message summary))))))
            (elapsed (- (float-time) start))
            (rows (clutch-db-result-rows result)))
       (clutch--update-page-state
@@ -652,44 +662,39 @@ Returns the query result."
               (window-buffer clutch--source-window)
             (current-buffer)))
          (_debug-start
-          (clutch--remember-debug-event
-           :buffer source-buffer
-           :connection connection
-           :op "execute"
-           :phase "start"
-           :backend (clutch--backend-key-from-conn connection)
-           :sql sql
-           :context (list :paged-sql (clutch--debug-sql-preview paged-sql))))
+          (when clutch-debug-mode
+            (clutch--remember-debug-event
+             :buffer source-buffer
+             :connection connection
+             :op "execute"
+             :phase "start"
+             :backend (clutch--backend-key-from-conn connection)
+             :sql sql
+             :context (list :paged-sql (clutch--debug-sql-preview paged-sql)))))
          (result (condition-case err
                      (clutch--run-db-query connection paged-sql)
                    (clutch-db-error
-                    (let* ((msg (error-message-string err))
-                           (summary (clutch--humanize-db-error msg)))
-                      (clutch--remember-buffer-query-error-details
-                       source-buffer connection sql err)
-                      (clutch--remember-debug-event
-                       :buffer source-buffer
-                       :connection connection
-                       :op "execute"
-                       :phase "error"
-                       :backend (clutch--backend-key-from-conn connection)
-                       :summary summary
-                       :sql sql)
-                      (clutch--mark-sql-error source-buffer sql msg)
+                    (let* ((failure (clutch--remember-execute-error
+                                     source-buffer connection sql err))
+                           (message (car failure))
+                           (summary (cdr failure)))
+                      (clutch--mark-sql-error source-buffer sql message)
+                      (message "%s" (clutch--debug-workflow-message summary))
                       (throw 'clutch--execution-aborted nil)))))
          (elapsed (- (float-time) start))
          (buf (get-buffer-create (clutch--result-buffer-name)))
          (columns (clutch-db-result-columns result))
          (rows (clutch-db-result-rows result)))
-    (clutch--remember-debug-event
-     :buffer source-buffer
-     :connection connection
-     :op "execute"
-     :phase "success"
-     :backend (clutch--backend-key-from-conn connection)
-     :summary (clutch--query-debug-summary result)
-     :sql sql
-     :elapsed elapsed)
+    (when clutch-debug-mode
+      (clutch--remember-debug-event
+       :buffer source-buffer
+       :connection connection
+       :op "execute"
+       :phase "success"
+       :backend (clutch--backend-key-from-conn connection)
+       :summary (clutch--query-debug-summary result)
+       :sql sql
+       :elapsed elapsed))
     (with-current-buffer buf
       (clutch-result-mode)
       (let ((col-names (clutch--init-result-state
@@ -708,42 +713,37 @@ Returns the query result."
   (setq clutch--last-query sql)
   (let* ((start (float-time))
          (_debug-start
-          (clutch--remember-debug-event
-           :connection connection
-           :op "execute"
-           :phase "start"
-           :backend (clutch--backend-key-from-conn connection)
-           :sql sql))
+          (when clutch-debug-mode
+            (clutch--remember-debug-event
+             :connection connection
+             :op "execute"
+             :phase "start"
+             :backend (clutch--backend-key-from-conn connection)
+             :sql sql)))
          (result (condition-case err
                      (clutch--run-db-query connection sql)
                    (clutch-db-error
-                    (let* ((msg (error-message-string err))
-                           (source-buffer
+                    (let* ((source-buffer
                             (if (window-live-p clutch--source-window)
                                 (window-buffer clutch--source-window)
                               (current-buffer)))
-                           (summary (clutch--humanize-db-error msg)))
-                      (clutch--remember-buffer-query-error-details
-                       source-buffer connection sql err)
-                      (clutch--remember-debug-event
-                       :buffer source-buffer
-                       :connection connection
-                       :op "execute"
-                       :phase "error"
-                       :backend (clutch--backend-key-from-conn connection)
-                       :summary summary
-                       :sql sql)
-                      (clutch--mark-sql-error source-buffer sql msg)
+                           (failure (clutch--remember-execute-error
+                                     source-buffer connection sql err))
+                           (message (car failure))
+                           (summary (cdr failure)))
+                      (clutch--mark-sql-error source-buffer sql message)
+                      (message "%s" (clutch--debug-workflow-message summary))
                       (throw 'clutch--execution-aborted nil)))))
          (elapsed (- (float-time) start)))
-    (clutch--remember-debug-event
-     :connection connection
-     :op "execute"
-     :phase "success"
-     :backend (clutch--backend-key-from-conn connection)
-     :summary (clutch--query-debug-summary result)
-     :sql sql
-     :elapsed elapsed)
+    (when clutch-debug-mode
+      (clutch--remember-debug-event
+       :connection connection
+       :op "execute"
+       :phase "success"
+       :backend (clutch--backend-key-from-conn connection)
+       :summary (clutch--query-debug-summary result)
+       :sql sql
+       :elapsed elapsed))
     (when (clutch--schema-affecting-query-p sql)
       (if (clutch-db-eager-schema-refresh-p connection)
           (clutch--set-schema-status connection 'stale)
@@ -786,19 +786,36 @@ Signals `user-error' if the user declines."
 
 (defun clutch--handle-query-quit (connection)
   "Convert a raw quit on CONNECTION into an interrupt or disconnect."
-  (let ((interrupted
-         (condition-case nil
-             (and (clutch--connection-alive-p connection)
-                  (clutch-db-interrupt-query connection))
-           (clutch-db-error nil))))
-    (clutch--remember-debug-event
-     :connection connection
-     :op "interrupt"
-     :phase (if interrupted "success" "disconnect")
-     :backend (clutch--backend-key-from-conn connection)
-     :summary (if interrupted
-                  "Interrupted running query without disconnecting"
-                "Interrupt recovery failed; connection abandoned"))
+  (let* ((source-buffer (current-buffer))
+         (interrupted
+          (condition-case err
+              (and (clutch--connection-alive-p connection)
+                   (clutch-db-interrupt-query connection))
+            (clutch-db-error
+             (let* ((msg (error-message-string err))
+                    (summary (clutch--humanize-db-error msg)))
+               (clutch--remember-buffer-query-error-details
+                source-buffer connection nil err)
+               (when clutch-debug-mode
+                 (clutch--remember-debug-event
+                  :buffer source-buffer
+                  :connection connection
+                  :op "cancel"
+                  :phase "error"
+                  :backend (clutch--backend-key-from-conn connection)
+                  :summary summary))
+               (message "Interrupt failed: %s"
+                        (clutch--debug-workflow-message summary))
+               nil)))))
+    (when clutch-debug-mode
+      (clutch--remember-debug-event
+       :connection connection
+       :op "interrupt"
+       :phase (if interrupted "success" "disconnect")
+       :backend (clutch--backend-key-from-conn connection)
+       :summary (if interrupted
+                    "Interrupted running query without disconnecting"
+                  "Interrupt recovery failed; connection abandoned")))
     (unless interrupted
       (clutch--abandon-query-connection connection))
     (signal 'clutch-query-interrupted nil)))
@@ -914,6 +931,16 @@ actionable hints for known error patterns."
           (format "%s [%s]" cleaned hint)
         cleaned))))
 
+(defun clutch--debug-workflow-message (message)
+  "Return MESSAGE annotated with the single debug-buffer workflow."
+  (if (or (not message)
+          (string-match-p (regexp-quote clutch-debug-buffer-name) message))
+      message
+    (if clutch-debug-mode
+        (format "%s See %s for details." message clutch-debug-buffer-name)
+      (format "%s Enable clutch-debug-mode, reproduce the failure, then inspect %s."
+              message clutch-debug-buffer-name))))
+
 (defun clutch--parse-error-position (msg &optional sql)
   "Extract a 1-based character position from error MSG, or nil.
 Handles PG \\='(position N)\\=' suffix and Oracle-style \\='line N, column M\\='."
@@ -936,123 +963,6 @@ Handles PG \\='(position N)\\=' suffix and Oracle-style \\='line N, column M\\='
   (when (overlayp clutch--error-banner-overlay)
     (delete-overlay clutch--error-banner-overlay)
     (setq clutch--error-banner-overlay nil)))
-
-;;;; Error details
-
-(defvar-local clutch-error-details--fetcher nil
-  "Thunk that returns the latest structured error details for this buffer.")
-
-(defvar-local clutch-error-details--details nil
-  "Last structured error details rendered in this details buffer.")
-
-(defvar clutch-error-details-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "g") #'clutch-error-details-refresh)
-    (define-key map (kbd "q") #'quit-window)
-    (define-key map (kbd "w") #'clutch-error-details-copy-message)
-    (define-key map (kbd "W") #'clutch-error-details-copy-all)
-    map)
-  "Keymap for `clutch-error-details-mode'.")
-
-(define-derived-mode clutch-error-details-mode special-mode "clutch-error-details"
-  "Mode for inspecting the latest structured database error details.")
-
-(defun clutch--attach-debug-details (details)
-  "Return DETAILS enriched with the current debug capture context."
-  (when details
-    (let ((snapshot (copy-tree details)))
-      (setq snapshot (plist-put snapshot :debug-mode-enabled clutch-debug-mode))
-      (when-let* ((events (clutch--debug-events-for-current-buffer)))
-        (setq snapshot (plist-put snapshot :debug-events events)))
-      snapshot)))
-
-(defun clutch--current-buffer-error-details ()
-  "Return structured error details for the current buffer, or nil.
-Current-buffer failures take precedence.  Connected buffers otherwise use
-their current `clutch-connection'."
-  (clutch--attach-debug-details
-   (or clutch--buffer-error-details
-       (and clutch-connection
-            (clutch-db-error-details clutch-connection)))))
-
-(defun clutch--insert-error-details-section (title body)
-  "Insert TITLE and BODY into the current details buffer."
-  (when body
-    (insert (propertize title 'face 'bold) "\n")
-    (insert body "\n\n")))
-
-(defun clutch--insert-error-details-field (label value)
-  "Insert LABEL and VALUE as one diagnostics line."
-  (when value
-    (insert (format "%-12s %s\n" label value))))
-
-(defun clutch--error-details-format-plist (plist)
-  "Return a human-readable string for PLIST."
-  (pp-to-string plist))
-
-(defun clutch--format-debug-events (events)
-  "Return a human-readable rendering of recent debug EVENTS."
-  (mapconcat
-   (lambda (event)
-     (let* ((headline
-             (string-join
-              (delq nil
-                    (list (plist-get event :time)
-                          (let ((op (plist-get event :op))
-                                (phase (plist-get event :phase)))
-                            (if phase
-                                (format "%s/%s" op phase)
-                              op))
-                          (when-let* ((backend (plist-get event :backend)))
-                            (upcase (symbol-name backend)))
-                          (when-let* ((elapsed (plist-get event :elapsed)))
-                            (clutch--format-elapsed elapsed))
-                          (plist-get event :summary)
-                          (plist-get event :sql-preview)))
-              " | "))
-            (context (plist-get event :context)))
-       (if context
-           (concat headline
-                   "\n  "
-                   (replace-regexp-in-string
-                    "\n" "\n  "
-                    (string-trim-right
-                     (clutch--error-details-format-plist context))))
-         headline)))
-   events "\n\n"))
-
-(defun clutch--error-details-context-without-inline-sql (context)
-  "Return CONTEXT plist without inline SQL payload entries."
-  (when context
-    (cl-loop for (key val) on context by #'cddr
-             unless (memq key '(:generated-sql :sql))
-             append (list key val))))
-
-(defun clutch--error-details-copyable-message (details)
-  "Return the best single-message summary from DETAILS."
-  (or (plist-get (plist-get details :diag) :raw-message)
-      (plist-get details :summary)))
-
-(defun clutch-error-details-copy-message ()
-  "Copy the most useful single error message from the details buffer."
-  (interactive)
-  (unless clutch-error-details--details
-    (user-error "No error details are available in this buffer"))
-  (let ((message (clutch--error-details-copyable-message
-                  clutch-error-details--details)))
-    (unless message
-      (user-error "No copyable error message is available"))
-    (kill-new message)
-    (message "Copied error message")))
-
-(defun clutch-error-details-copy-all ()
-  "Copy the fully rendered error-details buffer as plain text."
-  (interactive)
-  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-    (unless (string-empty-p text)
-      (kill-new text)
-      (message "Copied error details"))))
 
 (defun clutch--make-buffer-query-error-details (connection sql err)
   "Return structured error details for a failed SQL execution on CONNECTION.
@@ -1086,106 +996,30 @@ SQL is the user-visible statement.  ERR is the original signaled condition."
   "Store the failed SQL execution details for BUFFER.
 CONNECTION, SQL and ERR describe the failed query."
   (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (setq-local clutch--buffer-error-details
-                  (clutch--make-buffer-query-error-details connection sql err)))))
+    (clutch--remember-problem-record
+     :buffer buffer
+     :connection connection
+     :problem (clutch--make-buffer-query-error-details connection sql err))))
 
-(defun clutch--render-error-details-buffer (details)
-  "Render structured error DETAILS into the current buffer."
-  (let ((inhibit-read-only t)
-        (summary (plist-get details :summary))
-        (backend (plist-get details :backend))
-        (diag (plist-get details :diag))
-        (debug-payload (plist-get details :debug))
-        (debug-events (plist-get details :debug-events))
-        (debug-mode-enabled (plist-get details :debug-mode-enabled))
-        (stderr-tail (plist-get details :stderr-tail)))
-    (erase-buffer)
-    (clutch-error-details-mode)
-    (setq-local clutch-error-details--details (copy-tree details))
-    (setq-local header-line-format
-                (format " Error Details%s"
-                        (if backend
-                            (format " [%s]" (upcase (symbol-name backend)))
-                          "")))
-    (clutch--insert-error-details-section "Summary" (or summary "No summary available"))
-    (when diag
-      (let* ((context (plist-get diag :context))
-             (sql (plist-get context :sql))
-             (generated-sql (plist-get context :generated-sql))
-             (display-context
-              (clutch--error-details-context-without-inline-sql context)))
-        (insert (propertize "Diagnostics" 'face 'bold) "\n")
-        (clutch--insert-error-details-field "Category" (plist-get diag :category))
-        (clutch--insert-error-details-field "Operation" (plist-get diag :op))
-        (clutch--insert-error-details-field "Request ID" (plist-get diag :request-id))
-        (clutch--insert-error-details-field "Conn ID" (plist-get diag :conn-id))
-        (clutch--insert-error-details-field "Exception" (plist-get diag :exception-class))
-        (clutch--insert-error-details-field "SQLState" (plist-get diag :sql-state))
-        (clutch--insert-error-details-field "Vendor code" (plist-get diag :vendor-code))
-        (clutch--insert-error-details-field "Raw message" (plist-get diag :raw-message))
-        (insert "\n")
-        (when sql
-          (clutch--insert-error-details-section "SQL" sql))
-        (when generated-sql
-          (clutch--insert-error-details-section
-           "Generated SQL"
-           generated-sql))
-        (when display-context
-          (clutch--insert-error-details-section
-           "Context"
-           (clutch--error-details-format-plist display-context)))
-        (when-let* ((cause-chain (plist-get diag :cause-chain)))
-          (clutch--insert-error-details-section
-           "Cause chain"
-           (clutch--error-details-format-plist cause-chain)))))
-    (cond
-     (debug-events
-      (clutch--insert-error-details-section
-       "Debug trace"
-       (clutch--format-debug-events debug-events)))
-     (debug-mode-enabled
-      (clutch--insert-error-details-section
-       "Debug trace"
-       "Debug mode is enabled, but this failure did not record extra event trace data."))
-     (t
-      (clutch--insert-error-details-section
-       "Debug trace"
-       "Debug mode is off. Run M-x clutch-debug-mode, reproduce the failure, then refresh this buffer.")))
-    (when debug-payload
-      (clutch--insert-error-details-section
-       "Backend debug"
-       (clutch--error-details-format-plist debug-payload)))
-    (when stderr-tail
-      (clutch--insert-error-details-section "Agent stderr tail" stderr-tail))
-    (goto-char (point-min))))
-
-(defun clutch-error-details-refresh ()
-  "Refresh the current error details buffer."
-  (interactive)
-  (unless clutch-error-details--fetcher
-    (user-error "No error-details provider is associated with this buffer"))
-  (let ((details (funcall clutch-error-details--fetcher)))
-    (unless details
-      (user-error "No error details are available for this buffer"))
-    (clutch--render-error-details-buffer details)))
-
-(defun clutch-show-error-details ()
-  "Show structured error details for the current buffer context."
-  (interactive)
-  (let ((source-buffer (current-buffer)))
-    (unless (clutch--current-buffer-error-details)
-      (user-error "No error details are available for this buffer"))
-    (let ((buf (get-buffer-create "*clutch-error-details*")))
-      (with-current-buffer buf
-        (setq-local clutch-error-details--fetcher
-                    (lambda ()
-                      (when (buffer-live-p source-buffer)
-                        (with-current-buffer source-buffer
-                          (clutch--current-buffer-error-details)))))
-        (clutch-error-details-refresh))
-      (pop-to-buffer buf '((display-buffer-at-bottom)))
-      buf)))
+(defun clutch--remember-execute-error (buffer connection sql err &optional context)
+  "Capture a failed execute path for BUFFER on CONNECTION.
+SQL is the user-visible statement and ERR is the original condition.
+Optional CONTEXT is merged into the debug event.  Return
+`(MESSAGE . SUMMARY)' for the failure."
+  (let* ((message (error-message-string err))
+         (summary (clutch--humanize-db-error message)))
+    (clutch--remember-buffer-query-error-details buffer connection sql err)
+    (when clutch-debug-mode
+      (clutch--remember-debug-event
+       :buffer buffer
+       :connection connection
+       :op "execute"
+       :phase "error"
+       :backend (clutch--backend-key-from-conn connection)
+       :summary summary
+       :sql sql
+       :context context))
+    (cons message summary)))
 
 ;;;; Error overlays
 
@@ -1368,29 +1202,38 @@ DML/DDL statements run silently; the final SELECT (if any) opens a
 result buffer.  Stops and reports on the first error."
   (let* ((last (car (last stmts)))
          (before-last (butlast stmts))
-         (done 0))
-    (dolist (stmt before-last)
-      (condition-case err
-          (progn (clutch--run-db-query clutch-connection stmt) (cl-incf done))
-        (quit
-         (clutch--handle-query-quit clutch-connection))
-        (clutch-db-error
-         (user-error "Statement %d failed: %s" (1+ done)
-                     (error-message-string err)))))
-    (if (clutch--select-query-p last)
-        (progn
-          (when (> done 0)
-            (message "%d statement%s executed" done (if (= done 1) "" "s")))
-          (clutch--execute last))
-      (condition-case err
-          (progn (clutch--run-db-query clutch-connection last) (cl-incf done)
-                 (message "%d statement%s executed"
-                          done (if (= done 1) "" "s")))
-        (quit
-         (clutch--handle-query-quit clutch-connection))
-        (clutch-db-error
-         (user-error "Statement %d failed: %s" (1+ done)
-                     (error-message-string err)))))))
+         (done 0)
+         (source-buffer (current-buffer)))
+    (cl-labels
+        ((signal-statement-error (err stmt)
+           (let* ((failure
+                   (clutch--remember-execute-error
+                    source-buffer clutch-connection stmt err
+                    (list :statement-index (1+ done))))
+                  (summary (cdr failure)))
+             (user-error "Statement %d failed: %s"
+                         (1+ done)
+                         (clutch--debug-workflow-message summary)))))
+      (dolist (stmt before-last)
+        (condition-case err
+            (progn (clutch--run-db-query clutch-connection stmt) (cl-incf done))
+          (quit
+           (clutch--handle-query-quit clutch-connection))
+          (clutch-db-error
+           (signal-statement-error err stmt))))
+      (if (clutch--select-query-p last)
+          (progn
+            (when (> done 0)
+              (message "%d statement%s executed" done (if (= done 1) "" "s")))
+            (clutch--execute last))
+        (condition-case err
+            (progn (clutch--run-db-query clutch-connection last) (cl-incf done)
+                   (message "%d statement%s executed"
+                            done (if (= done 1) "" "s")))
+          (quit
+           (clutch--handle-query-quit clutch-connection))
+          (clutch-db-error
+           (signal-statement-error err last)))))))
 
 (defun clutch-execute-dwim (beg end)
   "Execute region if active, otherwise execute query at point.

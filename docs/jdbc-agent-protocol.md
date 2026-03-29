@@ -67,7 +67,7 @@ Error responses:
 Error responses with opt-in debug payload:
 
 ```json
-{"id":1,"ok":false,"error":"connect failed","diag":{"category":"connect","op":"connect","request-id":1},"debug":{"thread":"pool-1-thread-2","request-context":{"params":{"url":"jdbc:oracle:thin:@//db:1521/FREEPDB1?password=<redacted>"}},"stack-trace":"java.sql.SQLException: connect failed\n..."}}
+{"id":1,"ok":false,"error":"connect failed","diag":{"category":"connect","op":"connect","request-id":1},"debug":{"thread":"pool-1-thread-2","request-context":{"redacted-url":"jdbc:oracle:thin:@//db:1521/FREEPDB1?password=<redacted>","user":"system","property-keys":["oracle.net.wallet_location"]},"stack-trace":"java.sql.SQLException: connect failed\n..."}}
 ```
 
 Rules:

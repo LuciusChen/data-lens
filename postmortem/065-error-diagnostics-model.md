@@ -122,15 +122,16 @@ tribal knowledge.
 The intended workflow is:
 
 1. User sees a short failure message.
-2. User invokes `clutch-show-error-details`.
-3. The details view shows:
+2. User enables `clutch-debug-mode` and reproduces the failure.
+3. The dedicated `*clutch-debug*` buffer shows:
    - concise summary
    - raw backend/driver error
    - structured diagnostics fields
    - generated SQL when relevant
    - related JDBC stderr tail when relevant
 
-This should become the documented workflow for bug reports and self-diagnosis.
+This section describes the diagnostics model, but the user-facing UI workflow is
+now superseded by [066](066-single-debug-buffer-workflow.md).
 
 ## Error Categories
 
@@ -221,23 +222,18 @@ This design does not aim to:
 
 ### Phase 3 — Troubleshooting UI in clutch
 
-- add a dedicated `clutch-show-error-details` entry point
+- add a dedicated troubleshooting entry point
 - surface generated/internal SQL in the same workflow
 - make JDBC stderr access explicit from the UI instead of buffer-name knowledge
 
-This phase is now implemented for JDBC diagnostics: `clutch-show-error-details`
-is a strict current-buffer troubleshooting entry point.  Connected buffers show
-details for their current connection; unconnected buffers show the most recent
-structured JDBC failure captured for that buffer.  Early startup/build
-`user-error`s that never produced diagnostics are still reported only in the
-original command failure path.  The same view shows the structured payload, agent
-stderr tail, and generated/internal SQL when the failing path used hidden SQL.
-The details buffer is also the copy surface: `w` copies the raw backend
-message, and `W` copies the full rendered report.
+This phase now lands in the single-buffer workflow from [066](066-single-debug-buffer-workflow.md):
+`clutch-debug-mode` gates extra capture, and `*clutch-debug*` is the sole
+supported troubleshooting surface.  Early startup/build `user-error`s that
+never produced diagnostics are still reported only in the original command
+failure path.  The debug buffer shows the structured payload, agent stderr
+tail, and generated/internal SQL when the failing path used hidden SQL.
 
-The next step is also now implemented: `clutch-debug-mode` is the single opt-in
-deep-debug switch.  It does not add a second troubleshooting UI.  Instead, it
-extends the same `clutch-show-error-details` workflow with two extra layers:
+The same deep-debug switch also adds two extra layers:
 
 - a bounded redacted recent-event trace for the current buffer / connection
   context

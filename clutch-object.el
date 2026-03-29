@@ -14,6 +14,7 @@
 
 (defvar clutch--conn-sql-product)
 (defvar clutch--connection-params)
+(defvar clutch-debug-mode nil)
 (defvar-local clutch--describe-object-entry nil
   "Object entry currently displayed in a clutch describe buffer.")
 (defvar clutch--object-cache (make-hash-table :test 'equal)
@@ -31,6 +32,7 @@ Each value is a plist with at least :entries and :fetched-at.")
 (defvar embark-keymap-alist)
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
+(declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
 (declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
 (declare-function clutch--effective-sql-product "clutch" (params))
@@ -40,6 +42,13 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--icon-with-face "clutch-ui"
                   (name fallback face &rest icon-args))
 (declare-function clutch--connection-key "clutch-connection" (conn))
+(declare-function clutch--humanize-db-error "clutch-query" (msg))
+(declare-function clutch--clear-connection-problem-capture "clutch" (connection))
+(declare-function clutch--remember-recoverable-metadata-warning "clutch"
+                  (connection op err &optional context))
+(declare-function clutch--remember-buffer-query-error-details "clutch-query"
+                  (buffer connection sql err))
+(declare-function clutch--remember-debug-event "clutch" (&rest event))
 (declare-function clutch--refresh-current-schema "clutch" (&optional silent))
 (declare-function clutch--schema-for-connection "clutch-schema" (&optional conn))
 (declare-function clutch--warn-completion-metadata-error-once "clutch" (message-text))
@@ -76,6 +85,8 @@ temporarily unavailable."
   (condition-case err
       (clutch--connection-alive-p conn)
     (clutch-db-error
+     (clutch--remember-recoverable-metadata-warning
+      conn "object-warmup" err '(:phase "liveness"))
      (clutch--warn-completion-metadata-error-once (error-message-string err))
      nil)))
 
@@ -308,6 +319,8 @@ temporarily unavailable."
                           (clutch--object-type-entries conn type))
                         (clutch--schedule-object-warmup conn)))))
               (clutch-db-error err
+               (clutch--remember-recoverable-metadata-warning
+                conn "object-warmup" err (list :object-category next))
                (clutch--warn-completion-metadata-error-once
                 (error-message-string err))
                (when (and conn
@@ -1157,16 +1170,40 @@ when the real object schema is unavailable."
       (clutch--render-object-describe conn entry params product))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
 
+(defun clutch--remember-object-operation-error (buffer conn entry op err)
+  "Remember object-operation ERR for BUFFER on CONN while targeting ENTRY.
+OP names the object workflow, such as \"describe\" or \"show-definition\"."
+  (let* ((msg (error-message-string err))
+         (summary (clutch--humanize-db-error msg)))
+    (clutch--remember-buffer-query-error-details buffer conn nil err)
+    (when clutch-debug-mode
+      (clutch--remember-debug-event
+       :buffer buffer
+       :connection conn
+       :op op
+       :phase "error"
+       :backend (clutch--backend-key-from-conn conn)
+       :summary summary
+       :context (list :entry-name (plist-get entry :name)
+                      :entry-type (plist-get entry :type))))))
+
 (defun clutch-describe-refresh (&optional _ignore-auto _noconfirm)
   "Refresh the current describe buffer."
   (interactive)
   (unless clutch--describe-object-entry
     (user-error "No object is associated with this buffer"))
   (clutch--refresh-current-schema (not (called-interactively-p 'interactive)))
-  (clutch--render-object-describe clutch-connection
-                                  clutch--describe-object-entry
-                                  clutch--connection-params
-                                  clutch--conn-sql-product))
+  (condition-case err
+      (progn
+        (clutch--render-object-describe clutch-connection
+                                        clutch--describe-object-entry
+                                        clutch--connection-params
+                                        clutch--conn-sql-product)
+        (clutch--clear-connection-problem-capture clutch-connection))
+    (clutch-db-error
+     (clutch--remember-object-operation-error
+      (current-buffer) clutch-connection clutch--describe-object-entry "describe" err)
+     (signal (car err) (cdr err)))))
 
 (defvar clutch-describe-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1187,38 +1224,52 @@ when the real object schema is unavailable."
 (defun clutch-object-show-ddl-or-source (&optional entry)
   "Show DDL or source for ENTRY."
   (interactive)
-  (let* ((context (clutch--command-connection-context))
+  (let* ((source-buffer (current-buffer))
+         (context (clutch--command-connection-context))
          (entry (or entry
                     (clutch--resolve-object-entry "Show definition: ")))
          (conn (or clutch-connection
                    (plist-get context :connection)
                    (user-error "No active connection")))
          (name (clutch--object-display-name entry))
-         (type (clutch--object-type-string entry))
-         (text (clutch--object-definition-text conn entry)))
+         (type (clutch--object-type-string entry)))
     (unless (clutch--object-supports-definition-p entry)
       (user-error "%s %s does not expose a definition"
                   type name))
-    (unless text
-      (user-error "DDL/source unavailable for %s %s" type name))
-    (clutch--remember-current-object entry)
-    (clutch--show-object-text-buffer conn entry text
-                                     (plist-get context :params)
-                                     (plist-get context :product))))
+    (condition-case err
+        (let ((text (clutch--object-definition-text conn entry)))
+          (unless text
+            (user-error "DDL/source unavailable for %s %s" type name))
+          (clutch--remember-current-object entry)
+          (clutch--clear-connection-problem-capture conn)
+          (clutch--show-object-text-buffer conn entry text
+                                           (plist-get context :params)
+                                           (plist-get context :product)))
+      (clutch-db-error
+       (clutch--remember-object-operation-error
+        source-buffer conn entry "show-definition" err)
+       (signal (car err) (cdr err))))))
 
 (defun clutch-object-describe (&optional entry)
   "Show a describe buffer for ENTRY."
   (interactive)
-  (let* ((context (clutch--command-connection-context))
+  (let* ((source-buffer (current-buffer))
+         (context (clutch--command-connection-context))
          (entry (or entry
                     (clutch--resolve-object-entry "Describe object: ")))
          (conn (or clutch-connection
                    (plist-get context :connection)
                    (user-error "No active connection"))))
     (clutch--remember-current-object entry)
-    (clutch--show-object-describe-buffer conn entry
-                                         (plist-get context :params)
-                                         (plist-get context :product))))
+    (condition-case err
+        (progn
+          (clutch--show-object-describe-buffer conn entry
+                                               (plist-get context :params)
+                                               (plist-get context :product))
+          (clutch--clear-connection-problem-capture conn))
+      (clutch-db-error
+       (clutch--remember-object-operation-error source-buffer conn entry "describe" err)
+       (signal (car err) (cdr err))))))
 
 (defun clutch-object-browse (&optional entry)
   "Insert SELECT * FROM the current table-like object into a query console."

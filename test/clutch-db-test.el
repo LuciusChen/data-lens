@@ -36,6 +36,7 @@
 ;; in the cache-based completion tests create dynamic (not lexical) bindings
 ;; that the bytecode in clutch-db-jdbc.el can see.
 (defvar clutch--schema-cache (make-hash-table :test 'equal))
+(defvar clutch-debug-buffer-name "*clutch-debug*")
 ;; `mysql-tls-verify-server' is defined in mysql.el; declare it special here so
 ;; local test bindings remain dynamic even before the backend requires mysql.el.
 (defvar mysql-tls-verify-server)
@@ -2333,8 +2334,8 @@ immediately without touching the agent process."
                  (should (string-match-p "`java'" (cadr err))))))))
       (kill-buffer stderr))))
 
-(ert-deftest clutch-db-test-jdbc-rpc-connect-error-points-to-error-details-command ()
-  "Connect errors should point users at the unified error-details command."
+(ert-deftest clutch-db-test-jdbc-rpc-connect-error-points-to-debug-workflow-when-disabled ()
+  "Connect errors should point users at the debug workflow when capture is off."
   (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
             ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 7))
             ((symbol-function 'clutch-jdbc--recv-response)
@@ -2348,7 +2349,29 @@ immediately without touching the agent process."
           (should nil))
       (clutch-db-error
        (should (string-match-p "diag-token-2038" (cadr err)))
-       (should (string-match-p "clutch-show-error-details" (cadr err)))))))
+       (should (string-match-p "clutch-debug-mode" (cadr err)))
+       (should (string-match-p (regexp-quote clutch-debug-buffer-name)
+                               (cadr err)))))))
+
+(ert-deftest clutch-db-test-jdbc-rpc-connect-error-points-to-debug-buffer-when-enabled ()
+  "Connect errors should point directly at the debug buffer when capture is on."
+  (let ((clutch-debug-mode t))
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 7))
+              ((symbol-function 'clutch-jdbc--recv-response)
+               (lambda (&rest _args)
+                 '(:ok nil
+                   :error "diag-token-2038"
+                   :diag (:category "connect")))))
+      (condition-case err
+          (progn
+            (clutch-jdbc--rpc "connect" '((url . "jdbc:clickhouse://127.0.0.1:8123/testdb")))
+            (should nil))
+        (clutch-db-error
+         (should (string-match-p "diag-token-2038" (cadr err)))
+         (should-not (string-match-p "clutch-debug-mode" (cadr err)))
+         (should (string-match-p (regexp-quote clutch-debug-buffer-name)
+                                 (cadr err))))))))
 
 (ert-deftest clutch-db-test-jdbc-send-adds-debug-flag-when-debug-mode-enabled ()
   "JDBC requests should opt into backend debug payloads only in debug mode."
@@ -2465,41 +2488,134 @@ immediately without touching the agent process."
            (should (string-match-p "hidden_table"
                                    (plist-get context :generated-sql)))))))))
 
-(ert-deftest clutch-db-test-jdbc-interrupt-query-sends-cancel-and-ignores-late-response ()
-  "Interrupting a JDBC query should send cancel and ignore the late response."
+(ert-deftest clutch-db-test-jdbc-interrupt-cancel-success-returns-t ()
+  "JDBC interrupt should return t only after a confirmed cancel acknowledgement."
   (let ((conn (make-clutch-jdbc-conn :conn-id 7
                                      :params '(:driver jdbc :rpc-timeout 12)))
+        (clutch-jdbc--agent-process 'fake-proc)
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
-        captured-op captured-params captured-timeout)
+        (clutch-jdbc--response-queue '((:id 99 :ok t)))
+        captured-op captured-params)
     (puthash conn 41 clutch-jdbc--busy-request-ids)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional timeout-seconds)
+    (cl-letf (((symbol-function 'clutch-jdbc--send)
+               (lambda (op params)
                  (setq captured-op op
-                       captured-params params
-                       captured-timeout timeout-seconds)
-                 '(:cancelled t))))
+                       captured-params params)
+                 99)))
       (should (clutch-db-interrupt-query conn))
       (should (equal captured-op "cancel"))
       (should (= (alist-get 'conn-id captured-params) 7))
-      (should (= captured-timeout 12))
       (should-not (gethash conn clutch-jdbc--busy-request-ids))
       (should (gethash 41 clutch-jdbc--ignored-response-ids)))))
 
-(ert-deftest clutch-db-test-jdbc-interrupt-query-returns-nil-without-busy-request ()
-  "JDBC interrupt should not send cancel when nothing is running."
+(ert-deftest clutch-db-test-jdbc-interrupt-cancel-timeout-does-not-kill-agent ()
+  "A slow cancel should degrade to nil without killing the shared JDBC agent."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 7
+                                     :params '(:driver jdbc :rpc-timeout 12)))
+        (clutch-jdbc-cancel-timeout-seconds 0.1)
+        (clutch-jdbc--agent-process 'fake-proc)
+        (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+        (clutch-jdbc--response-queue nil)
+        deleted-proc
+        send-called)
+    (puthash conn 41 clutch-jdbc--busy-request-ids)
+    (cl-letf (((symbol-function 'clutch-jdbc--send)
+               (lambda (_op _params)
+                 (setq send-called t)
+                 99))
+              ((symbol-function 'process-live-p)
+               (lambda (_proc) t))
+              ((symbol-function 'accept-process-output)
+               (lambda (_proc _secs) nil))
+              ((symbol-function 'delete-process)
+               (lambda (proc)
+                 (setq deleted-proc proc))))
+      (should-not (clutch-db-interrupt-query conn))
+      (should send-called)
+      (should (eq clutch-jdbc--agent-process 'fake-proc))
+      (should-not deleted-proc))))
+
+(ert-deftest clutch-db-test-jdbc-interrupt-no-busy-request-returns-nil ()
+  "JDBC interrupt should return nil and avoid RPC traffic when idle."
   (let ((conn (make-clutch-jdbc-conn :conn-id 7
                                      :params '(:driver jdbc :rpc-timeout 12)))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
-        rpc-called)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+        send-called)
+    (cl-letf (((symbol-function 'clutch-jdbc--send)
                (lambda (&rest _args)
-                 (setq rpc-called t)
+                 (setq send-called t)
                  (error "cancel should not be sent"))))
       (should-not (clutch-db-interrupt-query conn))
-      (should-not rpc-called)
+      (should-not send-called)
       (should (= (hash-table-count clutch-jdbc--ignored-response-ids) 0)))))
+
+(ert-deftest clutch-db-test-jdbc-disconnect-timeout-does-not-kill-agent ()
+  "A slow disconnect should clean local state without killing the shared agent."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 7
+                                      :params '(:driver jdbc :rpc-timeout 12)))
+         (clutch-jdbc-disconnect-timeout-seconds 0.1)
+         (clutch-jdbc--agent-process 'fake-proc)
+         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--response-queue nil)
+         deleted-proc
+         send-called)
+    (puthash conn 41 clutch-jdbc--busy-request-ids)
+    (puthash conn '(:summary "old error") clutch-jdbc--error-details-by-conn)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'clutch-jdbc--send)
+               (lambda (_op _params)
+                 (setq send-called t)
+                 99))
+              ((symbol-function 'process-live-p)
+               (lambda (_proc) t))
+              ((symbol-function 'accept-process-output)
+               (lambda (_proc _secs) nil))
+              ((symbol-function 'delete-process)
+               (lambda (proc)
+                 (setq deleted-proc proc))))
+      (clutch-db-disconnect conn)
+      (should send-called)
+      (should (eq clutch-jdbc--agent-process 'fake-proc))
+      (should-not deleted-proc)
+      (should-not (gethash conn clutch-jdbc--busy-request-ids))
+      (should-not (gethash conn clutch-jdbc--error-details-by-conn))
+      (should-not (gethash 7 clutch-jdbc--connections-by-id)))))
+
+(ert-deftest clutch-db-test-jdbc-clear-error-details-forgets-conn-cache ()
+  "Clearing JDBC diagnostics should remove the connection-scoped cache entry."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 7
+                                      :params '(:driver jdbc :rpc-timeout 12)))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
+    (puthash conn '(:summary "old error") clutch-jdbc--error-details-by-conn)
+    (clutch-db-clear-error-details conn)
+    (should-not (gethash conn clutch-jdbc--error-details-by-conn))))
+
+(ert-deftest clutch-db-test-jdbc-disconnect-skips-rpc-when-agent-dead ()
+  "Disconnect should skip the RPC when the shared JDBC agent is already dead."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 7
+                                      :params '(:driver jdbc :rpc-timeout 12)))
+         (clutch-jdbc--agent-process nil)
+         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         send-called)
+    (puthash conn 41 clutch-jdbc--busy-request-ids)
+    (puthash conn '(:summary "old error") clutch-jdbc--error-details-by-conn)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'clutch-jdbc--send)
+               (lambda (&rest _args)
+                 (setq send-called t)
+                 (error "disconnect RPC should not be sent"))))
+      (clutch-db-disconnect conn)
+      (should-not send-called)
+      (should-not (gethash conn clutch-jdbc--busy-request-ids))
+      (should-not (gethash conn clutch-jdbc--error-details-by-conn))
+      (should-not (gethash 7 clutch-jdbc--connections-by-id)))))
 
 (ert-deftest clutch-db-test-jdbc-agent-filter-drops-invalid-json-lines ()
   "Malformed agent output should be ignored instead of enqueuing nil."

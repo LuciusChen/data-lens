@@ -50,7 +50,6 @@
 (defvar clutch-jdbc-rpc-timeout-seconds 30)
 (defvar clutch--dml-result)
 (defvar clutch-debug-mode nil)
-(defvar clutch-debug-mode nil)
 (defvar clutch--spinner-timer nil
   "Timer driving the mode-line spinner animation, or nil.")
 (defvar clutch--spinner-index 0
@@ -65,7 +64,11 @@
 
 ;; Forward declarations — functions defined in clutch.el
 (declare-function clutch--effective-sql-product "clutch" (params))
+(declare-function clutch--clear-connection-problem-capture "clutch" (connection))
+(declare-function clutch--forget-problem-record "clutch" (&optional buffer connection))
+(declare-function clutch--forget-problem-records-for-connection "clutch" (connection))
 (declare-function clutch--remember-debug-event "clutch" (&rest event))
+(declare-function clutch--remember-problem-record "clutch" (&rest args))
 (declare-function clutch--update-console-buffer-name "clutch" ())
 (declare-function clutch--refresh-result-status-line "clutch" ())
 (declare-function clutch--refresh-schema-status-ui "clutch" (conn))
@@ -73,6 +76,7 @@
 (declare-function clutch--strip-leading-comments "clutch-query" (sql))
 (declare-function clutch--schema-affecting-query-p "clutch-query" (sql))
 (declare-function clutch--sql-main-op-keyword "clutch-query" (sql))
+(declare-function clutch--debug-workflow-message "clutch-query" (message))
 (declare-function clutch--humanize-db-error "clutch-query" (msg))
 
 ;; Forward declarations — functions defined in other modules
@@ -243,6 +247,7 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
 (defun clutch--run-db-query (conn sql)
   "Execute SQL on CONN and keep transaction UI state in sync."
   (let ((result (clutch-db-query conn sql)))
+    (clutch--clear-connection-problem-capture conn)
     (clutch--record-tx-state-after-query conn sql)
     result))
 
@@ -346,9 +351,11 @@ PRODUCT is the effective SQL product for the new logical session."
          (old-key (clutch--connection-key old-conn))
          (new-conn (clutch--build-conn params)))
     (clutch--clear-tx-dirty old-conn)
-    (clutch--rebind-connection-buffers old-conn new-conn params product)
     (when (clutch--connection-alive-p old-conn)
       (clutch-db-disconnect old-conn))
+    (unless (clutch--connection-alive-p new-conn)
+      (setq new-conn (clutch--build-conn params)))
+    (clutch--rebind-connection-buffers old-conn new-conn params product)
     (clutch--clear-connection-metadata-caches old-conn old-key)
     (clutch--clear-connection-metadata-caches new-conn)
     (clutch--finalize-rebound-connection new-conn)))
@@ -428,8 +435,10 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
 (defun clutch--backend-key-from-conn (conn)
   "Return backend icon key for live connection CONN, or nil."
   (or (and (fboundp 'clutch-jdbc-conn-p)
-           (clutch-jdbc-conn-p conn)
-           (plist-get (clutch-jdbc-conn-params conn) :driver))
+           (condition-case nil
+               (and (clutch-jdbc-conn-p conn)
+                    (plist-get (clutch-jdbc-conn-params conn) :driver))
+             (void-variable nil)))
       (pcase (condition-case nil
                  (clutch-db-display-name conn)
                ((cl-no-applicable-method wrong-type-argument) nil))
@@ -682,6 +691,33 @@ Returns nil when nothing is found (caller should prompt if needed)."
     (setq context (plist-put context :backend backend))
     context))
 
+(defun clutch--make-connection-error-details (params err)
+  "Return structured error details for a failed connection attempt.
+PARAMS describe the attempted connection and ERR is the original
+signaled condition."
+  (let* ((message (or (cadr err) (error-message-string err)))
+         (backend (clutch--backend-key-from-params params))
+         (details (copy-tree (nth 2 err)))
+         (diag (copy-tree (plist-get details :diag)))
+         (context (copy-tree (plist-get diag :context)))
+         (default-context (clutch--debug-connection-context backend params)))
+    (unless details
+      (setq details (list :summary (clutch--humanize-db-error message))))
+    (unless (plist-member details :backend)
+      (setq details (plist-put details :backend backend)))
+    (unless (plist-get details :summary)
+      (setq details (plist-put details :summary
+                               (clutch--humanize-db-error message))))
+    (unless diag
+      (setq diag (list :raw-message message)))
+    (unless (plist-get diag :raw-message)
+      (setq diag (plist-put diag :raw-message message)))
+    (cl-loop for (key val) on default-context by #'cddr
+             unless (plist-member context key)
+             do (setq context (plist-put context key val)))
+    (setq diag (plist-put diag :context context))
+    (plist-put details :diag diag)))
+
 (defun clutch--build-conn (params)
   "Connect to a database using PARAMS, resolving the password via auth-source.
 Returns a live connection object or signals a `user-error'."
@@ -705,28 +741,32 @@ Returns a live connection object or signals a `user-error'."
                       db-params)))
     (condition-case err
         (let ((conn (clutch-db-connect backend db-params)))
-          (clutch--remember-debug-event
-           :connection conn
-           :op "connect"
-           :phase "success"
-           :backend backend
-           :summary (condition-case nil
-                        (format "Connected to %s" (clutch--connection-key conn))
-                      (error "Connected"))
-           :context (clutch--debug-connection-context backend params))
+          (when clutch-debug-mode
+            (clutch--remember-debug-event
+             :connection conn
+             :op "connect"
+             :phase "success"
+             :backend backend
+             :summary (condition-case nil
+                          (format "Connected to %s" (clutch--connection-key conn))
+                        (error "Connected"))
+             :context (clutch--debug-connection-context backend params)))
           conn)
       (clutch-db-error
-       (setq-local clutch--buffer-error-details (nth 2 err))
+       (clutch--remember-problem-record
+        :buffer (current-buffer)
+        :problem (clutch--make-connection-error-details params err))
        (let ((message (clutch--humanize-db-error
                        (or (car (cdr err))
                            (error-message-string err)))))
-         (clutch--remember-debug-event
-          :op "connect"
-          :phase "error"
-          :backend backend
-          :summary message
-          :context (clutch--debug-connection-context backend params))
-         (user-error "%s" message))))))
+         (when clutch-debug-mode
+           (clutch--remember-debug-event
+            :op "connect"
+            :phase "error"
+            :backend backend
+            :summary message
+            :context (clutch--debug-connection-context backend params)))
+         (user-error "%s" (clutch--debug-workflow-message message)))))))
 
 (defun clutch--inject-entry-name (params name)
   "Return PARAMS with :pass-entry defaulting to NAME.
@@ -790,6 +830,8 @@ params; see `clutch-connection-alist' for details."
            (conn    (clutch--build-conn params)))
       (when old-live-p
         (clutch--do-disconnect old-conn))
+      (unless (clutch--connection-alive-p conn)
+        (setq conn (clutch--build-conn params)))
       (clutch--activate-current-buffer-connection conn params product)
       (message "Connected to %s" (clutch--connection-key conn)))))
 
@@ -825,6 +867,16 @@ state, and disconnects the underlying connection."
   (clutch--mark-dml-results-connection-closed conn)
   (clutch--invalidate-derived-buffers conn)
   (clutch--clear-tx-dirty conn)
+  (when clutch-debug-mode
+    (clutch--remember-debug-event
+     :connection conn
+     :op "disconnect"
+     :phase "success"
+     :backend (clutch--backend-key-from-conn conn)
+     :summary (condition-case nil
+                  (format "Disconnected from %s" (clutch--connection-key conn))
+                (error "Disconnected"))))
+  (clutch--forget-problem-record nil conn)
   (clutch-db-disconnect conn))
 
 (defun clutch--disconnect-on-kill ()

@@ -65,7 +65,7 @@
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "1de60d526113a3e62d9045b0b7a072677f000f4d2d0edf4e1b8d0c3feee660ed"
+  "c39cd888f0cfe0e868db4cd3841ca3e49a73ce03c54a19a88f9fceb228155be7"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -108,8 +108,20 @@ Set this to nil to keep Oracle in auto-commit by default.  Per-connection
 (defvar clutch-jdbc-rpc-timeout-seconds 30
   "Forward declaration; defined as `defcustom' in clutch.el.")
 
+(defvar clutch-jdbc-cancel-timeout-seconds 5
+  "Seconds to wait for a cancel acknowledgement from the JDBC agent.
+Shorter than `clutch-jdbc-rpc-timeout-seconds' because a slow cancel
+should degrade to disconnect, not block the user.")
+
+(defvar clutch-jdbc-disconnect-timeout-seconds 5
+  "Seconds to wait for a disconnect acknowledgement from the JDBC agent.
+A stuck disconnect should not block the user or kill the agent.")
+
 (defvar clutch-debug-mode nil
   "Forward declaration; defined as a global minor mode in clutch.el.")
+
+(defvar clutch-debug-buffer-name "*clutch-debug*"
+  "Forward declaration; defined in clutch.el.")
 
 ;;;; Driver sources (for automatic installation from Maven Central)
 
@@ -544,8 +556,12 @@ TIMEOUT-SECONDS overrides the default wait time.  Signals
   (let ((message (or (plist-get response :error)
                      (format "agent error on op %s" op))))
     (if (and (plist-get response :diag)
-             (not (string-match-p "clutch-show-error-details" message)))
-        (format "%s Run M-x clutch-show-error-details for details." message)
+             (not (string-match-p (regexp-quote clutch-debug-buffer-name) message)))
+        (if clutch-debug-mode
+            (format "%s See %s for details." message clutch-debug-buffer-name)
+          (format
+           "%s Enable clutch-debug-mode, reproduce the failure, then inspect %s."
+           message clutch-debug-buffer-name))
       message)))
 
 (defun clutch-jdbc--error-details-from-response (op response)
@@ -740,10 +756,14 @@ Returns a `clutch-jdbc-conn'."
   (remhash conn clutch-jdbc--busy-request-ids)
   (remhash conn clutch-jdbc--error-details-by-conn)
   (remhash (clutch-jdbc-conn-conn-id conn) clutch-jdbc--connections-by-id)
-  (condition-case nil
-      (clutch-jdbc--rpc "disconnect"
-                        `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))
-    (clutch-db-error nil)))
+  (when (clutch-jdbc--agent-live-p)
+    (condition-case nil
+        (let ((id (clutch-jdbc--send
+                   "disconnect"
+                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))))
+          (clutch-jdbc--recv-response-nonfatal
+           id clutch-jdbc-disconnect-timeout-seconds))
+      (error nil))))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-jdbc-conn))
   "Return non-nil if the agent process is running and CONN belongs to it.
@@ -760,6 +780,10 @@ pass `process-live-p' briefly; the identity check closes that window."
   "Return the latest structured error details snapshot for JDBC CONN."
   (when-let* ((details (gethash conn clutch-jdbc--error-details-by-conn)))
     (copy-tree details)))
+
+(cl-defmethod clutch-db-clear-error-details ((conn clutch-jdbc-conn))
+  "Forget the latest structured error details snapshot for JDBC CONN."
+  (remhash conn clutch-jdbc--error-details-by-conn))
 
 (cl-defmethod clutch-db-init-connection ((_conn clutch-jdbc-conn))
   "No post-connect initialization needed for JDBC connections.")
@@ -1006,10 +1030,11 @@ Clob plists become their :preview string."
   (when-let* ((request-id (gethash conn clutch-jdbc--busy-request-ids)))
     (puthash request-id t clutch-jdbc--ignored-response-ids)
     (remhash conn clutch-jdbc--busy-request-ids)
-    (clutch-jdbc--rpc "cancel"
-                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
-                      (clutch-jdbc--conn-rpc-timeout conn))
-    t))
+    (let* ((id (clutch-jdbc--send "cancel"
+                                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))))
+           (response (clutch-jdbc--recv-response-nonfatal
+                      id clutch-jdbc-cancel-timeout-seconds)))
+      (and response (eq t (plist-get response :ok))))))
 
 (defun clutch-jdbc--build-oracle-paged-sql (conn base offset page-size order-by)
   "Build Oracle ROWNUM-based pagination SQL for CONN.

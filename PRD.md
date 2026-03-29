@@ -419,6 +419,8 @@ Connection profile plist keys:
 | `clutch-read-idle-timeout-seconds` | `30` | natnum | Read idle timeout (MySQL, PG, JDBC) |
 | `clutch-query-timeout-seconds` | `30` | natnum | Server-side statement timeout (PG, JDBC) |
 | `clutch-jdbc-rpc-timeout-seconds` | `30` | natnum | Global JDBC agent RPC timeout |
+| `clutch-jdbc-cancel-timeout-seconds` | `5` | natnum | JDBC cancel acknowledgement timeout; timeout degrades to disconnect |
+| `clutch-jdbc-disconnect-timeout-seconds` | `5` | natnum | JDBC disconnect acknowledgement timeout; timeout must not kill the agent |
 
 ### Insert Buffer
 
@@ -898,13 +900,11 @@ M-x clutch-repl
 ;; Connect (generic in clutch-mode/REPL; query consoles reconnect their own saved connection)
 C-c C-e  (or  M-x clutch-connect)
 
-;; Show structured error details for the current buffer context
-;; In the details buffer: w copies the raw backend message, W copies the full report.
-M-x clutch-show-error-details
-
-;; Opt-in deeper troubleshooting capture; reproduce the failure, then reopen
-;; `clutch-show-error-details` for recent event trace and backend debug payload.
+;; Opt-in troubleshooting capture.
 M-x clutch-debug-mode
+
+;; Dedicated debug surface.  Enabling debug mode creates and resets this buffer.
+*clutch-debug*
 
 ;; Object jump / describe / actions / schema switch
 C-c C-j
