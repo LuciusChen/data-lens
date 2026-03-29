@@ -153,8 +153,8 @@ START defaults to 0."
     found))
 
 (defun clutch-db-sql-has-top-level-clause-p (sql pattern &optional start)
-  "Return non-nil when SQL has top-level PATTERN."
-  (not (null (clutch-db-sql-find-top-level-clause sql pattern start))))
+  "Return non-nil when SQL has top-level PATTERN starting at START."
+  (clutch-db-sql-find-top-level-clause sql pattern start))
 
 (defun clutch-db-sql-has-top-level-limit-p (sql)
   "Return non-nil when SQL has a top-level LIMIT clause."
@@ -174,6 +174,7 @@ Leaves nested ORDER BY clauses inside subqueries or window functions intact."
 (defun clutch-db--build-limit-offset-paged-sql (base-sql page-num page-size
                                                          order-by escape-fn)
   "Build a LIMIT/OFFSET paginated query from BASE-SQL.
+PAGE-NUM is zero-based and PAGE-SIZE is the row count per page.
 ORDER-BY is (COL . DIR) or nil.  ESCAPE-FN escapes the column name."
   (if (clutch-db-sql-has-top-level-limit-p base-sql)
       base-sql
@@ -219,23 +220,30 @@ For example, SET NAMES utf8mb4 on MySQL.")
 (cl-defgeneric clutch-db-manual-commit-p (conn)
   "Return non-nil when CONN is in manual-commit mode.")
 
-(cl-defmethod clutch-db-manual-commit-p ((_conn t)) nil)
+(cl-defmethod clutch-db-manual-commit-p ((_conn t))
+  "Fallback implementation for backends without manual-commit mode."
+  nil)
 
 (cl-defgeneric clutch-db-commit (conn)
   "Commit the current transaction on CONN.")
 
-(cl-defmethod clutch-db-commit ((_conn t)) nil)
+(cl-defmethod clutch-db-commit ((_conn t))
+  "Fallback implementation for backends without explicit commit support."
+  nil)
 
 (cl-defgeneric clutch-db-rollback (conn)
   "Roll back the current transaction on CONN.")
 
-(cl-defmethod clutch-db-rollback ((_conn t)) nil)
+(cl-defmethod clutch-db-rollback ((_conn t))
+  "Fallback implementation for backends without explicit rollback support."
+  nil)
 
 (cl-defgeneric clutch-db-set-auto-commit (conn auto-commit)
   "Set CONN's auto-commit mode.
 AUTO-COMMIT non-nil enables auto-commit; nil enables manual-commit.")
 
 (cl-defmethod clutch-db-set-auto-commit ((_conn t) _auto-commit)
+  "Signal that the backend does not support runtime auto-commit changes."
   (user-error "This backend does not support runtime auto-commit toggle"))
 
 (cl-defgeneric clutch-db-eager-schema-refresh-p (conn)
@@ -333,7 +341,8 @@ Each entry is a plist containing at least :name and :type, and may also
 include :schema, :source-schema, :target-schema, and :target-name.")
 
 (cl-defmethod clutch-db-list-table-entries ((conn t))
-  "Default table-entry implementation derived from `clutch-db-list-tables'."
+  "Default table-entry implementation for CONN.
+Derived from `clutch-db-list-tables'."
   (mapcar (lambda (table)
             (list :name table
                   :type "TABLE"))
@@ -353,7 +362,8 @@ include :schema, :source-schema, :target-schema, and :target-name.")
   "Return table entry plists matching PREFIX on CONN, or nil when unsupported.")
 
 (cl-defmethod clutch-db-search-table-entries ((conn t) prefix)
-  "Default table entry search derived from `clutch-db-complete-tables'."
+  "Default table entry search for CONN and PREFIX.
+Derived from `clutch-db-complete-tables'."
   (mapcar (lambda (name) (list :name name :type "TABLE"))
           (or (clutch-db-complete-tables conn prefix) '())))
 
@@ -362,7 +372,7 @@ include :schema, :source-schema, :target-schema, and :target-name.")
 This is the fast object-discovery snapshot used by clutch's object picker.")
 
 (cl-defmethod clutch-db-browseable-object-entries ((conn t))
-  "Default browseable-object snapshot.
+  "Default browseable-object snapshot for CONN.
 Merges direct table-like entries with empty-prefix search-discovered entries."
   (append (clutch-db-list-table-entries conn)
           (clutch-db-search-table-entries conn "")))
@@ -507,18 +517,24 @@ Returns a backend-specific connection object."
   "Format temporal plist VAL as a string, or nil if VAL is not temporal.
 Handles datetime (with :year and :hours), date (with :year only), and
 time (with :hours only) plists returned by the protocol layers."
-  (cond
-   ((and (listp val) (plist-get val :year) (plist-get val :hours))
-    (format "%04d-%02d-%02d %02d:%02d:%02d"
-            (plist-get val :year) (plist-get val :month) (plist-get val :day)
-            (plist-get val :hours) (plist-get val :minutes) (plist-get val :seconds)))
-   ((and (listp val) (plist-get val :year))
-    (format "%04d-%02d-%02d"
-            (plist-get val :year) (plist-get val :month) (plist-get val :day)))
-   ((and (listp val) (plist-get val :hours))
-    (format "%s%02d:%02d:%02d"
-            (if (plist-get val :negative) "-" "")
-            (plist-get val :hours) (plist-get val :minutes) (plist-get val :seconds)))))
+  (when (listp val)
+    (let ((year (plist-get val :year))
+          (month (plist-get val :month))
+          (day (plist-get val :day))
+          (hours (plist-get val :hours))
+          (minutes (plist-get val :minutes))
+          (seconds (plist-get val :seconds))
+          (negative (plist-get val :negative)))
+      (cond
+       ((and year hours)
+        (format "%04d-%02d-%02d %02d:%02d:%02d"
+                year month day hours minutes seconds))
+       (year
+        (format "%04d-%02d-%02d" year month day))
+       (hours
+        (format "%s%02d:%02d:%02d"
+                (if negative "-" "")
+                hours minutes seconds))))))
 
 (provide 'clutch-db)
 ;;; clutch-db.el ends here

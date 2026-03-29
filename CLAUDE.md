@@ -39,15 +39,17 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Stop splitting before glue takes over**: If a proposed extraction mostly adds `defvar`, `declare-function`, and cross-file hopping without reducing conceptual ownership, stop. That is a sign of over-modularization.
 - **Use declarations to keep modules honest**: When a module depends on shared globals or functions defined elsewhere, add explicit `defvar` / `declare-function` forms so byte-compilation stays clean.
 - **Favor incremental modularization**: Move the smallest coherent slice first, then reload, byte-compile, and rerun focused tests before attempting the next extraction.
-- **No side effects on load**: Loading a file must not alter Emacs behavior. Activation must be explicit.
+- **No behavioral side effects on load**: Loading a file must not alter Emacs editing behavior (no modes enabled, no hooks fired). Package-level registration side effects are allowed: fringe bitmaps, `auto-mode-alist` entries, backend registrations, Embark action registrations, and `kill-emacs-hook` cleanup.
 - **Reuse Emacs infrastructure**: Use `completing-read`, `special-mode`, `text-property-search-forward`, standard hooks, and other stock primitives.
 - **Public naming**: `clutch-` for UI, `mysql-` / `pg-` for protocol. No double dash for public API.
-- **Private naming**: `clutch--`, `mysql--`, `pg--`. Never call private symbols from outside the defining file.
+- **Private naming**: `clutch--`, `mysql--`, `pg--`. Never call private symbols across subsystem boundaries. Files split from the same subsystem (e.g., `clutch-query.el`, `clutch-object.el`, `clutch-edit.el`, `clutch-schema.el` all belong to the `clutch` subsystem) may call each other's `clutch--` symbols, but must add `declare-function` / `defvar` declarations for byte-compilation.
 - **Predicates**: Multi-word predicate names end in `-p`.
 - **Unused args**: Prefix with `_`.
 - **Prefer flat control flow**: Avoid deep `let` → `if` → `let` nesting. Use `if-let*`, `when-let*`, `pcase`, and `pcase-let`.
+- **Prefer destructuring over repeated accessors**: Use `pcase-let` to destructure lists and plists instead of multiple `nth` or `plist-get` calls on the same object. For example, prefer `(pcase-let ((\`(,a ,b ,c) row)) ...)` over `(let ((a (nth 0 row)) (b (nth 1 row)) (c (nth 2 row))) ...)`.
 - **Prefer `cl-loop` for non-trivial accumulation**: Use it instead of `dolist` + manual accumulators or over-clever folds.
 - **Use the right error type**: `user-error` for user-caused problems; `error` for programmer bugs; `condition-case` for recoverable failures.
+- **Prefer idiomatic primitives**: Use `vconcat` to build vectors from lists, not `apply #'vector`. Predicates returning non-nil need no `(not (null ...))` wrapper — the return value itself suffices.
 - **State placement**: `defvar-local` for buffer state, plain `defvar` for shared state, `defcustom` for user options. Major modes must make their state buffer-local.
 - **Mode definitions**: Read-only UI buffers derive from `special-mode`; editing buffers derive from the right parent (`sql-mode`, `comint-mode`, etc.). Register buffer-local hooks in the mode body with LOCAL=`t`.
 - **Rendering discipline**: Use text properties for data-bearing annotations and overlays only for ephemeral visuals. Build render buffers from cached data, not by reparsing displayed text.

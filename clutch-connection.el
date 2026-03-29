@@ -278,7 +278,8 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
                               (buffer-local-value 'clutch--conn-sql-product buf))))))
 
 (defun clutch--bind-connection-context (conn &optional params product)
-  "Bind CONN and related reconnect context in the current buffer."
+  "Bind CONN and related reconnect context in the current buffer.
+Also store PARAMS and PRODUCT when present."
   (setq-local clutch-connection conn)
   (setq-local clutch--buffer-error-details nil)
   (when params
@@ -290,7 +291,7 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
                     clutch--conn-sql-product))))
 
 (defun clutch--rebind-connection-buffers (old-conn new-conn params product)
-  "Replace OLD-CONN with NEW-CONN across attached buffers."
+  "Replace OLD-CONN with NEW-CONN across attached buffers using PARAMS and PRODUCT."
   (dolist (buf (buffer-list))
     (when (and (buffer-live-p buf)
                (eq (buffer-local-value 'clutch-connection buf) old-conn))
@@ -306,7 +307,8 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
           (clutch--update-position-indicator)))))))
 
 (defun clutch--activate-current-buffer-connection (conn params &optional product)
-  "Bind CONN as the current buffer connection and prime local UI state."
+  "Bind CONN as the current buffer connection and prime local UI state.
+Also remember PARAMS and PRODUCT."
   (clutch--bind-connection-context conn params product)
   (clutch--prime-schema-cache conn)
   (clutch--update-mode-line)
@@ -659,7 +661,7 @@ Checks in order:
   2. :pass-entry key — suffix-matched against all pass entries, so
      \\='dev-mysql\\=' finds \\='mysql/dev-mysql\\='.  Automatically set to the
      connection name by callers; override in `clutch-connection-alist'.
-  3. auth-source-search by :host/:user/:port (authinfo / pass).
+  3. `auth-source-search' by :host/:user/:port (authinfo / pass).
 Returns nil when nothing is found (caller should prompt if needed)."
   (let ((pw    (plist-get params :password))
         (entry (plist-get params :pass-entry)))

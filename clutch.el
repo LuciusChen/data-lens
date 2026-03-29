@@ -80,7 +80,7 @@
 
 (defface clutch-insert-field-name-face
   '((t :inherit clutch-header-face :foreground "#b8d7ec"))
-  "Face for insert-buffer field names."
+  "Face for `insert-buffer' field names."
   :group 'clutch)
 
 (defface clutch-insert-field-tag-face
@@ -99,7 +99,7 @@
 
 (defface clutch-insert-inline-error-face
   '((t :inherit error))
-  "Face for inline insert-buffer validation messages."
+  "Face for inline `insert-buffer' validation messages."
   :group 'clutch)
 
 (defface clutch-insert-active-field-face
@@ -109,7 +109,7 @@
 
 (defface clutch-insert-active-field-name-face
   '((t :inherit (clutch-header-active-face clutch-insert-field-name-face)))
-  "Face for the active insert-buffer field prefix."
+  "Face for the active `insert-buffer' field prefix."
   :group 'clutch)
 
 (defface clutch-header-active-face
@@ -232,7 +232,7 @@ Password resolution order:
      clutch automatically looks up a pass entry whose name matches NAME
      (the car of this alist entry).  The password is on the first line.
      Use :pass-entry STR to override the entry name if it differs.
-  3. auth-source-search — searches ~/.authinfo / ~/.authinfo.gpg / pass
+  3. `auth-source-search' — searches ~/.authinfo / ~/.authinfo.gpg / pass
      by :host, :user, and :port (standard auth-source matching)."
   :type '(alist :key-type string
                 :value-type (plist :options
@@ -1259,12 +1259,13 @@ executed outside clutch that would otherwise leave stale completions."
             (clutch--compute-tables-in-query-cache schema)))))
 
 (defun clutch--tables-in-current-statement (schema)
-  "Return known table names mentioned in the current statement only."
+  "Return known table names mentioned in the current statement for SCHEMA."
   (plist-get (clutch--tables-in-query-cache-entry schema) :statement-tables))
 
 (defun clutch--innermost-paren-range (text point-offset)
-  "Return (BEG . END) of the innermost parenthesized block containing POINT-OFFSET.
-Returns (0 . LEN) when POINT-OFFSET is at the top level."
+  "Return the innermost parenthesized range in TEXT.
+The result is (BEG . END) containing POINT-OFFSET, or (0 . LEN) when
+POINT-OFFSET is at the top level."
   (let* ((len (length text))
          (stack nil)
          (result (cons 0 len))
@@ -1286,7 +1287,7 @@ Returns (0 . LEN) when POINT-OFFSET is at the top level."
     result))
 
 (defun clutch--union-branch-range (text point-offset)
-  "Return (BEG . END) of the UNION branch containing POINT-OFFSET.
+  "Return (BEG . END) of the UNION branch in TEXT containing POINT-OFFSET.
 First narrows to the innermost parenthesized scope, then splits by
 UNION / UNION ALL at depth 0 within that scope."
   (pcase-let* ((`(,scope-beg . ,scope-end)
@@ -1361,7 +1362,7 @@ String literals and comments are ignored via masking."
     (cons (nreverse tables) (nreverse aliases))))
 
 (defun clutch--table-aliases-in-current-statement (schema)
-  "Return alias-to-table mappings for the UNION branch containing point.
+  "Return alias-to-table mappings for the UNION branch in SCHEMA containing point.
 When the statement has no UNION, returns all aliases."
   (let* ((entry (clutch--tables-in-query-cache-entry schema))
          (all-aliases (plist-get entry :statement-aliases))
@@ -1375,7 +1376,7 @@ When the statement has no UNION, returns all aliases."
       (cdr (clutch--extract-tables-and-aliases text (car range) (cdr range))))))
 
 (defun clutch--toplevel-union-branch-range (text point-offset)
-  "Return (BEG . END) of the depth-0 UNION branch containing POINT-OFFSET.
+  "Return (BEG . END) of the depth-0 UNION branch in TEXT containing POINT-OFFSET.
 Unlike `clutch--union-branch-range', does not narrow into parenthesized
 scopes first, so FROM/JOIN clauses remain visible from inside expressions."
   (let ((len (length text))
@@ -1549,9 +1550,10 @@ Normalizes quoted identifiers to match the alias cache."
   nil)
 
 (defun clutch--tables-in-query (schema)
-  "Return known table names in FROM/JOIN/UPDATE clauses of current statement.
-Scans only the SQL statement surrounding point, bounded by semicolons or
-blank lines.  Falls back to `clutch--tables-in-buffer' when none are found."
+  "Return known table names for SCHEMA in the current statement.
+This scans FROM/JOIN/UPDATE clauses in the SQL statement around point,
+bounded by semicolons or blank lines.  Falls back to
+`clutch--tables-in-buffer' when none are found."
   (plist-get (clutch--tables-in-query-cache-entry schema) :tables))
 
 (defun clutch--cached-columns (schema table)
@@ -2968,7 +2970,8 @@ RECT is (ROW-INDICES . COL-INDICES)."
 (defun clutch-result-copy (format &optional rect)
   "Unified copy entry point for result buffer.
 FORMAT is one of symbols: `tsv', `csv', `insert', `update'.
-If region is active, copy rectangle bounds from region endpoints.
+When RECT is non-nil, use it as precomputed rectangle bounds.  If region
+is active, copy rectangle bounds from region endpoints.
 Otherwise, copy the current cell."
   (pcase format
     ('tsv
@@ -3144,7 +3147,7 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
 
 (defun clutch-result--aggregate-target (&optional rect)
   "Return aggregate target as (ROW-INDICES COL-INDICES).
-With region: use all selected columns.
+When RECT is non-nil, use it directly.  With region: use all selected columns.
 Without region: use current cell."
   (if (or rect (use-region-p))
       (pcase-let* ((`(,row-indices . ,col-indices)
@@ -3335,7 +3338,7 @@ Uses xmllint for pretty-printing when available; shows a message otherwise."
     (nreverse lines)))
 
 (defun clutch--blob-likely-text-p (bytes &optional sample-size)
-  "Return non-nil when BYTES appears mostly text-like."
+  "Return non-nil when BYTES appears mostly text-like within SAMPLE-SIZE bytes."
   (let* ((n (min (length bytes) (or sample-size 512)))
          (printable 0))
     (if (= n 0)
@@ -3428,7 +3431,8 @@ Selects JSON, XML, or binary string view based on column type and content."
                              (mapconcat #'clutch--value-to-literal vals ", ")))))
 
 (defun clutch-result--selected-update-col-indices (pk-indices col-indices op)
-  "Return non-PK update column indices from COL-INDICES for OP."
+  "Return non-PK update column indices from COL-INDICES for OP.
+PK-INDICES are excluded."
   (let ((set-col-indices
          (cl-loop for cidx in col-indices
                   unless (memq cidx pk-indices)
@@ -3474,7 +3478,7 @@ OP is a short operation description used in user-facing error messages."
 
 (defun clutch-result--copy-rows-as-insert (&optional rect)
   "Copy row(s) as INSERT statement(s) to the kill ring.
-Rows/columns: region rectangle > current cell."
+Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
   (let* ((rect (or rect
                    (if (use-region-p)
                        (clutch-result--region-rectangle-indices)
@@ -3488,7 +3492,7 @@ Rows/columns: region rectangle > current cell."
          (col-indices (or (cdr-safe rect)
                           (cl-loop for i below (length clutch--result-columns)
                                    collect i)))
-         (table (clutch--result-source-table-or-user-error "copy INSERT SQL"))
+         (table (clutch--result-source-table-or-user-error "Copy INSERT SQL"))
          (stmts (clutch-result--build-insert-statements indices col-indices table)))
     (kill-new (mapconcat #'identity stmts "\n"))
     (deactivate-mark)
@@ -3498,7 +3502,7 @@ Rows/columns: region rectangle > current cell."
 
 (defun clutch-result--copy-rows-as-update (&optional rect)
   "Copy row(s) as UPDATE statement(s) to the kill ring.
-Rows/columns: region rectangle > current cell."
+Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
   (let* ((rect (or rect
                    (if (use-region-p)
                        (clutch-result--region-rectangle-indices)
@@ -3538,7 +3542,7 @@ Rows/columns: region rectangle > current cell."
 
 (defun clutch-result--copy-rows-as-csv (&optional rect)
   "Copy row(s) as CSV to the kill ring.
-Rows/columns: region rectangle > current cell.
+Use RECT when non-nil.  Rows/columns: region rectangle > current cell.
 Includes a header row with column names."
   (let* ((rect (or rect
                    (if (use-region-p)
@@ -3668,7 +3672,8 @@ MESSAGE-ARGS are forwarded to `message' after the row count data and path."
            path message-args)))
 
 (defun clutch--export-text-to-clipboard (text rows message-fmt &rest message-args)
-  "Copy TEXT for ROWS to the kill ring and report success."
+  "Copy TEXT for ROWS to the kill ring.
+Report success with MESSAGE-FMT and MESSAGE-ARGS."
   (kill-new text)
   (apply #'message message-fmt
          (length rows) (if (= (length rows) 1) "" "s")

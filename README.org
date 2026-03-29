@@ -1000,15 +1000,7 @@ installation (Oracle, SQL Server, Redshift), agent JAR validation and lifecycle,
 =clutch-db-live-p= identity check, RPC timeout kill, cross-backend value
 formatting and null handling.
 
-#+begin_src sh
-emacs -batch -L . -l ert -l clutch \
-  -l test/clutch-test.el \
-  --eval '(ert-run-tests-batch-and-exit)'
-
-emacs -batch -L . -l ert -l clutch-db-jdbc \
-  -l test/clutch-db-test.el \
-  --eval '(ert-run-tests-batch-and-exit "clutch-db-test-jdbc")'
-#+end_src
+See =CLAUDE.md= §Pre-Commit Checklist for exact test commands.
 
 ** MySQL live tests (require a running MySQL)
 

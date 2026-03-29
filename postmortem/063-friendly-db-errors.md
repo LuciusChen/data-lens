@@ -9,15 +9,13 @@ failed:"/"UPDATE failed:"/"DELETE failed:" prefixes from staged mutation paths.
 ## Decision
 
 Add a single `clutch--humanize-db-error` function with a pattern→hint lookup
-table (`clutch--db-error-hints`), applied at all seven user-facing error paths:
+table (`clutch--db-error-hints`), applied at the main user-facing error paths:
 
 1. SQL buffer overlay banner (`clutch--format-error-banner`)
-2. Staged INSERT commit (`clutch-result-commit`)
-3. Staged UPDATE commit (`clutch-result--confirm-and-run-updates`)
-4. Staged DELETE commit (`clutch-result--confirm-and-run-deletes`)
-5. Pagination query error
-6. REPL error output
-7. Connection failure (`clutch--build-conn`)
+2. Staged mutation commit (`clutch-result-commit` — handles INSERT/UPDATE/DELETE)
+3. Pagination query error
+4. REPL error output
+5. Connection failure (`clutch--build-conn`)
 
 ## Why centralized
 

@@ -70,7 +70,7 @@ any other charset means a TEXT column."
         'text)))
 
 (defun clutch-db-mysql--convert-columns (mysql-columns)
-  "Convert MySQL column plists to clutch-db column plists.
+  "Convert MYSQL-COLUMNS to `clutch-db' column plists.
 Each output plist has :name and :type-category."
   (mapcar (lambda (col)
             (list :name (plist-get col :name)
@@ -80,7 +80,7 @@ Each output plist has :name and :type-category."
           mysql-columns))
 
 (defun clutch-db-mysql--wrap-result (mysql-result)
-  "Convert a `mysql-result' to a `clutch-db-result'."
+  "Convert MYSQL-RESULT to a `clutch-db-result'."
   (let ((cols (mysql-result-columns mysql-result)))
     (make-clutch-db-result
      :connection (mysql-result-connection mysql-result)
@@ -140,7 +140,9 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
 (cl-defmethod clutch-db-build-paged-sql ((_conn mysql-conn) base-sql
                                              page-num page-size
                                              &optional order-by)
-  "Build a paginated SQL query for MySQL."
+  "Build a paginated SQL query for MySQL from BASE-SQL.
+PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
+controls the optional sort clause."
   (clutch-db--build-limit-offset-paged-sql
    base-sql page-num page-size order-by #'mysql-escape-identifier))
 
@@ -157,7 +159,7 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
 ;;;; Schema methods
 
 (cl-defmethod clutch-db-list-tables ((conn mysql-conn))
-  "Return table names for the current MySQL database."
+  "Return table names for the current MySQL database on CONN."
   (condition-case err
       (let ((result (mysql-query conn "SHOW TABLES")))
         (mapcar #'car (mysql-result-rows result)))
@@ -192,7 +194,7 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
              (list (error-message-string err))))))
 
 (cl-defmethod clutch-db-list-table-entries ((conn mysql-conn))
-  "Return table/view entry plists for the current MySQL database."
+  "Return table/view entry plists for the current MySQL database on CONN."
   (condition-case err
       (let* ((result (mysql-query
                       conn
@@ -297,7 +299,7 @@ ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME")))
              (list (error-message-string err))))))
 
 (cl-defmethod clutch-db-object-details ((conn mysql-conn) entry)
-  "Return detail plists for MySQL object ENTRY."
+  "Return detail plists for MySQL object ENTRY on CONN."
   (condition-case _err
       (let ((type (upcase (or (plist-get entry :type) ""))))
         (pcase type
@@ -338,7 +340,7 @@ ORDER BY ORDINAL_POSITION"
     (mysql-error nil)))
 
 (cl-defmethod clutch-db-object-source ((conn mysql-conn) entry)
-  "Return source text for MySQL object ENTRY."
+  "Return source text for MySQL object ENTRY on CONN."
   (condition-case err
       (pcase (upcase (or (plist-get entry :type) ""))
         ("PROCEDURE"
@@ -368,7 +370,7 @@ ORDER BY ORDINAL_POSITION"
              (list (error-message-string err))))))
 
 (cl-defmethod clutch-db-show-create-object ((conn mysql-conn) entry)
-  "Return DDL text for MySQL non-table ENTRY."
+  "Return DDL text for MySQL non-table ENTRY on CONN."
   (condition-case err
       (pcase (upcase (or (plist-get entry :type) ""))
         ("VIEW"

@@ -1,5 +1,18 @@
 # 035 — Result Staging Semantics and Edit-Buffer Affordances
 
+## Prior Art: Insert Buffer Evolution
+
+The insert buffer evolved through two earlier design passes:
+
+- **Form model** (033): TAB/S-TAB navigate fields, M-TAB completes, C-c . fills
+  temporal fields. Staged insert repair via C-c ' on ghost rows. Local
+  validation for enum/bool/JSON/numeric/date fields.
+- **Live validation and JSON editor** (034): Aligned field labels, active-field
+  highlight, inline live validation with idle delay for JSON, RET as
+  accept-and-move, C-c ' JSON child editor on demand.
+
+These decisions are now subsumed by the unified staged-mutation model below.
+
 ## Background
 
 The result buffer had already grown into a staged-mutation workflow, but several
@@ -196,29 +209,6 @@ The concrete output still depends on column type:
 
 This is a better rule than "fill if empty", because it gives one predictable
 mental model across both workflows.
-
-## Validation
-
-The changes were locked down with tests covering:
-
-- insert markers using `I` / `I1`
-- PK-keyed staged edits rendering in result and record views
-- point-level discard for staged edits
-- footer summary / action text
-- pending-batch preview ordering
-- edit-buffer metadata and completion hints
-- edit-buffer temporal `C-c .`
-- edit-buffer JSON child-editor roundtrip
-- insert/edit live validation convergence
-- compact inline error-token rendering
-- insert-buffer temporal replacement semantics
-
-Full suite status after the change:
-
-- 215 tests run
-- 211 passed
-- 4 live tests skipped
-- 0 unexpected failures
 
 ## Follow-up
 

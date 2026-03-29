@@ -47,7 +47,7 @@ problem:
 Adding a second `provider` or `introspection` layer would mostly rename the
 same boundary while making the call chain longer and harder to reason about.
 
-This also follows the project rule in `AGENTS.md`: question every abstraction
+This also follows the project rule in `CLAUDE.md`: question every abstraction
 and split only when a boundary is already real.
 
 The object workflow therefore favors:
@@ -86,11 +86,6 @@ different tasks into one command.
   Rejected because it duplicates backend dispatch without solving a new concrete
   problem.
 
-- **Immediately split object logic into several new files**
-  Rejected for now because the responsibility boundary is still settling.  A
-  large but coherent `clutch.el` is preferable to several tiny files with
-  blurred ownership.
-
 - **Keep the tree buffer as a secondary browser**
   Rejected because it preserved two competing metadata workflows and kept the UX
   split.
@@ -107,9 +102,8 @@ different tasks into one command.
 
 ## Accepted limitations
 
-- `clutch.el` still contains both the main SQL UI and the object workflow.
-  Further extraction should wait until the object boundary is stable enough to
-  justify a new file.
+- The object workflow has since been extracted to `clutch-object.el`.
+  This limitation is resolved.
 
 - Object entries are still plists rather than a dedicated `cl-defstruct`.
   Stable identity matters now; a separate object model type can wait until it
@@ -122,3 +116,15 @@ different tasks into one command.
 
 - The describe view is intentionally text-based and simple.  It is a shared
   object view, not a second action architecture.
+
+## Schema Switching (from 056)
+
+After the object-centric workflow settled, the next pressure was "server objects"
+(users, roles, tablespaces). This was rejected because the categories diverge by
+backend and lacked a clear cross-backend workflow.
+
+Instead, runtime schema switching was added: Oracle/JDBC switches business
+schema, MySQL switches database via `USE`. This keeps `C-c C-j` / `C-c C-d` /
+`C-c C-o` focused on schema objects within one active schema per connection.
+
+Multi-schema workspace and PostgreSQL switching are deferred.

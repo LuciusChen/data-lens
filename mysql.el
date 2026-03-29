@@ -197,7 +197,7 @@ Advances read-offset without deleting buffer content."
   (aref (mysql--read-bytes conn 1) 0))
 
 (defun mysql--read-int-le (conn n)
-  "Read an N-byte little-endian integer from CONN."
+  "Read a little-endian integer of N bytes from CONN."
   (let ((bytes (mysql--read-bytes conn n))
         (val 0)
         (i 0))
@@ -255,7 +255,7 @@ multiple 16 MB fragments."
     (apply #'concat (nreverse payload))))
 
 (defun mysql--int-le-bytes (value n)
-  "Encode VALUE as an N-byte little-endian unibyte string."
+  "Encode VALUE as a little-endian unibyte string of N bytes."
   (let ((bytes (make-string n 0))
         (i 0))
     (while (< i n)
@@ -349,7 +349,7 @@ Algorithm: SHA256(password) XOR SHA256(SHA256(SHA256(password)) + salt)"
 ;;;; Handshake
 
 (defun mysql--read-le-uint (packet pos n)
-  "Read an N-byte little-endian unsigned integer from PACKET at POS."
+  "Read an unsigned little-endian integer of N bytes from PACKET at POS."
   (let ((val 0)
         (i 0))
     (while (< i n)
@@ -548,7 +548,7 @@ Returns (string . new-pos)."
     (cons (substring str p (+ p len)) (+ p len))))
 
 (defun mysql--parse-column-definition (packet)
-  "Parse a Column Definition packet.
+  "Parse a Column Definition PACKET.
 Returns a plist with column metadata."
   ;; Read the 6 lenenc-string fields: catalog, schema, table, org_table, name, org_name
   (let* ((pos 0)
@@ -567,12 +567,13 @@ Returns a plist with column metadata."
           (column-type (aref packet (+ pos 6)))
           (flags (logior (aref packet (+ pos 7)) (ash (aref packet (+ pos 8)) 8)))
           (decimals (aref packet (+ pos 9))))
-      (list :catalog (nth 0 strings) :schema (nth 1 strings)
-            :table (nth 2 strings) :org-table (nth 3 strings)
-            :name (nth 4 strings) :org-name (nth 5 strings)
-            :character-set character-set
-            :column-length column-length :type column-type :flags flags
-            :decimals decimals))))
+      (pcase-let ((`(,catalog ,schema ,table ,org-table ,name ,org-name) strings))
+        (list :catalog catalog :schema schema
+              :table table :org-table org-table
+              :name name :org-name org-name
+              :character-set character-set
+              :column-length column-length :type column-type :flags flags
+              :decimals decimals)))))
 
 ;;;; Row parsing
 
@@ -599,7 +600,7 @@ Each PARSER-FN takes a single string argument and returns the
 converted Elisp value.  Entries here override built-in parsers.")
 
 (defun mysql--parse-date (value)
-  "Parse a MySQL DATE string \"YYYY-MM-DD\" into a plist.
+  "Parse MySQL DATE VALUE \"YYYY-MM-DD\" into a plist.
 Returns (:year Y :month M :day D), or nil for zero dates."
   (if (or (string= value "0000-00-00") (string-empty-p value))
       nil
@@ -609,7 +610,7 @@ Returns (:year Y :month M :day D), or nil for zero dates."
             :day (string-to-number d)))))
 
 (defun mysql--parse-time (value)
-  "Parse a MySQL TIME string \"[-]HH:MM:SS[.ffffff]\" into a plist.
+  "Parse MySQL TIME VALUE \"[-]HH:MM:SS[.ffffff]\" into a plist.
 Returns (:hours H :minutes M :seconds S :negative BOOL)."
   (if (string-empty-p value)
       nil
@@ -624,7 +625,7 @@ Returns (:hours H :minutes M :seconds S :negative BOOL)."
               :negative negative)))))
 
 (defun mysql--parse-datetime (value)
-  "Parse a MySQL DATETIME/TIMESTAMP string into a plist.
+  "Parse MySQL DATETIME/TIMESTAMP VALUE into a plist.
 Input: \"YYYY-MM-DD HH:MM:SS[.ffffff]\".
 Returns (:year Y :month M :day D :hours H :minutes M :seconds S),
 or nil for zero datetimes."
@@ -645,7 +646,7 @@ or nil for zero datetimes."
               :seconds (string-to-number s))))))
 
 (defun mysql--parse-bit (value)
-  "Parse a MySQL BIT binary string into an integer."
+  "Parse MySQL BIT binary VALUE into an integer."
   (let ((result 0))
     (dotimes (i (length value))
       (setq result (logior (ash result 8) (aref value i))))
@@ -784,6 +785,7 @@ PASSWORD is the plaintext password; TLS non-nil means upgrade to TLS first."
 
 (defun mysql--open-connection (host port &optional connect-timeout)
   "Open a raw TCP connection to HOST:PORT for MySQL.
+CONNECT-TIMEOUT, when non-nil, limits the initial socket connect.
 Returns (PROCESS . BUFFER)."
   (let ((buf (generate-new-buffer " *mysql-input*")))
     (with-current-buffer buf
@@ -841,8 +843,8 @@ TCP connection wait."
          (signal (car err) (cdr err)))))))
 
 (defun mysql--handle-auth-switch (conn password packet)
-  "Handle an AUTH_SWITCH_REQUEST in PACKET.
-Resend credentials with the new plugin and continue authentication."
+  "Handle an AUTH_SWITCH_REQUEST in PACKET for CONN.
+Resend PASSWORD with the new plugin and continue authentication."
   (let* ((pos 1)
          (nul-pos (cl-position 0 packet :start pos))
          (new-plugin (substring packet pos nul-pos))
@@ -855,8 +857,9 @@ Resend credentials with the new plugin and continue authentication."
     (mysql--handle-auth-response conn password new-salt new-plugin)))
 
 (defun mysql--handle-auth-more-data (conn password salt auth-plugin packet)
-  "Handle caching_sha2_password AuthMoreData in PACKET.
-Dispatches on fast-auth success vs full-auth requirement."
+  "Handle caching_sha2_password AuthMoreData in PACKET for CONN.
+Dispatches on fast-auth success vs full-auth requirement for PASSWORD
+using SALT and AUTH-PLUGIN."
   (pcase (aref packet 1)
     (#x03
      ;; Fast auth success -- read the OK packet that follows
@@ -1323,7 +1326,7 @@ Returns (value . new-pos)."
       (* sign (ldexp (+ 1.0 (/ mantissa 4503599627370496.0)) (- exponent 1023)))))))
 
 (defun mysql--decode-binary-datetime (packet pos type)
-  "Decode a binary DATE/DATETIME/TIMESTAMP from PACKET at POS.
+  "Decode a binary DATE/DATETIME/TIMESTAMP of TYPE from PACKET at POS.
 Returns (value . new-pos)."
   (let ((len (aref packet pos)))
     (cl-incf pos)

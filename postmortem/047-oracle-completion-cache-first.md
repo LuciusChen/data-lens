@@ -38,7 +38,8 @@ list.  If `:done` is `t`, it returns `:rows` directly.  Otherwise it calls
 
 `clutch-db-jdbc.el` is the JDBC backend and should not `(require 'clutch)`.
 The CLAUDE.md architecture rule is "one-directional dependency flow".
-`clutch--connection-key` and `clutch--schema-cache` live in `clutch.el`.
+`clutch--connection-key` lives in `clutch-connection.el`, and
+`clutch--schema-cache` lives in `clutch.el`.
 
 At call time, `clutch.el` is always loaded first (it is the UI layer that
 dispatches completion), so both symbols are available.  The chosen pattern:

@@ -921,10 +921,11 @@ cursor-style :rows format used in tests."
 
 (defun clutch-jdbc--table-entry-from-row (row)
   "Convert a get-tables ROW into a table entry plist."
-  (list :name (nth 0 row)
-        :type (nth 1 row)
-        :schema (nth 2 row)
-        :source-schema (or (nth 3 row) (nth 2 row))))
+  (pcase-let ((`(,name ,type ,schema ,src-schema) row))
+    (list :name name
+          :type type
+          :schema schema
+          :source-schema (or src-schema schema))))
 
 (defun clutch-jdbc--type-category (jdbc-type-name)
   "Map JDBC-TYPE-NAME to a `clutch-db' type-category symbol."
@@ -1631,20 +1632,17 @@ Fetches from GitHub Releases."
 (defun clutch-jdbc--download-maven-driver (coords dest)
   "Download a Maven artifact at COORDS to DEST.
 COORDS is \"group:artifact:version\" or \"group:artifact:version:classifier\"."
-  (let* ((parts      (split-string coords ":"))
-         (group      (nth 0 parts))
-         (artifact   (nth 1 parts))
-         (version    (nth 2 parts))
-         (classifier (nth 3 parts))
-         (group-path (replace-regexp-in-string "\\." "/" group))
-         (jar-name   (if classifier
-                         (format "%s-%s-%s.jar" artifact version classifier)
-                       (format "%s-%s.jar" artifact version)))
-         (url        (format "https://repo1.maven.org/maven2/%s/%s/%s/%s"
-                             group-path artifact version jar-name)))
-    (message "Downloading %s from Maven Central..." coords)
-    (url-copy-file url dest)
-    (message "Downloaded driver to %s" dest)))
+  (pcase-let ((`(,group ,artifact ,version ,classifier . ,_)
+               (split-string coords ":")))
+    (let* ((group-path (replace-regexp-in-string "\\." "/" group))
+           (jar-name   (if classifier
+                           (format "%s-%s-%s.jar" artifact version classifier)
+                         (format "%s-%s.jar" artifact version)))
+           (url        (format "https://repo1.maven.org/maven2/%s/%s/%s/%s"
+                               group-path artifact version jar-name)))
+      (message "Downloading %s from Maven Central..." coords)
+      (url-copy-file url dest)
+      (message "Downloaded driver to %s" dest))))
 
 (defun clutch-jdbc--oracle-driver-symbol-p (driver)
   "Return non-nil when DRIVER selects an Oracle JDBC jar."

@@ -25,11 +25,7 @@ continued to fail with ORA-12514 until the next session caught the mismatch.
 pattern contains indentation-sensitive context, any variation in surrounding
 whitespace causes a silent non-match rather than an error.
 
-### Rule
-
-**Before using `replace_all` for a rename, grep for ALL occurrences first and
-confirm the count matches what `replace_all` will change.**  If counts differ,
-use targeted per-occurrence edits instead of a bulk replace.
+**Rule**: See CLAUDE.md pre-commit checklist.
 
 ---
 
@@ -52,11 +48,7 @@ The commit was assembled without running `git diff HEAD` to read every changed
 line.  The CLAUDE.md pre-commit checklist requires reading the full diff first,
 but that step was skipped.
 
-### Rule
-
-**Always run `git diff HEAD` (or `git diff --cached`) and read every line before
-writing the commit message.**  If a file appears in the diff unexpectedly (e.g.
-`clutch-db.el` for a test-only commit), investigate and unstage it.
+**Rule**: See CLAUDE.md pre-commit checklist.
 
 ---
 
@@ -75,9 +67,4 @@ Closing an issue is a visible, external action.  It was treated as a local
 action (like staging a file) when it is not.  The backtick problem was caused
 by not quoting shell special characters in the heredoc body.
 
-### Rule
-
-**Do not close or comment on issues until: (a) the fix is pushed, (b) tests
-pass, and (c) the user has reviewed the result.**  For issue comments containing
-code or backtick characters, use `gh api --method PATCH` with a HEREDOC, or
-escape all shell-special characters explicitly.
+**Rule**: See CLAUDE.md pre-commit checklist.

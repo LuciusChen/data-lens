@@ -52,7 +52,7 @@
       'text))
 
 (defun clutch-db-pg--convert-columns (pg-columns)
-  "Convert pg.el column plists to clutch-db column plists."
+  "Convert PG-COLUMNS to `clutch-db' column plists."
   (mapcar (lambda (col)
             (list :name (plist-get col :name)
                   :type-category (clutch-db-pg--type-category
@@ -60,7 +60,7 @@
           pg-columns))
 
 (defun clutch-db-pg--wrap-result (pg-result)
-  "Convert a `pg-result' to a `clutch-db-result'."
+  "Convert PG-RESULT to a `clutch-db-result'."
   (let ((cols (pg-result-columns pg-result)))
     (make-clutch-db-result
      :connection (pg-result-connection pg-result)
@@ -150,7 +150,7 @@ No special init needed — encoding is set in startup message.")
              (list (error-message-string err))))))
 
 (cl-defmethod clutch-db-interrupt-query ((conn pg-conn))
-  "Interrupt the current PostgreSQL query without dropping the session."
+  "Interrupt the current PostgreSQL query on CONN without dropping the session."
   (condition-case nil
       (pg-cancel-query conn)
     (pg-error nil)))
@@ -158,7 +158,9 @@ No special init needed — encoding is set in startup message.")
 (cl-defmethod clutch-db-build-paged-sql ((_conn pg-conn) base-sql
                                              page-num page-size
                                              &optional order-by)
-  "Build a paginated SQL query for PostgreSQL."
+  "Build a paginated SQL query for PostgreSQL from BASE-SQL.
+PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
+controls the optional sort clause."
   (clutch-db--build-limit-offset-paged-sql
    base-sql page-num page-size order-by #'pg-escape-identifier))
 
@@ -209,7 +211,7 @@ ORDER BY schema_name")))
              (list (error-message-string err))))))
 
 (cl-defmethod clutch-db-list-tables ((conn pg-conn))
-  "Return table names for the current PostgreSQL database."
+  "Return table names for the current PostgreSQL database on CONN."
   (condition-case err
       (let ((result (pg-query
                      conn
@@ -222,7 +224,7 @@ ORDER BY tablename")))
              (list (error-message-string err))))))
 
 (cl-defmethod clutch-db-list-table-entries ((conn pg-conn))
-  "Return table/view entry plists for the current PostgreSQL schema."
+  "Return table/view entry plists for the current PostgreSQL schema on CONN."
   (condition-case err
       (let ((result (pg-query
                      conn
@@ -407,7 +409,7 @@ ORDER BY t.event_object_table, t.trigger_name")))
              (list (error-message-string err))))))
 
 (cl-defmethod clutch-db-object-details ((conn pg-conn) entry)
-  "Return detail plists for PostgreSQL object ENTRY."
+  "Return detail plists for PostgreSQL object ENTRY on CONN."
   (condition-case _err
       (pcase (upcase (or (plist-get entry :type) ""))
         ("INDEX"
@@ -471,7 +473,7 @@ ORDER BY position" oid)))
     (pg-error nil)))
 
 (cl-defmethod clutch-db-object-source ((conn pg-conn) entry)
-  "Return source text for PostgreSQL object ENTRY."
+  "Return source text for PostgreSQL object ENTRY on CONN."
   (condition-case err
       (let ((oid (substring (plist-get entry :identity) 4)))
         (pcase (upcase (or (plist-get entry :type) ""))
@@ -487,7 +489,7 @@ ORDER BY position" oid)))
              (list (error-message-string err))))))
 
 (cl-defmethod clutch-db-show-create-object ((conn pg-conn) entry)
-  "Return DDL text for PostgreSQL non-table ENTRY."
+  "Return DDL text for PostgreSQL non-table ENTRY on CONN."
   (condition-case err
       (pcase (upcase (or (plist-get entry :type) ""))
         ("INDEX"
@@ -606,7 +608,9 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
 ;;;; Column details
 
 (defun clutch-db-pg--format-type (data-type max-len num-prec num-scale)
-  "Build a concise type string from PostgreSQL information_schema fields."
+  "Build a concise type string for DATA-TYPE.
+MAX-LEN, NUM-PREC, and NUM-SCALE refine the rendered PostgreSQL
+information_schema type."
   (cond
    ((member data-type '("character varying" "varchar"))
     (if max-len (format "varchar(%s)" max-len) "varchar"))

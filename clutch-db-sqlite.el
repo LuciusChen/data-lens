@@ -146,7 +146,9 @@ Use \":memory:\" for a transient in-memory database."
 (cl-defmethod clutch-db-build-paged-sql ((_conn clutch-db-sqlite-conn)
                                           base-sql page-num page-size
                                           &optional order-by)
-  "Build a paginated SQL query for SQLite."
+  "Build a paginated SQL query for SQLite from BASE-SQL.
+PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
+controls the optional sort clause."
   (clutch-db--build-limit-offset-paged-sql
    base-sql page-num page-size order-by #'clutch-db-sqlite--escape-id))
 
@@ -239,9 +241,11 @@ Result: ((from-col :ref-table T :ref-column C) ...)"
                (format "PRAGMA foreign_key_list(%s)"
                        (clutch-db-sqlite--escape-id table)))))
     (cl-loop for row in rows
-             collect (cons (nth 3 row)
-                           (list :ref-table  (nth 2 row)
-                                 :ref-column (nth 4 row))))))
+             collect (pcase-let ((`(,_id ,_seq ,ref-table ,from-col ,ref-column . ,_)
+                                  row))
+                       (cons from-col
+                             (list :ref-table ref-table
+                                   :ref-column ref-column))))))
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-db-sqlite-conn) table)
   "Return foreign key info for TABLE on SQLite CONN."

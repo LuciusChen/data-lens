@@ -409,7 +409,8 @@ DUPLICATE-COUNTS maps object names to the number of visible entries."
       name)))
 
 (defun clutch--object-entry-annotation (entry duplicate-counts)
-  "Return a propertized minibuffer annotation string for object ENTRY."
+  "Return a propertized minibuffer annotation string for object ENTRY.
+Use DUPLICATE-COUNTS to disambiguate duplicates."
   (let* ((label (clutch--object-entry-label entry))
          (detail (clutch--object-entry-display-detail entry duplicate-counts)))
     (concat
@@ -424,7 +425,8 @@ DUPLICATE-COUNTS maps object names to the number of visible entries."
         (propertize detail 'face 'clutch-object-type-face))))))
 
 (defun clutch--object-entry-affixation (cands entry-map duplicate-counts)
-  "Return affixated completion tuples for object CANDS."
+  "Return affixated completion tuples for object CANDS.
+Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
   (let* ((labels
           (mapcar (lambda (cand)
                     (clutch--object-entry-label (gethash cand entry-map)))
@@ -527,7 +529,8 @@ When TABLE-LIKE-ONLY is non-nil, only consider table-like matches."
      (t nil))))
 
 (defun clutch--object-matches-by-name (conn name &optional table-like-only allowed-types)
-  "Return object entries on CONN whose name matches NAME."
+  "Return object entries on CONN whose name matches NAME.
+TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set."
   (let ((entries
          (clutch--filter-object-entries-by-types
           (if table-like-only
@@ -544,7 +547,8 @@ When TABLE-LIKE-ONLY is non-nil, only consider table-like matches."
      entries)))
 
 (defun clutch--object-matches-at-point (&optional table-like-only allowed-types)
-  "Return matching object entries for the symbol at point."
+  "Return matching object entries for the symbol at point.
+TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set."
   (when-let* ((conn clutch-connection)
               ((clutch--object-connection-alive-p conn))
               (sym (thing-at-point 'symbol t)))
@@ -576,7 +580,9 @@ When TABLE-LIKE-ONLY is non-nil, only consider table-like matches."
 
 (defun clutch-object-read (&optional prompt table-like-only initial-input category allowed-types)
   "Read and return a database object entry for the current connection.
-When TABLE-LIKE-ONLY is non-nil, only include table-like objects."
+PROMPT, INITIAL-INPUT, CATEGORY, and ALLOWED-TYPES customize the
+reader.  When TABLE-LIKE-ONLY is non-nil, only include table-like
+objects."
   (clutch--ensure-connection)
   (clutch--warn-schema-cache-state clutch-connection)
   (let* ((entries
@@ -595,7 +601,8 @@ When TABLE-LIKE-ONLY is non-nil, only include table-like objects."
 
 (defun clutch--buffer-current-object (&optional table-like-only allowed-types)
   "Return the current object associated with the command context buffer.
-When TABLE-LIKE-ONLY is non-nil, only return table-like objects."
+When TABLE-LIKE-ONLY is non-nil, only return table-like objects
+allowed by ALLOWED-TYPES."
   (let* ((buf (clutch--command-context-buffer))
          (entry (and (buffer-live-p buf)
                      (buffer-local-value 'clutch-browser-current-object buf))))
@@ -650,7 +657,9 @@ Uses a layered resolution strategy:
 2. Multiple matches → picker with pre-fill
 3. Local prefix match → pre-fill picker
 4. On-demand remote search → direct return or picker with results
-5. No match → picker with full candidate list, no pre-fill"
+5. No match → picker with full candidate list, no pre-fill
+
+TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
   (let ((current-object (clutch--buffer-current-object table-like-only allowed-types))
         (matches (clutch--object-matches-at-point table-like-only allowed-types)))
     (clutch--remember-current-object
@@ -748,13 +757,15 @@ can offer object actions on the completion candidates."
 
 (defun clutch--object-entry-key< (left right)
   "Return non-nil when sort key LEFT should sort before RIGHT."
-  (or (< (nth 0 left) (nth 0 right))
-      (and (= (nth 0 left) (nth 0 right))
-           (or (< (nth 1 left) (nth 1 right))
-               (and (= (nth 1 left) (nth 1 right))
-                    (or (string< (nth 2 left) (nth 2 right))
-                        (and (string= (nth 2 left) (nth 2 right))
-                             (string< (nth 3 left) (nth 3 right)))))))))
+  (pcase-let ((`(,left-rank ,left-public ,left-schema ,left-name) left)
+              (`(,right-rank ,right-public ,right-schema ,right-name) right))
+    (or (< left-rank right-rank)
+        (and (= left-rank right-rank)
+             (or (< left-public right-public)
+                 (and (= left-public right-public)
+                      (or (string< left-schema right-schema)
+                          (and (string= left-schema right-schema)
+                               (string< left-name right-name)))))))))
 
 (defun clutch--merge-object-entries-by-name (&rest entry-lists)
   "Merge ENTRY-LISTS by object identity, preserving the first occurrence."
@@ -1187,23 +1198,29 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
        :context (list :entry-name (plist-get entry :name)
                       :entry-type (plist-get entry :type))))))
 
+(defmacro clutch--with-object-error-capture (buffer conn entry op &rest body)
+  "Execute BODY; on clutch-db-error, record to BUFFER/CONN/ENTRY/OP and re-signal."
+  (declare (indent 4))
+  `(condition-case err
+       (progn
+         ,@body
+         (clutch--clear-connection-problem-capture ,conn))
+     (clutch-db-error
+      (clutch--remember-object-operation-error ,buffer ,conn ,entry ,op err)
+      (signal (car err) (cdr err)))))
+
 (defun clutch-describe-refresh (&optional _ignore-auto _noconfirm)
   "Refresh the current describe buffer."
   (interactive)
   (unless clutch--describe-object-entry
     (user-error "No object is associated with this buffer"))
   (clutch--refresh-current-schema (not (called-interactively-p 'interactive)))
-  (condition-case err
-      (progn
-        (clutch--render-object-describe clutch-connection
-                                        clutch--describe-object-entry
-                                        clutch--connection-params
-                                        clutch--conn-sql-product)
-        (clutch--clear-connection-problem-capture clutch-connection))
-    (clutch-db-error
-     (clutch--remember-object-operation-error
-      (current-buffer) clutch-connection clutch--describe-object-entry "describe" err)
-     (signal (car err) (cdr err)))))
+  (clutch--with-object-error-capture
+      (current-buffer) clutch-connection clutch--describe-object-entry "describe"
+    (clutch--render-object-describe clutch-connection
+                                    clutch--describe-object-entry
+                                    clutch--connection-params
+                                    clutch--conn-sql-product)))
 
 (defvar clutch-describe-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1236,19 +1253,14 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
     (unless (clutch--object-supports-definition-p entry)
       (user-error "%s %s does not expose a definition"
                   type name))
-    (condition-case err
-        (let ((text (clutch--object-definition-text conn entry)))
-          (unless text
-            (user-error "DDL/source unavailable for %s %s" type name))
-          (clutch--remember-current-object entry)
-          (clutch--clear-connection-problem-capture conn)
-          (clutch--show-object-text-buffer conn entry text
-                                           (plist-get context :params)
-                                           (plist-get context :product)))
-      (clutch-db-error
-       (clutch--remember-object-operation-error
-        source-buffer conn entry "show-definition" err)
-       (signal (car err) (cdr err))))))
+    (clutch--with-object-error-capture source-buffer conn entry "show-definition"
+      (let ((text (clutch--object-definition-text conn entry)))
+        (unless text
+          (user-error "DDL/source unavailable for %s %s" type name))
+        (clutch--remember-current-object entry)
+        (clutch--show-object-text-buffer conn entry text
+                                         (plist-get context :params)
+                                         (plist-get context :product))))))
 
 (defun clutch-object-describe (&optional entry)
   "Show a describe buffer for ENTRY."
@@ -1261,18 +1273,14 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
                    (plist-get context :connection)
                    (user-error "No active connection"))))
     (clutch--remember-current-object entry)
-    (condition-case err
-        (progn
-          (clutch--show-object-describe-buffer conn entry
-                                               (plist-get context :params)
-                                               (plist-get context :product))
-          (clutch--clear-connection-problem-capture conn))
-      (clutch-db-error
-       (clutch--remember-object-operation-error source-buffer conn entry "describe" err)
-       (signal (car err) (cdr err))))))
+    (clutch--with-object-error-capture source-buffer conn entry "describe"
+      (clutch--show-object-describe-buffer conn entry
+                                           (plist-get context :params)
+                                           (plist-get context :product)))))
 
 (defun clutch-object-browse (&optional entry)
-  "Insert SELECT * FROM the current table-like object into a query console."
+  "Insert SELECT * FROM ENTRY into a query console.
+When ENTRY is nil, use the current table-like object."
   (interactive)
   (let* ((context (clutch--command-connection-context))
          (entry (or entry
@@ -1367,7 +1375,8 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
 (defun clutch--resolve-object-dwim (&optional prompt table-like-only category allowed-types)
   "Resolve a clutch object from point or prompt.
 PROMPT is passed to the fallback reader.  When TABLE-LIKE-ONLY is non-nil,
-only resolve table-like objects."
+only resolve table-like objects.  CATEGORY and ALLOWED-TYPES are
+passed to the fallback reader."
   (clutch--resolve-object-entry (or prompt "Object: ")
                                 table-like-only
                                 category
@@ -1551,7 +1560,7 @@ only resolve table-like objects."
    (t nil)))
 
 (defun clutch-act-dwim (&optional entry)
-  "Resolve an object and present its action UI."
+  "Resolve ENTRY, or an object at point, and present its action UI."
   (interactive)
   (let ((entry (or entry
                    (clutch--resolve-object-dwim "Object actions for: "))))
@@ -1559,7 +1568,7 @@ only resolve table-like objects."
       (user-error "No object action UI is available"))))
 
 (defun clutch-jump (&optional entry)
-  "Resolve an object and run its default action."
+  "Resolve ENTRY, or an object at point, and run its default action."
   (interactive)
   (let ((entry (or entry
                    (clutch--resolve-object-dwim "Jump to object: "
@@ -1568,7 +1577,7 @@ only resolve table-like objects."
     (clutch--run-object-action entry (clutch--object-default-action-id entry))))
 
 (defun clutch-describe-dwim (&optional entry)
-  "Resolve an object and open its describe view."
+  "Resolve ENTRY, or an object at point, and open its describe view."
   (interactive)
   (clutch--run-object-action
    (or entry

@@ -322,21 +322,21 @@ Returns an alist of (field-code . value) pairs."
 
 (defun pg--md5-password (user password salt)
   "Compute MD5 password hash for PostgreSQL.
-Returns the string \"md5\" + md5(md5(password + user) + salt)."
+Returns the string \"md5\" + md5(md5(PASSWORD + USER) + salt)."
   (let* ((inner (pg--md5-hex (concat password user)))
          (outer (pg--md5-hex (concat inner salt))))
     (concat "md5" outer)))
 
 (defun pg--handle-auth-md5 (conn password payload)
-  "Handle AuthenticationMD5Password.
-PAYLOAD contains the 4-byte salt at offset 4."
+  "Handle AuthenticationMD5Password for CONN.
+PASSWORD is hashed using the 4-byte salt in PAYLOAD at offset 4."
   (let* ((salt (substring payload 4 8))
          (hash (pg--md5-password (pg-conn-user conn) password salt))
          (msg (pg--encode-string hash)))
     (pg--send-message conn ?p msg)))
 
 (defun pg--handle-auth-cleartext (conn password)
-  "Handle AuthenticationCleartextPassword."
+  "Handle AuthenticationCleartextPassword for CONN using PASSWORD."
   (pg--send-message conn ?p (pg--encode-string (or password ""))))
 
 ;; SCRAM-SHA-256 (SASL) authentication
@@ -400,7 +400,7 @@ Returns (CLIENT-FIRST-MESSAGE CLIENT-NONCE . CLIENT-FIRST-BARE)."
       (cons client-first (cons client-nonce client-first-bare)))))
 
 (defun pg--scram-parse-server-first (server-first)
-  "Parse server-first-message.
+  "Parse SERVER-FIRST as a SCRAM server-first-message.
 Returns (:nonce NONCE :salt SALT :iterations ITER)."
   (let ((nonce nil) (salt nil) (iterations nil))
     (dolist (part (split-string server-first ","))
@@ -415,6 +415,7 @@ Returns (:nonce NONCE :salt SALT :iterations ITER)."
 
 (defun pg--scram-derive-keys (password salt iterations auth-message)
   "Derive SCRAM-SHA-256 client proof and server signature.
+PASSWORD, SALT, ITERATIONS, and AUTH-MESSAGE define the SCRAM exchange.
 Returns (CLIENT-PROOF . SERVER-SIGNATURE)."
   (let* ((salted-password (pg--pbkdf2-sha256
                            (encode-coding-string password 'utf-8)
@@ -434,7 +435,9 @@ Returns (CLIENT-PROOF . SERVER-SIGNATURE)."
 
 (defun pg--scram-client-final (password client-nonce client-first-bare
                                         server-first)
-  "Generate SCRAM-SHA-256 client-final-message and verify server proof.
+  "Generate a SCRAM-SHA-256 client-final-message from PASSWORD.
+CLIENT-NONCE and CLIENT-FIRST-BARE are checked against SERVER-FIRST
+before verifying server proof.
 Returns (CLIENT-FINAL-MESSAGE . SERVER-SIGNATURE)."
   (let* ((parsed       (pg--scram-parse-server-first server-first))
          (server-nonce (plist-get parsed :nonce))
@@ -486,8 +489,9 @@ Returns the message payload."
       (signal 'pg-auth-error (list "Server signature verification failed")))))
 
 (defun pg--handle-auth-sasl (conn password payload)
-  "Handle SASL authentication (SCRAM-SHA-256).
-PAYLOAD contains the list of SASL mechanism names."
+  "Handle SASL authentication (SCRAM-SHA-256) for CONN.
+PAYLOAD contains the list of SASL mechanism names.  PASSWORD is used
+to build the client proof."
   (let ((mechanisms (pg--parse-sasl-mechanisms payload)))
     (unless (member "SCRAM-SHA-256" mechanisms)
       (signal 'pg-auth-error
@@ -514,8 +518,8 @@ PAYLOAD contains the list of SASL mechanism names."
           (pg--sasl-verify-server-signature final-payload server-signature))))))
 
 (defun pg--handle-authentication (conn password)
-  "Handle the authentication phase after sending StartupMessage.
-Reads auth messages and responds appropriately."
+  "Handle the authentication phase on CONN after sending StartupMessage.
+Reads auth messages and responds appropriately using PASSWORD."
   (let ((done nil))
     (while (not done)
       (pcase-let* ((`(,msg-type . ,payload) (pg--read-message conn)))
@@ -545,7 +549,7 @@ Reads auth messages and responds appropriately."
 ;;;; Post-auth: read until ReadyForQuery
 
 (defun pg--read-startup-messages (conn)
-  "Read ParameterStatus, BackendKeyData, and ReadyForQuery after auth."
+  "Read ParameterStatus, BackendKeyData, and ReadyForQuery for CONN after auth."
   (let ((done nil))
     (while (not done)
       (pcase-let* ((`(,msg-type . ,payload) (pg--read-message conn)))
@@ -579,7 +583,7 @@ Reads auth messages and responds appropriately."
   (and (fboundp 'gnutls-available-p) (gnutls-available-p)))
 
 (defun pg--send-ssl-request (conn)
-  "Send an SSLRequest to the server.
+  "Send an SSLRequest for CONN to the server.
 Returns the server's response character (?S or ?N)."
   (let ((proc (pg-conn-process conn)))
     ;; SSLRequest: length=8, code=80877103
@@ -627,6 +631,7 @@ Returns the server's response character (?S or ?N)."
 
 (defun pg--open-connection (host port &optional connect-timeout)
   "Open a raw TCP connection to HOST:PORT for PostgreSQL.
+CONNECT-TIMEOUT, when non-nil, limits the initial socket connect.
 Returns (PROCESS . BUFFER)."
   (let ((buf (generate-new-buffer " *pg-input*")))
     (with-current-buffer buf
@@ -786,7 +791,7 @@ Built once at load time for O(1) dispatch.  `pg-type-parsers' takes precedence."
 ;;;; Query execution
 
 (defun pg--parse-row-description (payload)
-  "Parse a RowDescription payload.
+  "Parse RowDescription PAYLOAD.
 Returns a list of column plists (:name STR :oid INT ...)."
   (let ((num-fields (pg--read-be-int16-from-string payload 0))
         (pos 2)
@@ -888,7 +893,8 @@ ReadyForQuery.  Return non-nil when the session is usable again."
       (setf (pg-conn-read-idle-timeout conn) original-timeout))))
 
 (defun pg--handle-query-error (conn payload)
-  "Handle an ErrorResponse PAYLOAD during query, then drain to ReadyForQuery."
+  "Handle an ErrorResponse PAYLOAD during query on CONN.
+Then drain to ReadyForQuery."
   (let ((fields (pg--parse-error-fields payload)))
     (pg--drain-until-ready conn)
     (signal 'pg-query-error (list (pg--error-fields-message fields)))))

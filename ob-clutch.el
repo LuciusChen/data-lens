@@ -94,11 +94,11 @@
     (append params (list :pass-entry name))))
 
 (defun ob-clutch--normalize-backend (backend)
-  "Normalize BACKEND string or symbol for clutch-db-connect.
+  "Normalize BACKEND string or symbol for `clutch-db-connect'.
 Pure Elisp backends are canonicalized (mysql/pg/sqlite).
 Any other symbol is passed through as-is; clutch-db-connect will signal
 an error if the backend is truly unknown.  This allows JDBC driver symbols
-(oracle, sqlserver, db2, snowflake, redshift, etc.) to work without
+such as oracle, sqlserver, db2, snowflake, and redshift to work without
 ob-clutch needing to know about clutch-db-jdbc."
   (let ((sym (if (stringp backend)
                  (intern (downcase backend))
@@ -153,7 +153,8 @@ SOURCE-PARAMS is the plist used for password resolution."
 
 (defun ob-clutch--guard-jdbc-pass-entry (backend source-params conn-params)
   "Fail early when JDBC BACKEND has an unresolved explicit :pass-entry.
-Return CONN-PARAMS unchanged otherwise."
+Return CONN-PARAMS unchanged otherwise when SOURCE-PARAMS already
+resolved a password."
   (when (and (memq backend '(oracle sqlserver db2 snowflake redshift))
              (plist-get source-params :pass-entry)
              (null (plist-get conn-params :password)))
@@ -194,7 +195,7 @@ DEFAULT-BACKEND is used by language-specific executors."
              (ob-clutch--maybe-inject-password backend conn-params source-params))))))
 
 (defun ob-clutch--connect (params default-backend)
-  "Get or create a cached clutch-db connection for PARAMS."
+  "Get or create a cached `clutch-db' connection for PARAMS using DEFAULT-BACKEND."
   (pcase-let* ((`(,backend . ,conn-params)
                 (ob-clutch--resolve-connection params default-backend))
                (key (format "%S:%S" backend conn-params))

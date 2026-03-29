@@ -284,7 +284,7 @@ Return non-nil when an asynchronous refresh was started."
 
 (defun clutch--refresh-schema-cache (conn)
   "Refresh schema cache for CONN.
-Only loads table names (fast). Column info is loaded lazily."
+Only loads table names (fast).  Column info is loaded lazily."
   (let ((ticket (clutch--begin-schema-refresh-ticket conn)))
     (clutch--set-schema-status conn 'refreshing)
     (condition-case err
@@ -343,7 +343,7 @@ Only loads table names (fast). Column info is loaded lazily."
       (clutch--set-schema-status conn 'stale))))
 
 (defun clutch--ensure-columns (conn schema table)
-  "Ensure column info for TABLE is loaded in SCHEMA.
+  "Ensure column info for TABLE is loaded in SCHEMA for CONN.
 Fetches from the backend if not yet cached.  Returns column list."
   (let ((cols (gethash table schema 'missing))
         (status (clutch--columns-status conn table)))

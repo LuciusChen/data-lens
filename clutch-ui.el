@@ -78,7 +78,7 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (defvar-local clutch--refine-callback nil
   "Callback called with final rect when refine is confirmed.")
 (defvar-local clutch--refine-saved-mode-line nil
-  "Saved mode-line-format to restore after refine mode exits.")
+  "Saved `mode-line-format' to restore after refine mode exits.")
 (defvar-local clutch-record--result-buffer nil
   "Reference to the parent result buffer for record display.")
 (defvar-local clutch-record--row-idx nil
@@ -152,7 +152,8 @@ installed or the icon is unknown."
     copy))
 
 (defun clutch--icon-with-face (name fallback face &rest icon-args)
-  "Return icon NAME/FALLBACK with FACE appended to its text properties."
+  "Return icon NAME/FALLBACK with FACE appended to its text properties.
+Pass ICON-ARGS through to `clutch--icon'."
   (clutch--append-face (apply #'clutch--icon name fallback icon-args) face))
 
 (defun clutch--fixed-width-icon (spec fallback &optional face)
@@ -404,7 +405,8 @@ including the leading border and padding."
 
 (defun clutch--render-row (row ridx visible-cols widths render-state)
   "Render a single data ROW at row index RIDX.
-VISIBLE-COLS is a list of column indices, WIDTHS is the width vector.
+VISIBLE-COLS is a list of column indices, WIDTHS is the width vector,
+and RENDER-STATE carries cached render data.
 Returns a propertized string."
   (concat (mapconcat (lambda (cidx)
                        (clutch--render-cell row ridx cidx widths render-state))
@@ -531,7 +533,9 @@ Returns a list of propertized strings (may be empty)."
                 (propertize " E/D off" 'face warn-text))))))
 
 (defun clutch--footer-main-parts (row-count page-num page-size total-rows)
-  "Return list of main footer part strings for pagination state."
+  "Return list of main footer part strings for pagination state.
+ROW-COUNT and PAGE-NUM describe the visible page, and PAGE-SIZE sets
+the page length.  TOTAL-ROWS describes the full result size when known."
   (let* ((hi 'font-lock-keyword-face)
          (dim 'font-lock-comment-face)
          (total-pages (when total-rows
@@ -570,7 +574,9 @@ Returns a list of propertized strings (may be empty)."
                 (propertize col-name 'face hi))))))
 
 (defun clutch--render-footer (row-count page-num page-size total-rows)
-  "Return the mode-line footer string for pagination state."
+  "Return the mode-line footer string for pagination state.
+ROW-COUNT and PAGE-NUM describe the visible page, and PAGE-SIZE sets
+the page length.  TOTAL-ROWS describes the full result size when known."
   (let ((sep (propertize "  •  " 'face 'font-lock-comment-face)))
     (mapconcat #'identity
                (append (clutch--footer-main-parts row-count page-num page-size
@@ -639,7 +645,7 @@ ACTIVE-CIDX is the highlighted column index, if any."
             pad-str)))
 
 (defun clutch--build-header-line (visible-cols widths nw &optional active-cidx)
-  "Build the header-line-format string for the column header row.
+  "Build the `header-line-format' string for the column header row.
 VISIBLE-COLS, WIDTHS describe columns.
 NW is the digit width for the row number column.
 ACTIVE-CIDX highlights that column when non-nil."
@@ -744,7 +750,9 @@ RENDER-STATE contains render lookup tables for pending UI state."
                         data-row "\n"))))
 
 (defun clutch--update-result-line-formats (rows visible-cols widths nw)
-  "Set mode-line-format and header-line-format for the result buffer."
+  "Set `mode-line-format' and `header-line-format' for the result buffer.
+ROWS, VISIBLE-COLS, and WIDTHS define the rendered table, and NW is the
+available window width."
   (setq clutch--footer-base-string
         (clutch--render-footer
          (length rows) clutch--page-current
@@ -924,7 +932,8 @@ IGNORE-BUFFER, when non-nil, is excluded from the check."
            (buffer-list)))
 
 (defun clutch--disable-window-size-hook-if-unused (&optional ignore-buffer)
-  "Remove global window-size hook when no result buffers remain.
+  "Remove the global `window-size-change-functions' hook.
+Do so when no result buffers remain.
 IGNORE-BUFFER is excluded from liveness checks."
   (when (and clutch--window-size-hook-enabled
              (not (clutch--has-live-result-buffer-p ignore-buffer)))
@@ -965,7 +974,9 @@ IGNORE-BUFFER is excluded from liveness checks."
     (goto-char (point-min))))
 
 (defun clutch--init-select-result-state (col-names columns rows)
-  "Initialize buffer-local state for a non-paginated SELECT result."
+  "Initialize buffer-local state for a non-paginated SELECT result.
+COL-NAMES and COLUMNS describe the result shape, and ROWS provides the
+initial result data."
   (setq-local clutch--base-query nil)
   (setq-local clutch--result-columns col-names)
   (setq-local clutch--result-column-defs columns)

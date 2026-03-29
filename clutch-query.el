@@ -595,7 +595,7 @@ defaults to 0.  Returns nil if not found."
     (car-safe first)))
 
 (defun clutch--risky-dml-p (sql)
-  "Return non-nil for top-level UPDATE/DELETE statements without WHERE."
+  "Return non-nil when SQL is a top-level UPDATE/DELETE statement without WHERE."
   (let ((normalized (clutch--sql-normalize-for-rewrite sql))
         (main-op (clutch--sql-main-op-keyword sql)))
     (and (member main-op '("UPDATE" "DELETE"))
@@ -833,7 +833,7 @@ Prompts for confirmation on destructive operations."
         (source-win (selected-window)))
     (when (clutch--destructive-query-p sql)
       (unless (yes-or-no-p
-               (format "Execute destructive query?\n  %s\n"
+               (format "Execute destructive query?\n  %s\n\nProceed? "
                        (truncate-string-to-width (string-trim sql) 80)))
         (user-error "Query cancelled")))
     (clutch--require-risky-dml-confirmation sql)
@@ -942,7 +942,7 @@ actionable hints for known error patterns."
               message clutch-debug-buffer-name))))
 
 (defun clutch--parse-error-position (msg &optional sql)
-  "Extract a 1-based character position from error MSG, or nil.
+  "Extract a 1-based character position from error MSG for SQL, or nil.
 Handles PG \\='(position N)\\=' suffix and Oracle-style \\='line N, column M\\='."
   (let ((case-fold-search t))
     (or
@@ -1032,7 +1032,9 @@ Optional CONTEXT is merged into the debug event.  Return
     (truncate-string-to-width text 160 0 nil "...")))
 
 (defun clutch--mark-error-banner (buf pos &optional msg)
-  "Place an inline error banner overlay in BUF above the line containing POS."
+  "Place an inline error banner overlay in BUF.
+The banner appears above the line containing POS and uses MSG when
+present."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (when (overlayp clutch--error-banner-overlay)
@@ -1072,7 +1074,8 @@ MSG, when non-nil, is attached as overlay help text."
         (clutch--mark-error-banner buf beg msg)))))
 
 (defun clutch--mark-error-position (buf pos &optional msg)
-  "Place an error overlay in BUF at POS (buffer position, 1-based)."
+  "Place an error overlay in BUF at POS.
+POS is a 1-based buffer position, and MSG is used when present."
   (clutch--mark-error-region buf pos (1+ pos) msg))
 
 (defun clutch--mark-sql-error (buf sql msg)
@@ -1087,7 +1090,7 @@ Prefers an exact error position; otherwise highlights the whole statement."
         (clutch--mark-error-region buf sql-start sql-end msg)))))
 
 (defun clutch--execute-and-mark (sql beg end &optional conn)
-  "Execute SQL and mark BEG..END on success."
+  "Execute SQL on CONN and mark BEG..END on success."
   (pcase-let* ((`(,trim-beg . ,trim-end)
                  (or (clutch--trim-sql-bounds beg end)
                      (cons beg end))))
@@ -1236,7 +1239,7 @@ result buffer.  Stops and reports on the first error."
            (signal-statement-error err last)))))))
 
 (defun clutch-execute-dwim (beg end)
-  "Execute region if active, otherwise execute query at point.
+  "Execute the region from BEG to END if active, otherwise execute query at point.
 When the region contains multiple semicolon-separated statements,
 they are executed sequentially."
   (interactive

@@ -97,6 +97,9 @@ Keep runtime logs separate from request diagnostics.
 - It should not be the only place where a user can retrieve request-level debug
   information.
 
+The user-facing UI workflow for this model is specified in
+[066](066-single-debug-buffer-workflow.md).
+
 ## Generated SQL Visibility
 
 `clutch` must make internal/generated SQL inspectable.
@@ -204,85 +207,3 @@ This design does not aim to:
 - turn the agent into a general logging framework
 - add multi-level configurable logging before the basic diagnostics path exists
 - rewrite all existing native backend errors into a new taxonomy in one step
-
-## Phased Plan
-
-### Phase 1 — Freeze the model
-
-- add this design note
-- align protocol/docs terminology around summary vs diagnostics vs logs
-- define the initial diagnostics schema and redaction policy
-
-### Phase 2 — JDBC protocol foundation
-
-- extend JDBC request failures to carry structured diagnostics in addition to
-  the short error summary
-- cover both `connect` and lazy-failure `execute` / `fetch` paths
-- keep stderr as correlated runtime logging, not the sole debug channel
-
-### Phase 3 — Troubleshooting UI in clutch
-
-- add a dedicated troubleshooting entry point
-- surface generated/internal SQL in the same workflow
-- make JDBC stderr access explicit from the UI instead of buffer-name knowledge
-
-This phase now lands in the single-buffer workflow from [066](066-single-debug-buffer-workflow.md):
-`clutch-debug-mode` gates extra capture, and `*clutch-debug*` is the sole
-supported troubleshooting surface.  Early startup/build `user-error`s that
-never produced diagnostics are still reported only in the original command
-failure path.  The debug buffer shows the structured payload, agent stderr
-tail, and generated/internal SQL when the failing path used hidden SQL.
-
-The same deep-debug switch also adds two extra layers:
-
-- a bounded redacted recent-event trace for the current buffer / connection
-  context
-- an opt-in JDBC backend `debug` payload for failures
-
-This keeps the default UX short while giving maintainers and users a reproducible
-"turn it on, reproduce, inspect the same buffer" workflow.
-
-### Phase 4 — Documentation
-
-- add a Troubleshooting section to `README.org`
-- document what to inspect for connect failures, lazy query failures, interrupt
-  failures, and generated-SQL mismatches
-- document what gets redacted and what users can safely share
-
-### Phase 5 — Native backend follow-up
-
-- adopt the same details workflow for native PostgreSQL / MySQL / SQLite where
-  feasible
-- do not block the JDBC redesign on full native parity
-
-## Testing Discipline
-
-Tests for this work must lock contracts, not prose.
-
-Good tests:
-
-- structured diagnostics preserve category / SQLState / vendor code / cause
-- redaction removes secrets while keeping useful identifiers
-- generated SQL is captured for hidden/internal query flows
-- details view can retrieve the last diagnostics payload after a failure
-
-Bad tests:
-
-- asserting one exact vendor error sentence
-- asserting a whole formatted details buffer string when only one field matters
-- tests that stay green if the implementation returns a hard-coded string
-
-## Why this is the right layer
-
-This design keeps the current UX strengths:
-
-- short default errors
-- friendly hints
-- backend-specific recovery behavior
-
-while fixing the real missing capability:
-
-- reliable, inspectable diagnostics for users and maintainers
-
-The alternative — continuing to append more debugging prose to `error` strings —
-would make both UX and debugging worse over time.
