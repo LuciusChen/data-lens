@@ -445,7 +445,7 @@ Connection profile plist keys:
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
 | `clutch-jdbc-agent-dir` | `~/.emacs.d/clutch-jdbc/` | directory | Directory for agent jar and `drivers/` |
-| `clutch-jdbc-agent-version` | `"0.2.0"` | string | Agent version to download |
+| `clutch-jdbc-agent-version` | `"0.2.3"` | string | Agent version to download |
 | `clutch-jdbc-agent-sha256` | (hash string) | string or nil | Expected SHA-256 of agent jar; nil to disable |
 | `clutch-jdbc-agent-java-executable` | `"java"` | string | Java executable path |
 | `clutch-jdbc-agent-jvm-args` | `'("-Xss512k")` | list of strings | Extra JVM arguments |
