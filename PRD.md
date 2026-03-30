@@ -213,7 +213,7 @@ Interactive result browsing with column paging, sorting, filtering, mutations.
 | `=` / `-` | `clutch-result-widen-column` / `clutch-result-narrow-column` | Adjust column width |
 | `C` | `clutch-result-goto-column` | Jump to a column by name |
 | `s` / `S` | `clutch-result-sort-by-column` / `clutch-result-sort-by-column-desc` | Sort by current column |
-| `W` | `clutch-result-apply-filter` | Apply SQL WHERE clause filter |
+| `W` | `clutch-result-apply-filter` | Apply SQL WHERE filter (column completion with auto-equal) |
 | `/` | `clutch-result-filter` | Client-side fuzzy filter |
 | `C-c '` | `clutch-result-edit-cell` | Edit / re-edit current cell |
 | `i` | `clutch-result-insert-row` | Open insert buffer |

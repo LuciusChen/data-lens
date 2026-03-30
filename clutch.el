@@ -2753,24 +2753,55 @@ If the column is already sorted, toggle the direction."
 
 (defun clutch-result-apply-filter ()
   "Apply or clear a WHERE filter on the current result query.
-Prompts for a WHERE condition.  Enter empty string to clear."
+When columns are available, prompts to pick a column first (defaulting
+to the column at point), then asks for the condition.  Enter an empty
+string at the column prompt to write a raw WHERE clause; enter an
+empty string at the condition prompt to clear the filter."
   (interactive)
   (unless clutch--last-query
     (user-error "No query to filter"))
   (let* ((base (or clutch--base-query
                    clutch--last-query))
          (current clutch--where-filter)
-         (input (string-trim
-                 (read-string
-                  (if current
-                      (format "WHERE filter (current: %s, empty to clear): "
-                              current)
-                    "WHERE filter (e.g., age > 18): ")
-                  nil nil current)))
+         (columns clutch--result-columns)
+         (default-col (and columns clutch--header-active-col
+                           (nth clutch--header-active-col columns)))
+         (input
+          (if (and columns (not current))
+              (let* ((col (completing-read
+                           (if default-col
+                               (format "Filter column (default %s, empty for raw): "
+                                       default-col)
+                             "Filter column (empty for raw): ")
+                           columns nil nil nil nil default-col))
+                     (cond-str
+                      (if (string-empty-p col)
+                          (string-trim
+                           (read-string "WHERE filter (e.g., age > 18): "))
+                        (string-trim
+                         (read-string
+                          (format "%s (e.g., 42, 'foo', > 18, IS NULL): " col))))))
+                (if (string-empty-p cond-str)
+                    ""
+                  (if (string-empty-p col)
+                      cond-str
+                    (let ((expr (if (string-match-p
+                                    "\\`\\(?:[=<>!]\\|IN\\b\\|IS\\b\\|NOT\\b\\|LIKE\\b\\|BETWEEN\\b\\)"
+                                    (upcase cond-str))
+                                   cond-str
+                                 (concat "= " cond-str))))
+                      (format "%s %s" col expr)))))
+            (string-trim
+             (read-string
+              (if current
+                  (format "WHERE filter (current: %s, empty to clear): "
+                          current)
+                "WHERE filter (e.g., age > 18): ")
+              nil nil current))))
          (filtered-sql (unless (string-empty-p input)
                          (clutch--apply-where base input))))
     (clutch--execute (or filtered-sql base)
-                                clutch-connection)
+                     clutch-connection)
     (setq clutch--base-query (when filtered-sql base))
     (setq clutch--where-filter (when filtered-sql input))
     (message (if filtered-sql
