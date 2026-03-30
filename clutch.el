@@ -1620,9 +1620,10 @@ bounded by semicolons or blank lines.  Falls back to
     (unless (eq cols 'missing) cols)))
 
 (defun clutch--normalize-statement-table-token (token)
-  "Normalize a raw table TOKEN parsed from SQL into a bare table name."
+  "Normalize a raw table TOKEN parsed from SQL into a bare table name.
+Handles schema-qualified names like \"HR\".\"EMPLOYEES\" or `db`.`table`."
   (when token
-    (let* ((stripped (replace-regexp-in-string "\\`[\"`]\\|[\"`]\\'" "" token))
+    (let* ((stripped (replace-regexp-in-string "[\"`]" "" token))
            (parts (split-string stripped "\\." t)))
       (car (last parts)))))
 

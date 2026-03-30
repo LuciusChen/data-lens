@@ -4963,6 +4963,20 @@ preserving order, with duplicates retained (caller deduplicates)."
     (should (equal (car result) '("users")))
     (should-not (cdr result))))
 
+(ert-deftest clutch-test-normalize-table-token-strips-quotes-from-schema-qualified ()
+  "Quoted schema-qualified names like \"HR\".\"EMPLOYEES\" should normalize
+to bare table name."
+  (should (equal (clutch--normalize-statement-table-token "\"HR\".\"EMPLOYEES\"")
+                 "EMPLOYEES"))
+  (should (equal (clutch--normalize-statement-table-token "`db`.`table`")
+                 "table"))
+  (should (equal (clutch--normalize-statement-table-token "schema.table")
+                 "table"))
+  (should (equal (clutch--normalize-statement-table-token "\"EMPLOYEES\"")
+                 "EMPLOYEES"))
+  (should (equal (clutch--normalize-statement-table-token "users")
+                 "users")))
+
 ;; --- xref alias jump-to-definition tests ---
 
 (ert-deftest clutch-test-xref-alias-jump-basic ()
