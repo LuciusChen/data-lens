@@ -114,6 +114,50 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - Document Excel compatibility guidance clearly.
 - Any export-path change must include regression tests for content correctness and at least one encoding-related path.
 
+## MELPA Compatibility Checklist
+
+These rules keep the package compatible with MELPA submission requirements
+(`package-lint`, `checkdoc`, and MELPA review conventions).
+
+### Emacs 28.1 baseline
+
+- Do not use `string-equal-ignore-case` (Emacs 29.1). Use `(string= (downcase a) (downcase b))` instead.
+- Do not use `with-memoization` (Emacs 29.1), `use-package` (built-in from 29.1), or other 29+ APIs without a version guard.
+- When in doubt, check `M-x find-function` to verify when a symbol was introduced.
+
+### File headers
+
+- First line: `;;; file.el --- Short description -*- lexical-binding: t; -*-`
+  - Description must NOT contain "for Emacs" or the package name — both are redundant.
+  - Keep the description under 60 characters.
+- `;; Package-Requires:` must list all direct dependencies with minimum versions.
+- `;; URL:`, `;; Version:`, `;; Author:` headers are required.
+- Last line: `;;; file.el ends here`
+
+### Naming
+
+- Public symbols use `clutch-` prefix (or `mysql-` / `pg-` for protocol).
+- Internal mode names, maps, and hooks that are not part of the user-facing API should use double-dash `clutch--` to avoid `package-lint` "not prefixed" warnings.
+- Every `define-derived-mode` and `define-minor-mode` that is **not** user-facing should be private (`clutch--foo-mode`), or have `;;;###autoload` if it is user-facing.
+- `defcustom` `:type` must be specified.
+
+### Autoloads
+
+- Add `;;;###autoload` to user-facing commands (entry points users call via `M-x`) and user-facing minor modes.
+- Do NOT autoload internal helpers, variables, or private modes.
+
+### checkdoc
+
+- Every public `defun`, `defmacro`, `defcustom`, and `defvar` must have a docstring.
+- Docstring first line must be a complete sentence ending with a period.
+- Argument names in docstrings should be UPPERCASED.
+
+### Common pitfalls
+
+- `cl-lib` functions require `(require 'cl-lib)` — do not rely on transitive loading.
+- Avoid `eval-when-compile` for runtime-needed dependencies.
+- Do not use `string-equal-ignore-case`, `ntake`, `take`, `pos-bol`, `pos-eol`, or other Emacs 29+ symbols without compat shims or guards.
+
 ## Pre-Commit Checklist (Mandatory)
 
 Every commit must pass all of these steps.

@@ -440,22 +440,22 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar clutch--debug-events-by-conn (make-hash-table :test 'eq :weakness 'key)
   "Recent redacted debug events keyed by live connection object.")
 
-(defvar clutch-debug-buffer-mode-map
+(defvar clutch--debug-buffer-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "q") #'quit-window)
     map)
-  "Keymap for `clutch-debug-buffer-mode'.")
+  "Keymap for `clutch--debug-buffer-mode'.")
 
-(define-derived-mode clutch-debug-buffer-mode special-mode "clutch-debug"
+(define-derived-mode clutch--debug-buffer-mode special-mode "clutch-debug"
   "Mode for inspecting the dedicated clutch debug buffer.")
 
 (defun clutch--debug-buffer ()
   "Return the dedicated clutch debug buffer, creating it if needed."
   (let ((buf (get-buffer-create clutch-debug-buffer-name)))
     (with-current-buffer buf
-      (unless (derived-mode-p 'clutch-debug-buffer-mode)
-        (clutch-debug-buffer-mode))
+      (unless (derived-mode-p 'clutch--debug-buffer-mode)
+        (clutch--debug-buffer-mode))
       (setq-local header-line-format " Clutch debug capture"))
     buf))
 
@@ -464,7 +464,7 @@ Dynamically bound by `clutch--execute-and-mark'.")
   (with-current-buffer (clutch--debug-buffer)
     (let ((inhibit-read-only t))
       (erase-buffer)
-      (insert (format "Clutch debug capture started %s\n\n"
+      (insert (format "Clutch Debug\n============\nStarted: %s\n"
                       (format-time-string "%Y-%m-%d %H:%M:%S"))))))
 
 (defun clutch--debug-buffer-source-label (buffer)
@@ -479,9 +479,78 @@ Dynamically bound by `clutch--execute-and-mark'.")
         (clutch--connection-key connection)
       (error nil))))
 
-(defun clutch--format-debug-plist (plist)
+(defun clutch--debug-format-label (key)
+  "Return a human-readable label for KEY."
+  (capitalize
+   (replace-regexp-in-string
+    "-" " "
+    (string-remove-prefix ":" (format "%s" key)))))
+
+(defun clutch--debug-indent-block (text spaces)
+  "Indent TEXT by SPACES."
+  (let ((prefix (make-string spaces ?\s)))
+    (string-join
+     (mapcar (lambda (line)
+               (if (string-empty-p line)
+                   line
+                 (concat prefix line)))
+             (split-string (string-trim-right text) "\n"))
+     "\n")))
+
+(defun clutch--debug-format-plist-data (plist)
   "Return a human-readable string for PLIST."
-  (string-trim-right (pp-to-string plist)))
+  (with-temp-buffer
+    (cl-loop for (key val) on plist by #'cddr
+             when val
+             do (let ((rendered (clutch--debug-format-data val)))
+                  (when rendered
+                    (if (string-match-p "\n" rendered)
+                        (insert (format "%s:\n%s\n"
+                                        (clutch--debug-format-label key)
+                                        (clutch--debug-indent-block rendered 2)))
+                      (insert (format "%s: %s\n"
+                                      (clutch--debug-format-label key)
+                                      rendered))))))
+    (string-trim-right (buffer-string))))
+
+(defun clutch--debug-format-list-data (items)
+  "Return a human-readable string for ITEMS."
+  (string-join
+   (mapcar
+    (lambda (item)
+      (let ((rendered (clutch--debug-format-data item)))
+        (if (string-match-p "\n" rendered)
+            (concat "-\n" (clutch--debug-indent-block rendered 2))
+          (concat "- " rendered))))
+    items)
+   "\n"))
+
+(defun clutch--debug-format-data (data)
+  "Return a human-readable string for DATA."
+  (cond
+   ((null data) nil)
+   ((stringp data) data)
+   ((vectorp data) (clutch--debug-format-data (append data nil)))
+   ((and (listp data) (keywordp (car-safe data)))
+    (clutch--debug-format-plist-data data))
+   ((listp data)
+    (clutch--debug-format-list-data data))
+   (t (format "%s" data))))
+
+(defun clutch--debug-insert-field (label value)
+  "Insert LABEL and VALUE into the current debug output buffer."
+  (when-let* ((rendered (clutch--debug-format-data value)))
+    (if (string-match-p "\n" rendered)
+        (insert (format "%s:\n%s\n"
+                        label
+                        (clutch--debug-indent-block rendered 2)))
+      (insert (format "%s: %s\n" label rendered)))))
+
+(defun clutch--debug-insert-section (title value)
+  "Insert titled VALUE block into the current debug output buffer."
+  (when-let* ((rendered (clutch--debug-format-data value)))
+    (insert "\n" title "\n")
+    (insert (clutch--debug-indent-block rendered 2) "\n")))
 
 (defun clutch--debug-context-without-inline-sql (context)
   "Return CONTEXT plist without inline SQL payload entries."
@@ -496,8 +565,9 @@ Dynamically bound by `clutch--execute-and-mark'.")
     (let ((inhibit-read-only t))
       (goto-char (point-max))
       (unless (bobp)
-        (insert "\n"))
+        (insert "\n\n"))
       (insert heading "\n")
+      (insert (make-string (length heading) ?-) "\n")
       (when body
         (insert body))
       (unless (or (bobp) (eq (char-before) ?\n))
@@ -515,81 +585,67 @@ Dynamically bound by `clutch--execute-and-mark'.")
            (generated-sql (plist-get context :generated-sql))
            (display-context
             (clutch--debug-context-without-inline-sql context))
-           (heading
-            (string-join
-             (delq nil
-                   (list (format "[%s] problem"
-                                 (format-time-string "%Y-%m-%d %H:%M:%S"))
-                         (and backend (upcase (symbol-name backend)))
-                         (clutch--debug-buffer-source-label buffer)
-                         (clutch--debug-buffer-connection-label connection)
-                         (plist-get problem :summary)))
-             " | "))
            (body
             (with-temp-buffer
-              (when-let* ((category (plist-get diag :category)))
-                (insert (format "Category: %s\n" category)))
-              (when-let* ((op (plist-get diag :op)))
-                (insert (format "Operation: %s\n" op)))
-              (when-let* ((request-id (plist-get diag :request-id)))
-                (insert (format "Request ID: %s\n" request-id)))
-              (when-let* ((conn-id (plist-get diag :conn-id)))
-                (insert (format "Conn ID: %s\n" conn-id)))
-              (when-let* ((exception-class (plist-get diag :exception-class)))
-                (insert (format "Exception: %s\n" exception-class)))
-              (when-let* ((sql-state (plist-get diag :sql-state)))
-                (insert (format "SQLState: %s\n" sql-state)))
-              (when-let* ((vendor-code (plist-get diag :vendor-code)))
-                (insert (format "Vendor code: %s\n" vendor-code)))
-              (when-let* ((raw-message (plist-get diag :raw-message)))
-                (insert (format "Raw message: %s\n" raw-message)))
-              (when sql
-                (insert "\nSQL\n" sql "\n"))
-              (when generated-sql
-                (insert "\nGenerated SQL\n" generated-sql "\n"))
-              (when display-context
-                (insert "\nContext\n"
-                        (clutch--format-debug-plist display-context)
-                        "\n"))
-              (when-let* ((cause-chain (plist-get diag :cause-chain)))
-                (insert "\nCause chain\n"
-                        (clutch--format-debug-plist cause-chain)
-                        "\n"))
-              (when debug-payload
-                (insert "\nBackend debug\n"
-                        (clutch--format-debug-plist debug-payload)
-                        "\n"))
-              (when stderr-tail
-                (insert "\nAgent stderr tail\n" stderr-tail "\n"))
+              (clutch--debug-insert-field "Recorded"
+                                          (format-time-string "%Y-%m-%d %H:%M:%S"))
+              (clutch--debug-insert-field "Backend"
+                                          (and backend
+                                               (upcase (symbol-name backend))))
+              (clutch--debug-insert-field "Source"
+                                          (clutch--debug-buffer-source-label buffer))
+              (clutch--debug-insert-field "Connection"
+                                          (clutch--debug-buffer-connection-label connection))
+              (clutch--debug-insert-field "Summary"
+                                          (plist-get problem :summary))
+              (clutch--debug-insert-field "Category" (plist-get diag :category))
+              (clutch--debug-insert-field "Operation" (plist-get diag :op))
+              (clutch--debug-insert-field "Request ID" (plist-get diag :request-id))
+              (clutch--debug-insert-field "Conn ID" (plist-get diag :conn-id))
+              (clutch--debug-insert-field "Exception"
+                                          (plist-get diag :exception-class))
+              (clutch--debug-insert-field "SQLState" (plist-get diag :sql-state))
+              (clutch--debug-insert-field "Vendor code" (plist-get diag :vendor-code))
+              (clutch--debug-insert-field "Raw message"
+                                          (plist-get diag :raw-message))
+              (clutch--debug-insert-section "SQL" sql)
+              (clutch--debug-insert-section "Generated SQL" generated-sql)
+              (clutch--debug-insert-section "Context" display-context)
+              (clutch--debug-insert-section "Cause chain"
+                                            (plist-get diag :cause-chain))
+              (clutch--debug-insert-section "Backend debug" debug-payload)
+              (clutch--debug-insert-section "Agent stderr tail" stderr-tail)
               (string-trim-right (buffer-string)))))
-      (clutch--append-debug-buffer-entry heading body))))
+      (clutch--append-debug-buffer-entry "Problem" body))))
 
 (defun clutch--append-debug-event-to-buffer (buffer connection event)
   "Append EVENT for BUFFER and CONNECTION to the dedicated debug buffer."
   (when clutch-debug-mode
     (let* ((backend (plist-get event :backend))
-           (heading
-            (string-join
-             (delq nil
-                   (list (format "[%s] %s"
-                                 (or (plist-get event :time)
-                                     (format-time-string "%Y-%m-%d %H:%M:%S"))
-                                 (if-let* ((phase (plist-get event :phase)))
-                                     (format "%s/%s" (plist-get event :op) phase)
-                                   (plist-get event :op)))
-                         (and backend (upcase (symbol-name backend)))
-                         (clutch--debug-buffer-source-label buffer)
-                         (clutch--debug-buffer-connection-label connection)
-                         (when-let* ((elapsed (plist-get event :elapsed)))
-                           (clutch--format-elapsed elapsed))
-                         (plist-get event :summary)
-                         (plist-get event :sql-preview)))
-             " | "))
            (body
-            (when-let* ((context (plist-get event :context)))
-              (concat "Context\n"
-                      (clutch--format-debug-plist context)))))
-      (clutch--append-debug-buffer-entry heading body))))
+            (with-temp-buffer
+              (clutch--debug-insert-field "Recorded"
+                                          (or (plist-get event :time)
+                                              (format-time-string "%Y-%m-%d %H:%M:%S")))
+              (clutch--debug-insert-field "Operation" (plist-get event :op))
+              (clutch--debug-insert-field "Phase" (plist-get event :phase))
+              (clutch--debug-insert-field "Backend"
+                                          (and backend
+                                               (upcase (symbol-name backend))))
+              (clutch--debug-insert-field "Source"
+                                          (clutch--debug-buffer-source-label buffer))
+              (clutch--debug-insert-field "Connection"
+                                          (clutch--debug-buffer-connection-label connection))
+              (when-let* ((elapsed (plist-get event :elapsed)))
+                (clutch--debug-insert-field "Elapsed"
+                                            (clutch--format-elapsed elapsed)))
+              (clutch--debug-insert-field "Summary" (plist-get event :summary))
+              (clutch--debug-insert-field "SQL preview"
+                                          (plist-get event :sql-preview))
+              (clutch--debug-insert-section "Context"
+                                            (plist-get event :context))
+              (string-trim-right (buffer-string)))))
+      (clutch--append-debug-buffer-entry "Trace Event" body))))
 
 (defun clutch--clear-problem-capture ()
   "Forget all captured problem records across buffers and connections."
@@ -637,11 +693,11 @@ problem was already recorded."
          (unless (member entry seen)
            (push entry seen)
            (push entry records))))
-     clutch--problem-records-by-conn)
+    clutch--problem-records-by-conn)
     (when records
       (clutch--append-debug-buffer-entry
-       "[historical] Problem records captured before debug mode was enabled"
-       nil)
+       "Historical Problems"
+       "Recorded before debug mode was enabled.")
       (dolist (entry (nreverse records))
         (clutch--append-problem-record-to-debug-buffer
          (plist-get entry :buffer)

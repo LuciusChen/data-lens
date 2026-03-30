@@ -156,14 +156,16 @@
                        '(clutch-db-display-name fake-conn)))))
     (should-not (clutch--backend-key-from-conn 'fake-conn))))
 
-(ert-deftest clutch-test-backend-key-from-conn-propagates-jdbc-param-errors ()
-  "Backend key detection should expose JDBC accessor failures."
+(ert-deftest clutch-test-backend-key-from-conn-swallows-jdbc-param-errors ()
+  "Backend key detection should return nil when JDBC accessors fail.
+The function catches `clutch-db-error' and `wrong-type-argument' to avoid
+crashing the UI layer."
   (cl-letf (((symbol-function 'clutch-jdbc-conn-p)
              (lambda (_conn) t))
             ((symbol-function 'clutch-jdbc-conn-params)
              (lambda (_conn)
-               (signal 'error '("backend key boom")))))
-    (should-error (clutch--backend-key-from-conn 'fake-conn) :type 'error)))
+               (signal 'clutch-db-error '("backend key boom")))))
+    (should-not (clutch--backend-key-from-conn 'fake-conn))))
 
 
 (ert-deftest clutch-test-dispatch-view-json-category-serializes-non-string ()
@@ -3577,6 +3579,13 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   (let ((result (clutch--humanize-db-error "Connection refused (host=db.example.com, port=3306)")))
     (should (string-match-p "check host and port" result))))
 
+(ert-deftest clutch-test-humanize-db-error-jdbc-driver-missing ()
+  "Missing JDBC driver should point to the concrete install command."
+  (let ((result (clutch--humanize-db-error
+                 "SQLException [SQLState=08001]: No suitable driver found for jdbc:oracle:thin:@//db:1521/ORCL")))
+    (should (string-match-p "No suitable driver found" result))
+    (should (string-match-p "clutch-jdbc-install-driver RET oracle" result))))
+
 (ert-deftest clutch-test-humanize-db-error-unknown-passes-through ()
   "Unknown errors should pass through with noise stripped but no hint."
   (let ((result (clutch--humanize-db-error "Something totally unexpected happened")))
@@ -3635,8 +3644,8 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           (let ((buf (get-buffer clutch-debug-buffer-name)))
             (should (buffer-live-p buf))
             (with-current-buffer buf
-              (should (derived-mode-p 'clutch-debug-buffer-mode))
-              (should (string-match-p "Clutch debug capture started"
+              (should (derived-mode-p 'clutch--debug-buffer-mode))
+              (should (string-match-p "Clutch Debug"
                                       (buffer-string))))))
       (clutch-debug-mode -1)
       (when-let* ((buf (get-buffer clutch-debug-buffer-name)))
@@ -3708,7 +3717,9 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
          :summary "Query failed"
          :sql "SELECT * FROM missing_table")
         (let ((text (clutch-test--debug-buffer-string)))
-          (should (string-match-p "execute/error" text))
+          (should (string-match-p "Trace Event" text))
+          (should (string-match-p "Operation: execute" text))
+          (should (string-match-p "Phase: error" text))
           (should (string-match-p "Query failed" text))
           (should (string-match-p "SELECT \\* FROM missing_table" text)))))))
 
@@ -3759,7 +3770,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
              :problem `(:backend oracle :summary ,summary)))
           (clutch-debug-mode 1)
           (let ((text (clutch-test--debug-buffer-string)))
-            (should (string-match-p "\\[historical\\]" text))
+            (should (string-match-p "Historical Problems" text))
             (should (string-match-p summary text))))
       (when clutch-debug-mode
         (clutch-debug-mode -1))
@@ -3916,6 +3927,38 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
          (should-not (string-match-p "clutch-debug-mode" (cadr err)))
          (should (string-match-p (regexp-quote clutch-debug-buffer-name)
                                  (cadr err))))))))
+
+(ert-deftest clutch-test-build-conn-jdbc-driver-missing-points-to-install-command ()
+  "Missing JDBC driver should point to install-driver, not the debug workflow."
+  (cl-letf (((symbol-function 'clutch-db-connect)
+             (lambda (_backend _params)
+               (signal 'clutch-db-error
+                       '("SQLException [SQLState=08001]: No suitable driver found for jdbc:oracle:thin:@//db:1521/ORCL")))))
+    (condition-case err
+        (progn
+          (clutch--build-conn '(:backend oracle :driver jdbc :host "db" :port 1521))
+          (should nil))
+      (user-error
+       (should (string-match-p "clutch-jdbc-install-driver RET oracle" (cadr err)))
+       (should-not (string-match-p "clutch-debug-mode" (cadr err)))
+       (should-not (string-match-p (regexp-quote clutch-debug-buffer-name)
+                                   (cadr err)))))))
+
+(ert-deftest clutch-test-build-conn-agent-missing-points-to-ensure-agent ()
+  "Missing JDBC agent should point to ensure-agent, not the debug workflow."
+  (cl-letf (((symbol-function 'clutch-db-connect)
+             (lambda (_backend _params)
+               (signal 'clutch-db-error
+                       '("JDBC agent jar not found: /tmp/clutch-jdbc-agent.jar\nRun M-x clutch-jdbc-ensure-agent")))))
+    (condition-case err
+        (progn
+          (clutch--build-conn '(:backend oracle :driver jdbc :host "db" :port 1521))
+          (should nil))
+      (user-error
+       (should (string-match-p "Run M-x clutch-jdbc-ensure-agent" (cadr err)))
+       (should-not (string-match-p "clutch-debug-mode" (cadr err)))
+       (should-not (string-match-p (regexp-quote clutch-debug-buffer-name)
+                                   (cadr err)))))))
 
 (ert-deftest clutch-test-execute-statements-remembers-error-details-before-last ()
   "Earlier failing statements should store details and humanized messages."
@@ -6305,7 +6348,8 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
           (should (= (length timer-fns) 1))
           (funcall (car timer-fns))
           (let ((text (clutch-test--debug-buffer-string)))
-            (should (string-match-p "object-warmup/warning" text))
+            (should (string-match-p "Operation: object-warmup" text))
+            (should (string-match-p "Phase: warning" text))
             (should (string-match-p "warmup boom" text))))))))
 
 (ert-deftest clutch-test-object-warmup-warns-on-connection-liveness-errors ()
@@ -6349,7 +6393,8 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
           (lambda ()
             (signal 'clutch-db-error '("completion boom")))))
         (let ((text (clutch-test--debug-buffer-string)))
-          (should (string-match-p "completion/warning" text))
+          (should (string-match-p "Operation: completion" text))
+          (should (string-match-p "Phase: warning" text))
           (should (string-match-p "completion boom" text)))))))
 
 (ert-deftest clutch-test-object-warmup-propagates-non-db-errors ()
@@ -6559,7 +6604,8 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
             (should (eq (plist-get problem :backend) 'oracle)))
           (let ((text (clutch-test--debug-buffer-string)))
             (should (string-match-p "set-current-schema" text))
-            (should (string-match-p "schema-switch/error" text))
+            (should (string-match-p "Operation: schema-switch" text))
+            (should (string-match-p "Phase: error" text))
             (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" text))))))))
 
 (ert-deftest clutch-test-switch-schema-updates-mysql-database-param ()
@@ -7813,7 +7859,8 @@ database.  Only a query re-execution should discard them."
           (should (string-match-p "ORA-04043"
                                   (plist-get clutch--buffer-error-details :summary)))
           (let ((text (clutch-test--debug-buffer-string)))
-            (should (string-match-p "show-definition/error" text))
+            (should (string-match-p "Operation: show-definition" text))
+            (should (string-match-p "Phase: error" text))
             (should (string-match-p "DEMO_TASKS" text))))))))
 
 (ert-deftest clutch-test-object-describe-propagates-detail-errors ()
@@ -7923,7 +7970,8 @@ database.  Only a query re-execution should discard them."
            (clutch-object-describe '(:name "USERS" :type "TABLE"))
            :type 'clutch-db-error)
           (let ((text (clutch-test--debug-buffer-string)))
-            (should (string-match-p "describe/error" text))
+            (should (string-match-p "Operation: describe" text))
+            (should (string-match-p "Phase: error" text))
             (should (string-match-p "USERS" text))))))))
 
 (ert-deftest clutch-test-object-describe-success-clears-stale-problem-records ()

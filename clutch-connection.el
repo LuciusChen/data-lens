@@ -440,7 +440,7 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
            (condition-case nil
                (and (clutch-jdbc-conn-p conn)
                     (plist-get (clutch-jdbc-conn-params conn) :driver))
-             (void-variable nil)))
+             ((clutch-db-error wrong-type-argument) nil)))
       (pcase (condition-case nil
                  (clutch-db-display-name conn)
                ((cl-no-applicable-method wrong-type-argument) nil))

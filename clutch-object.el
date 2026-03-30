@@ -512,7 +512,7 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
 
 (defun clutch--public-source-entry-p (entry)
   "Return non-nil when ENTRY comes from PUBLIC source schema."
-  (string-equal-ignore-case "PUBLIC" (or (plist-get entry :source-schema) "")))
+  (string= "public" (downcase (or (plist-get entry :source-schema) ""))))
 
 (defun clutch--preferred-object-match (matches &optional table-like-only)
   "Return the preferred entry from MATCHES, or nil when still ambiguous.
@@ -541,9 +541,8 @@ TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set."
      (lambda (entry)
        (and (or (not table-like-only)
                 (clutch--table-like-entry-p entry))
-            (string-equal-ignore-case
-             name
-             (or (plist-get entry :name) ""))))
+            (string= (downcase name)
+                     (downcase (or (plist-get entry :name) "")))))
      entries)))
 
 (defun clutch--object-matches-at-point (&optional table-like-only allowed-types)
@@ -1047,9 +1046,8 @@ when the real object schema is unavailable."
      (lambda (candidate)
        (and (equal (clutch--normalize-object-type (plist-get candidate :type))
                    (clutch--normalize-object-type type))
-            (string-equal-ignore-case
-             (or (plist-get candidate :target-table) "")
-             name)))
+            (string= (downcase (or (plist-get candidate :target-table) ""))
+                     (downcase name))))
      objects)))
 
 (defun clutch--object-describe-sections (conn entry)
@@ -1311,8 +1309,9 @@ When ENTRY is nil, use the current table-like object."
     (if (and schema (not (string-empty-p schema)))
         (or (seq-filter
              (lambda (entry)
-               (or (string-equal-ignore-case schema (or (plist-get entry :schema) ""))
-                   (string-equal-ignore-case schema (or (plist-get entry :source-schema) ""))))
+               (let ((ds (downcase schema)))
+                 (or (string= ds (downcase (or (plist-get entry :schema) "")))
+                     (string= ds (downcase (or (plist-get entry :source-schema) ""))))))
              entries)
             entries)
       entries)))

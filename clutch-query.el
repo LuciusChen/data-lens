@@ -888,6 +888,8 @@ Prompts for confirmation on destructive operations."
     ("Lightweight deletes? \\(?:is\\|are\\) not supported"
      . "enable lightweight delete: SET allow_experimental_lightweight_delete = 1")
     ;; Oracle
+    ("No suitable driver found for jdbc:oracle:"
+     . "Oracle JDBC driver not installed; run M-x clutch-jdbc-install-driver RET oracle")
     ("ORA-00942" . "table or view does not exist; check name and privileges")
     ("ORA-01031" . "insufficient privileges")
     ("ORA-00904" . "invalid column name")
@@ -934,7 +936,9 @@ actionable hints for known error patterns."
 (defun clutch--debug-workflow-message (message)
   "Return MESSAGE annotated with the single debug-buffer workflow."
   (if (or (not message)
-          (string-match-p (regexp-quote clutch-debug-buffer-name) message))
+          (string-match-p (regexp-quote clutch-debug-buffer-name) message)
+          (string-match-p
+           "Run M-x clutch-jdbc-\\(ensure-agent\\|install-driver\\)" message))
       message
     (if clutch-debug-mode
         (format "%s See %s for details." message clutch-debug-buffer-name)

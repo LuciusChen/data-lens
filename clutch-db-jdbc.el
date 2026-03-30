@@ -1176,8 +1176,8 @@ when a catalog is supplied."
     (sort schemas
           (lambda (a b)
             (cond
-             ((and current (string-equal-ignore-case a current)) t)
-             ((and current (string-equal-ignore-case b current)) nil)
+             ((and current (string= (downcase a) (downcase current))) t)
+             ((and current (string= (downcase b) (downcase current))) nil)
              (t (string-collate-lessp a b)))))))
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-jdbc-conn))
