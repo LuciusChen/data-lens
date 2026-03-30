@@ -648,13 +648,17 @@ label instead of plain =JDBC=.
 
 #+begin_src emacs-lisp
 (require 'clutch-db-jdbc)
+#+end_src
 
-;; Download clutch-jdbc-agent.jar (once):
+On first =clutch-connect= to a JDBC backend, clutch will prompt to
+download the agent jar and the required driver jar automatically.
+Just answer =y= at each prompt — no manual setup commands needed.
+
+If you prefer to pre-install everything up front:
+
+#+begin_src emacs-lisp
+;; Download clutch-jdbc-agent.jar:
 (clutch-jdbc-ensure-agent)
-
-;; Optional: allow a locally built jar with checksum verification disabled.
-;; Keep this nil only if you intentionally manage the jar yourself.
-(setq clutch-jdbc-agent-sha256 nil)
 
 ;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift):
 (clutch-jdbc-install-driver 'oracle)      ; ojdbc8.jar + orai18n.jar from Maven Central
@@ -662,7 +666,7 @@ label instead of plain =JDBC=.
 (clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar (JRE-classified SQL Server driver) from Maven Central
 (clutch-jdbc-install-driver 'snowflake)   ; snowflake-jdbc.jar from Maven Central
 (clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc.jar from Maven Central
-;; DB2: download db2jcc4.jar from IBM manually and place in clutch-jdbc-agents-dir/drivers/
+;; DB2: download db2jcc4.jar from IBM manually and place in clutch-jdbc-agent-dir/drivers/
 #+end_src
 
 Driver jars are stored in =~/.emacs.d/clutch-jdbc/drivers/=

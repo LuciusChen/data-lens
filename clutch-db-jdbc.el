@@ -699,11 +699,34 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
                        (or (plist-get p :rpc-timeout) clutch-jdbc-rpc-timeout-seconds)))
     p))
 
+(defun clutch-jdbc--setup-prerequisites (driver)
+  "Ensure agent jar and DRIVER jar are present, offering to download if missing."
+  (let ((jar (clutch-jdbc--agent-jar)))
+    (unless (and (file-exists-p jar) (clutch-jdbc--agent-jar-valid-p jar))
+      (if (y-or-n-p "JDBC agent not found.  Download from GitHub? ")
+          (clutch-jdbc--download-agent-jar)
+        (user-error "Run M-x clutch-jdbc-ensure-agent to install the JDBC agent"))))
+  (when-let* ((spec (alist-get driver clutch-jdbc--driver-sources))
+              (filename (plist-get spec :filename))
+              (dest (expand-file-name filename (clutch-jdbc--drivers-dir))))
+    (unless (file-exists-p dest)
+      (cond
+       ((plist-get spec :maven)
+        (if (y-or-n-p (format "%s driver not found.  Download from Maven Central? "
+                              (capitalize (symbol-name driver))))
+            (clutch-jdbc-install-driver driver)
+          (user-error "Run M-x clutch-jdbc-install-driver RET %s" driver)))
+       ((plist-get spec :manual)
+        (user-error "%s driver requires manual download.\nURL: %s\nPlace as: %s"
+                    (capitalize (symbol-name driver))
+                    (plist-get spec :manual) dest))))))
+
 (defun clutch-db-jdbc-connect (driver params)
   "Connect to a JDBC data source of type DRIVER using PARAMS plist.
 DRIVER is a symbol (e.g. \\='oracle, \\='sqlserver) captured by the
 registration closure — users do not pass it directly.
 Returns a `clutch-jdbc-conn'."
+  (clutch-jdbc--setup-prerequisites driver)
   (clutch-jdbc--ensure-agent)
   (let* ((normalized-params (clutch-jdbc--apply-timeout-defaults params))
          (manual-commit-p (clutch-jdbc--manual-commit-mode driver normalized-params))
@@ -1575,28 +1598,33 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 ;;;; Agent installation helpers
 
+(defun clutch-jdbc--download-agent-jar ()
+  "Download the agent jar from GitHub Releases and verify its checksum."
+  (let ((jar (clutch-jdbc--agent-jar))
+        (url (format
+              "https://github.com/LuciusChen/clutch-jdbc-agent/releases/download/v%s/clutch-jdbc-agent-%s.jar"
+              clutch-jdbc-agent-version
+              clutch-jdbc-agent-version)))
+    (make-directory clutch-jdbc-agent-dir t)
+    (make-directory (clutch-jdbc--drivers-dir) t)
+    (message "Downloading clutch-jdbc-agent %s..." clutch-jdbc-agent-version)
+    (url-copy-file url jar t)
+    (unless (clutch-jdbc--agent-jar-valid-p jar)
+      (error "Downloaded clutch-jdbc-agent checksum mismatch: %s" jar))
+    (clutch-jdbc--cleanup-stale-agent-jars)
+    (message "Downloaded to %s" jar)))
+
 (defun clutch-jdbc-ensure-agent ()
   "Download clutch-jdbc-agent.jar if not present.
 Fetches from GitHub Releases."
   (interactive)
   (let ((jar (clutch-jdbc--agent-jar)))
-    (make-directory clutch-jdbc-agent-dir t)
-    (make-directory (clutch-jdbc--drivers-dir) t)
     (if (and (file-exists-p jar)
              (clutch-jdbc--agent-jar-valid-p jar))
         (progn
           (clutch-jdbc--cleanup-stale-agent-jars)
           (message "clutch-jdbc-agent already at %s" jar))
-      (let ((url (format
-                  "https://github.com/LuciusChen/clutch-jdbc-agent/releases/download/v%s/clutch-jdbc-agent-%s.jar"
-                  clutch-jdbc-agent-version
-                  clutch-jdbc-agent-version)))
-        (message "Downloading clutch-jdbc-agent %s..." clutch-jdbc-agent-version)
-        (url-copy-file url jar t)
-        (unless (clutch-jdbc--agent-jar-valid-p jar)
-          (error "Downloaded clutch-jdbc-agent checksum mismatch: %s" jar))
-        (clutch-jdbc--cleanup-stale-agent-jars)
-        (message "Downloaded to %s" jar)))))
+      (clutch-jdbc--download-agent-jar))))
 
 (defun clutch-jdbc-install-driver (driver)
   "Download the JDBC driver for DRIVER symbol from Maven Central."
