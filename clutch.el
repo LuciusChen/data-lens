@@ -1,4 +1,4 @@
-;;; clutch.el --- Interactive database client for Emacs -*- lexical-binding: t; -*-
+;;; clutch.el --- Interactive database client -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
@@ -648,6 +648,7 @@ problem was already recorded."
          (plist-get entry :connection)
          (plist-get entry :problem))))))
 
+;;;###autoload
 (define-minor-mode clutch-debug-mode
   "Capture additional redacted troubleshooting data for clutch workflows.
 When enabled, clutch records a bounded recent-event trace per buffer and per
@@ -1128,7 +1129,8 @@ executed outside clutch that would otherwise leave stale completions."
                          "Switch to schema: ")
                        schemas nil t nil nil current)))
           (unless (string-empty-p schema)
-            (if (and current (string-equal-ignore-case schema current))
+            (if (and current
+                     (string= (downcase schema) (downcase current)))
                 (message "Already on schema %s" current)
               (condition-case err
                   (progn
@@ -1434,7 +1436,7 @@ Returns the buffer position (offset by STMT-BEG), or nil."
                    (normalized (clutch--normalize-statement-table-token token)))
               (when (and normalized
                          (not (member (upcase normalized) clutch--sql-keywords))
-                         (string-equal-ignore-case normalized alias))
+                         (string= (downcase normalized) (downcase alias)))
                 (setq alias-pos (+ stmt-beg (match-beginning 1))))))
           (when alias-pos
             (throw 'found alias-pos))
