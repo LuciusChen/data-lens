@@ -29,6 +29,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'clutch-db)
 
 (declare-function sqlite-available-p "sqlite" ())

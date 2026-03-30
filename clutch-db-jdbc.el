@@ -34,6 +34,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'clutch-db)
 (require 'json)
 (require 'sql)
@@ -1614,6 +1615,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
     (clutch-jdbc--cleanup-stale-agent-jars)
     (message "Downloaded to %s" jar)))
 
+;;;###autoload
 (defun clutch-jdbc-ensure-agent ()
   "Download clutch-jdbc-agent.jar if not present.
 Fetches from GitHub Releases."
@@ -1626,6 +1628,7 @@ Fetches from GitHub Releases."
           (message "clutch-jdbc-agent already at %s" jar))
       (clutch-jdbc--download-agent-jar))))
 
+;;;###autoload
 (defun clutch-jdbc-install-driver (driver)
   "Download the JDBC driver for DRIVER symbol from Maven Central."
   (interactive

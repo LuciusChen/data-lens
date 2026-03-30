@@ -814,6 +814,7 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
 
 ;;;; Interactive connect/disconnect
 
+;;;###autoload
 (defun clutch-connect ()
   "Connect to a database server interactively.
 If `clutch-connection-alist' is non-empty, offer saved connections via
@@ -837,6 +838,7 @@ params; see `clutch-connection-alist' for details."
       (clutch--activate-current-buffer-connection conn params product)
       (message "Connected to %s" (clutch--connection-key conn)))))
 
+;;;###autoload
 (defun clutch-disconnect ()
   "Disconnect from the current database server."
   (interactive)

@@ -144,6 +144,7 @@ console window; (3) nil, meaning use the selected window."
                                      (buffer-name (window-buffer w))))
                   (window-list))))
 
+;;;###autoload
 (defun clutch-query-console (name)
   "Open or switch to the query console for saved connection NAME.
 Creates a dedicated buffer *clutch: NAME* with `clutch-mode' enabled
