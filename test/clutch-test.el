@@ -19,6 +19,11 @@
 (require 'clutch)
 (require 'ob-clutch)
 
+(defvar mysql-tls-verify-server)
+(defvar clutch-db-pg--type-category-alist)
+
+(declare-function make-clutch-jdbc-conn "clutch-db-jdbc" (&rest slot-value-pairs))
+
 ;;;; Test configuration
 
 (defvar clutch-test-backend 'mysql)
@@ -3276,6 +3281,18 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should (string-match-p "edited" cell))
       (should (eq (get-text-property 3 'clutch-col-idx cell) 1))
       (should (equal (get-text-property 3 'clutch-full-value cell) "edited")))))
+
+(ert-deftest clutch-test-render-cell-fk-face-only-covers-displayed-value ()
+  "Foreign-key face should not underline trailing cell padding."
+  (with-temp-buffer
+    (setq-local clutch--result-column-defs '((:name "id" :type-category numeric)
+                                             (:name "customer_id" :type-category text))
+                clutch--fk-info '((1 :ref-table "customers" :ref-column "id")))
+    (let* ((clutch-column-padding 1)
+           (cell (clutch--render-cell '(1 "abc") 0 1 [4 6] nil)))
+      (should (eq (get-text-property 2 'face cell) 'clutch-fk-face))
+      (should (eq (get-text-property 4 'face cell) 'clutch-fk-face))
+      (should-not (get-text-property 5 'face cell)))))
 
 (ert-deftest clutch-test-insert-data-rows-marks-pending-edits ()
   "Edited rows should show an E marker in the left prefix."
@@ -8264,6 +8281,57 @@ database.  Only a query re-execution should discard them."
         (should-not read-called)
         (should (equal built '(:backend mysql :database "app_a" :pass-entry "alpha")))))))
 
+(ert-deftest clutch-test-read-connection-params-loads-clutch-entrypoint ()
+  "Saved connection reader should load `clutch' before checking saved profiles."
+  (let ((clutch-connection-alist nil)
+        required
+        (orig-featurep (symbol-function 'featurep))
+        (orig-require (symbol-function 'require)))
+    (cl-letf (((symbol-function 'featurep)
+               (lambda (feature)
+                 (if (eq feature 'clutch)
+                     nil
+                   (funcall orig-featurep feature))))
+              ((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'clutch)
+                     (progn
+                       (setq required t
+                             clutch-connection-alist
+                             '(("alpha" . (:backend mysql :database "app_a"))))
+                       t)
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'completing-read)
+               (lambda (&rest _args) "alpha")))
+      (should (equal (clutch--read-connection-params)
+                     '(:backend mysql :database "app_a" :pass-entry "alpha")))
+      (should required))))
+
+(ert-deftest clutch-test-read-query-console-name-loads-clutch-entrypoint ()
+  "Query console reader should load `clutch' before checking saved profiles."
+  (let ((clutch-connection-alist nil)
+        required
+        (orig-featurep (symbol-function 'featurep))
+        (orig-require (symbol-function 'require)))
+    (cl-letf (((symbol-function 'featurep)
+               (lambda (feature)
+                 (if (eq feature 'clutch)
+                     nil
+                   (funcall orig-featurep feature))))
+              ((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'clutch)
+                     (progn
+                       (setq required t
+                             clutch-connection-alist
+                             '(("alpha" . (:backend mysql :database "app_a"))))
+                       t)
+                   (funcall orig-require feature filename noerror))))
+              ((symbol-function 'completing-read)
+               (lambda (&rest _args) "alpha")))
+      (should (equal (clutch--read-query-console-name) "alpha"))
+      (should required))))
+
 (ert-deftest clutch-test-connect-in-query-console-errors-when-saved-connection-missing ()
   "Query console reconnect should error when its saved connection no longer exists."
   (with-temp-buffer
@@ -8378,6 +8446,66 @@ database.  Only a query re-execution should discard them."
                 ((symbol-function 'message) #'ignore))
         (clutch-connect)
         (should (equal built '(:backend mysql :database "manual_db")))))))
+
+(ert-deftest clutch-test-console-yank-cleanup-strips-trailing-whitespace ()
+  "Yank into a query console should clean trailing whitespace in pasted region."
+  (let ((clutch-console-yank-cleanup t))
+    (with-temp-buffer
+      (clutch-mode)
+      (setq-local clutch--console-name "test")
+      (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
+      (insert "existing SQL;\n")
+      (let ((start (point)))
+        (insert "SELECT *   \nFROM t   \n")
+        (set-mark start)
+        (let ((this-command 'yank))
+          (clutch--console-yank-cleanup))
+        (should (equal (buffer-substring start (point-max))
+                       "SELECT *\nFROM t\n"))))))
+
+(ert-deftest clutch-test-console-yank-cleanup-does-not-touch-existing-text ()
+  "Yank cleanup should not modify text outside the pasted region."
+  (let ((clutch-console-yank-cleanup t))
+    (with-temp-buffer
+      (clutch-mode)
+      (setq-local clutch--console-name "test")
+      (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
+      (insert "SELECT 1;   \n")
+      (let ((pre-text (buffer-string))
+            (start (point)))
+        (insert "SELECT 2;\n")
+        (set-mark start)
+        (let ((this-command 'yank))
+          (clutch--console-yank-cleanup))
+        (should (equal (buffer-substring 1 (1+ (length pre-text)))
+                       pre-text))))))
+
+(ert-deftest clutch-test-console-yank-cleanup-respects-defcustom ()
+  "Yank cleanup should be a no-op when `clutch-console-yank-cleanup' is nil."
+  (let ((clutch-console-yank-cleanup nil))
+    (with-temp-buffer
+      (clutch-mode)
+      (setq-local clutch--console-name "test")
+      (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
+      (let ((start (point)))
+        (insert "SELECT *   \n")
+        (set-mark start)
+        (let ((this-command 'yank))
+          (clutch--console-yank-cleanup))
+        (should (equal (buffer-string) "SELECT *   \n"))))))
+
+(ert-deftest clutch-test-console-yank-cleanup-skips-non-console-buffers ()
+  "Yank cleanup should not run in non-console clutch buffers."
+  (let ((clutch-console-yank-cleanup t))
+    (with-temp-buffer
+      (clutch-mode)
+      ;; clutch--console-name is nil — not a console
+      (let ((start (point)))
+        (insert "SELECT *   \n")
+        (set-mark start)
+        (let ((this-command 'yank))
+          (clutch--console-yank-cleanup))
+        (should (equal (buffer-string) "SELECT *   \n"))))))
 
 (ert-deftest clutch-test-ensure-column-details-failure-is-memoized ()
   "Repeated sync detail loads should not reissue the same failing RPC."

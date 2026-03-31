@@ -309,8 +309,8 @@ so the active-column overlay can find it."
         ((assq cidx clutch--fk-info) 'clutch-fk-face)
         (t nil)))
 
-(defun clutch--cell-display-value (val w col-def edited)
-  "Return the padded display string for a cell value VAL in column width W.
+(defun clutch--cell-display-content (val w col-def edited)
+  "Return the unpadded display string for a cell value VAL in width W.
 COL-DEF is the column definition plist, EDITED is the pending edit cons or nil."
   (let* ((display-val (if edited (cdr edited) val))
          (special-placeholder (and (not edited)
@@ -323,12 +323,9 @@ COL-DEF is the column definition plist, EDITED is the pending edit cons or nil."
                            (> (string-width s) w)
                            (clutch--value-placeholder display-val col-def)))
          (formatted (or placeholder s)))
-    (clutch--string-pad
-     (if (> (string-width formatted) w)
-         (truncate-string-to-width formatted w)
-       formatted)
-     w
-     (clutch--numeric-type-p col-def))))
+    (if (> (string-width formatted) w)
+        (truncate-string-to-width formatted w)
+      formatted)))
 
 (defun clutch--pending-insert-placeholders ()
   "Return placeholder sentinels aligned with `clutch--result-columns'."
@@ -391,16 +388,27 @@ including the leading border and padding."
          (col-def (nth cidx clutch--result-column-defs))
          (edited  (clutch--render-edit-entry row ridx cidx render-state))
          (w       (aref widths cidx))
-         (padded  (clutch--cell-display-value val w col-def edited))
+         (content (clutch--cell-display-content val w col-def edited))
+         (padded  (clutch--string-pad content w (clutch--numeric-type-p col-def)))
          (face    (clutch--cell-face val edited cidx))
          (pad-str (make-string clutch-column-padding ?\s)))
+    (when (and (eq face 'clutch-fk-face)
+               (not (string-empty-p content)))
+      (let ((start (if (clutch--numeric-type-p col-def)
+                       (- (length padded) (length content))
+                     0)))
+        (add-face-text-property start (+ start (length content)) face 'append padded)
+        (setq face nil)))
+    (when face
+      (add-face-text-property 0 (length padded) face 'append padded))
+    (add-text-properties 0 (length padded)
+                         `(clutch-row-idx ,ridx
+                           clutch-col-idx ,cidx
+                           clutch-full-value ,(if edited (cdr edited) val))
+                         padded)
     (concat (propertize "│" 'face 'clutch-border-face)
             pad-str
-            (propertize padded
-                        'clutch-row-idx ridx
-                        'clutch-col-idx cidx
-                        'clutch-full-value (if edited (cdr edited) val)
-                        'face face)
+            padded
             pad-str)))
 
 (defun clutch--render-row (row ridx visible-cols widths render-state)

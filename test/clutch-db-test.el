@@ -44,6 +44,12 @@
 (defvar clutch-jdbc--busy-request-ids)
 (defvar clutch-jdbc--ignored-response-ids)
 
+(declare-function clutch-db-mysql--type-category "clutch-db-mysql" (type character-set))
+(declare-function clutch-db-mysql--convert-columns "clutch-db-mysql" (columns))
+(declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
+(declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns))
+(declare-function clutch-db-pg-connect "clutch-db-pg" (params))
+
 ;;;; Test configuration
 
 (defvar clutch-db-test-mysql-host "127.0.0.1")
@@ -159,7 +165,8 @@
   "JDBC connect should map explicit timeout phases to the agent call."
   (let ((clutch-jdbc-oracle-manual-commit t)
         captured-op captured-params captured-timeout)
-    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (op params &optional timeout-seconds)
                  (setq captured-op op
@@ -187,7 +194,8 @@
 (ert-deftest clutch-db-test-jdbc-connect-non-oracle-sends-autocommit-true ()
   "Non-Oracle JDBC connect should keep auto-commit enabled by default."
   (let (captured-params)
-    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (_op params &optional _timeout-seconds)
                  (setq captured-params params)
@@ -201,7 +209,8 @@
   "Oracle connect should honor the global manual-commit default override."
   (let ((clutch-jdbc-oracle-manual-commit nil)
         captured-params)
-    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (_op params &optional _timeout-seconds)
                  (setq captured-params params)
@@ -218,7 +227,8 @@
         (clutch-query-timeout-seconds 20)
         (clutch-jdbc-rpc-timeout-seconds 30)
         captured-timeout captured-params conn)
-    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (_op params &optional timeout-seconds)
                  (setq captured-params params
@@ -815,7 +825,8 @@
 (ert-deftest clutch-db-test-jdbc-connect-normalizes-plist-props ()
   "JDBC connect should send props as an alist even when given a plist."
   (let (captured-params)
-    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (_op params &optional _timeout-seconds)
                  (setq captured-params params)
@@ -1627,7 +1638,8 @@ Skips if `clutch-db-test-pg-password' is nil."
 (defvar clutch-db-test-jdbc-clickhouse-user "default"
   "User for ClickHouse JDBC live tests.")
 (defvar clutch-db-test-jdbc-clickhouse-password nil
-  "Password for ClickHouse JDBC live tests.  Non-nil enables the :clickhouse-live suite.")
+  "Password for ClickHouse JDBC live tests.
+Non-nil enables the :clickhouse-live suite.")
 (defvar clutch-db-test-jdbc-clickhouse-database "default"
   "Database name for ClickHouse JDBC live tests.")
 

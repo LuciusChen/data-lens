@@ -433,6 +433,7 @@ Connection profile plist keys:
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
 | `clutch-console-directory` | `~/.emacs.d/clutch/` | directory | Directory for persisting query console buffers |
+| `clutch-console-yank-cleanup` | `t` | boolean | Clean whitespace in pasted region after yank in query consoles |
 
 ### Export
 

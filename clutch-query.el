@@ -56,6 +56,7 @@
 (defvar clutch-result-max-rows 500)
 (defvar clutch-column-width-max 30)
 (defvar clutch-column-padding 1)
+(defvar clutch-console-yank-cleanup t)
 (defvar clutch-console-directory
   (expand-file-name "clutch" user-emacs-directory))
 
@@ -96,6 +97,7 @@
 
 ;; Forward declarations — functions from clutch-connection.el
 (declare-function clutch--connection-key "clutch-connection" (conn))
+(declare-function clutch--ensure-clutch-loaded "clutch-connection" ())
 (declare-function clutch--connection-oracle-jdbc-p "clutch-connection" (conn))
 (declare-function clutch--clear-tx-dirty "clutch-connection" (conn))
 (declare-function clutch--run-db-query "clutch-connection" (conn sql))
@@ -144,6 +146,27 @@ console window; (3) nil, meaning use the selected window."
                                      (buffer-name (window-buffer w))))
                   (window-list))))
 
+(defun clutch--read-query-console-name ()
+  "Read a saved connection name for `clutch-query-console'."
+  (clutch--ensure-clutch-loaded)
+  (if clutch-connection-alist
+      (completing-read "Console: "
+                       (mapcar #'car clutch-connection-alist)
+                       nil t)
+    (user-error "No saved connections.  Populate `clutch-connection-alist' first")))
+
+(defun clutch--console-yank-cleanup ()
+  "Clean whitespace in the just-pasted region of a query console.
+Only runs when `clutch-console-yank-cleanup' is non-nil, the current
+buffer is a query console, and the last command was a yank variant."
+  (when (and clutch-console-yank-cleanup
+             clutch--console-name
+             (memq this-command '(yank yank-pop clipboard-yank)))
+    (let ((beg (region-beginning))
+          (end (region-end)))
+      (when (< beg end)
+        (whitespace-cleanup-region beg end)))))
+
 ;;;###autoload
 (defun clutch-query-console (name)
   "Open or switch to the query console for saved connection NAME.
@@ -152,12 +175,7 @@ and connects automatically if not already connected.
 Repeated calls with the same NAME switch to the existing buffer.
 When called from outside a clutch buffer, reuses any visible clutch
 window rather than replacing the current window."
-  (interactive
-   (list (if clutch-connection-alist
-             (completing-read "Console: "
-                              (mapcar #'car clutch-connection-alist)
-                              nil t)
-           (user-error "No saved connections.  Populate `clutch-connection-alist' first"))))
+  (interactive (list (clutch--read-query-console-name)))
   (let ((existing (clutch--find-console-buffer name)))
     (if (and existing
              (buffer-local-value 'clutch-connection existing)
@@ -185,6 +203,7 @@ window rather than replacing the current window."
         (unless (eq major-mode 'clutch-mode)
           (clutch-mode))
         (setq-local clutch--console-name name)
+        (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
         (when is-new
           (let ((coding-system-for-read 'utf-8)
                 (file (clutch--console-file name)))

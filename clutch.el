@@ -370,6 +370,14 @@ Only recorded while `clutch-debug-mode' is enabled."
   :type 'natnum
   :group 'clutch)
 
+(defcustom clutch-console-yank-cleanup t
+  "When non-nil, clean whitespace in pasted text in query consoles.
+After yank, yank-pop, or clipboard-yank in a query console buffer,
+trailing whitespace, mixed indentation, and CRLF line endings are
+cleaned up in the pasted region only."
+  :type 'boolean
+  :group 'clutch)
+
 (defconst clutch-debug-buffer-name "*clutch-debug*"
   "Name of the dedicated clutch debug buffer.")
 

@@ -120,6 +120,14 @@
                   (format ":%s" port)
                 "")))))
 
+(defun clutch--ensure-clutch-loaded ()
+  "Load the `clutch' entrypoint before module-autoloaded commands run.
+This ensures user setup attached to feature `clutch' has executed before
+interactive readers inspect shared customization such as
+`clutch-connection-alist'."
+  (unless (featurep 'clutch)
+    (require 'clutch)))
+
 (defun clutch--connection-oracle-jdbc-p (conn)
   "Return non-nil when CONN is a JDBC Oracle connection."
   (and conn
@@ -795,6 +803,7 @@ Leaves PARAMS unchanged when :password or :pass-entry is already set."
 Offers saved connections from `clutch-connection-alist' when non-empty,
 otherwise prompts for host/port/user/password/database individually.
 The password is resolved via `auth-source' before falling back to `read-passwd'."
+  (clutch--ensure-clutch-loaded)
   (if clutch-connection-alist
       (let* ((name   (completing-read "Connection: "
                                       (mapcar #'car clutch-connection-alist)

@@ -505,6 +505,13 @@ to a different saved connection, call =clutch-query-console= again.
 =clutch-switch-console= lists all open console buffers via =completing-read= for
 fast switching between active connections.
 
+*** Paste whitespace cleanup
+
+Text pasted into a query console is automatically cleaned: trailing
+whitespace, mixed tabs/spaces, and CRLF line endings are fixed in the
+pasted region only — existing SQL in the buffer is not touched.
+Disable with =(setq clutch-console-yank-cleanup nil)=.
+
 *** Console persistence
 
 Buffer content is automatically saved to =clutch-console-directory=
