@@ -1368,7 +1368,12 @@ Key bindings:
     (unless conn
       (user-error "No active connection"))
     (quit-window 'kill)
-    (clutch--execute sql conn)))
+    ;; `quit-window' kills the indirect buffer, leaving the Lisp execution
+    ;; context in a dead buffer.  Any subsequent `with-current-buffer' call
+    ;; would fail when `save-current-buffer' tries to restore that dead buffer.
+    ;; Explicitly switch to the live buffer now selected after the kill.
+    (with-current-buffer (window-buffer (selected-window))
+      (clutch--execute sql conn))))
 
 (defun clutch-indirect-abort ()
   "Abort the indirect edit buffer."
