@@ -3294,6 +3294,24 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should (eq (get-text-property 4 'face cell) 'clutch-fk-face))
       (should-not (get-text-property 5 'face cell)))))
 
+(ert-deftest clutch-test-result-column-info-works-on-cell-padding ()
+  "Column info should resolve from padded whitespace inside a data cell."
+  (with-temp-buffer
+    (setq-local clutch-column-padding 1
+                clutch--result-columns '("name")
+                clutch--result-column-defs '((:name "name" :type-category text))
+                clutch--result-column-details
+                (list (list :name "name" :type "VARCHAR(255)" :nullable t)))
+    (insert (clutch--render-cell '("alice") 0 0 [8] nil))
+    (goto-char 2)
+    (let (seen)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq seen (apply #'format fmt args)))))
+        (clutch-result-column-info)
+        (should (string-match-p "name" seen))
+        (should (string-match-p "Type: VARCHAR(255)" seen))))))
+
 (ert-deftest clutch-test-insert-data-rows-marks-pending-edits ()
   "Edited rows should show an E marker in the left prefix."
   (with-temp-buffer
@@ -4575,6 +4593,14 @@ connection should still disconnect."
       (should-error (clutch-toggle-auto-commit) :type 'user-error)
       (should-not toggle-called)
       (should (clutch--tx-dirty-p clutch-connection)))))
+
+(ert-deftest clutch-test-statement-keybinding-does-not-collide-with-commit ()
+  "Statement execution should use a distinct key from transaction commit."
+  (should (eq (lookup-key clutch-mode-map (kbd "C-c ;"))
+              #'clutch-execute-statement-at-point))
+  (should (eq (lookup-key clutch-mode-map (kbd "C-c C-m"))
+              #'clutch-commit))
+  (should-not (equal (kbd "C-c ;") (kbd "C-c C-m"))))
 
 (ert-deftest clutch-test-execute-runs-risky-dml-confirmation ()
   "Execute should run risky DML confirmation before dispatch."
@@ -8658,6 +8684,104 @@ database.  Only a query re-execution should discard them."
       (ob-clutch--disconnect-all)
       (should (= (length disconnected) 2))
       (should (= (hash-table-count ob-clutch--connection-cache) 0)))))
+
+;;; Feature: statement-bounds-at-point (;-only delimiter)
+
+(ert-deftest clutch-test-statement-bounds-ignores-blank-lines ()
+  "Statement bounds use only semicolons, ignoring blank lines."
+  (with-temp-buffer
+    (insert "SELECT *\nFROM users\n\nWHERE id = 1")
+    (goto-char 20) ;; inside the statement
+    (let ((bounds (clutch--statement-bounds-at-point)))
+      (should (equal (string-trim
+                      (buffer-substring-no-properties (car bounds) (cdr bounds)))
+                     "SELECT *\nFROM users\n\nWHERE id = 1")))))
+
+(ert-deftest clutch-test-statement-bounds-semicolon-delimited ()
+  "Statement bounds stop at semicolons."
+  (with-temp-buffer
+    (insert "SELECT 1;\nSELECT 2;\nSELECT 3")
+    (goto-char 15) ;; inside SELECT 2
+    (let ((bounds (clutch--statement-bounds-at-point)))
+      (should (equal (string-trim
+                      (buffer-substring-no-properties (car bounds) (cdr bounds)))
+                     "SELECT 2")))))
+
+(ert-deftest clutch-test-statement-bounds-first-statement ()
+  "Statement bounds work for the first statement (no leading semicolon)."
+  (with-temp-buffer
+    (insert "SELECT 1;\nSELECT 2")
+    (goto-char 5) ;; inside SELECT 1
+    (let ((bounds (clutch--statement-bounds-at-point)))
+      (should (equal (string-trim
+                      (buffer-substring-no-properties (car bounds) (cdr bounds)))
+                     "SELECT 1")))))
+
+(ert-deftest clutch-test-statement-bounds-skips-semicolon-in-string ()
+  "Statement bounds skip semicolons inside string literals."
+  (with-temp-buffer
+    (insert "SELECT 'a;b' AS v;")
+    (goto-char 5) ;; inside the SELECT
+    (let ((bounds (clutch--statement-bounds-at-point)))
+      (should (equal (string-trim
+                      (buffer-substring-no-properties (car bounds) (cdr bounds)))
+                     "SELECT 'a;b' AS v")))))
+
+(ert-deftest clutch-test-statement-bounds-skips-semicolon-in-comment ()
+  "Statement bounds skip semicolons inside line comments."
+  (with-temp-buffer
+    (insert "SELECT 1 -- foo;\nFROM t;")
+    (goto-char 5) ;; inside SELECT 1
+    (let ((bounds (clutch--statement-bounds-at-point)))
+      (should (equal (string-trim
+                      (buffer-substring-no-properties (car bounds) (cdr bounds)))
+                     "SELECT 1 -- foo;\nFROM t")))))
+
+;;; Feature: column info string
+
+(ert-deftest clutch-test-column-info-string-with-details ()
+  "Column info string formats type and nullable info."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--result-column-details
+                (list (list :name "id" :type "INT" :nullable nil)
+                      (list :name "name" :type "VARCHAR(255)" :nullable t
+                            :default "unnamed")))
+    (let ((info0 (clutch--column-info-string 0))
+          (info1 (clutch--column-info-string 1)))
+      (should (string-match-p "Type: INT" info0))
+      (should (string-match-p "Nullable: NO" info0))
+      (should (string-match-p "Type: VARCHAR(255)" info1))
+      (should (string-match-p "Nullable: YES" info1))
+      (should (string-match-p "Default: unnamed" info1)))))
+
+(ert-deftest clutch-test-column-info-string-nil-when-no-details ()
+  "Column info string returns nil when details are unavailable."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id"))
+    (setq-local clutch--result-column-details nil)
+    (should-not (clutch--column-info-string 0))))
+
+(ert-deftest clutch-test-resolve-column-details-maps-by-name ()
+  "Detail resolution matches result columns to cached details by name."
+  (cl-letf (((symbol-function 'clutch-result--table-from-sql)
+             (lambda (_) "users"))
+            ((symbol-function 'clutch--cached-column-details)
+             (lambda (_conn _table)
+               (list (list :name "ID" :type "INT" :nullable nil)
+                     (list :name "NAME" :type "VARCHAR" :nullable t)))))
+    (let ((result (clutch--resolve-result-column-details
+                   'dummy-conn "SELECT id, name FROM users" '("id" "name"))))
+      (should (= (length result) 2))
+      (should (equal (plist-get (nth 0 result) :type) "INT"))
+      (should (equal (plist-get (nth 1 result) :type) "VARCHAR")))))
+
+(ert-deftest clutch-test-resolve-column-details-nil-for-no-table ()
+  "Detail resolution returns nil when no source table is detected."
+  (cl-letf (((symbol-function 'clutch-result--table-from-sql)
+             (lambda (_) nil)))
+    (should-not (clutch--resolve-result-column-details
+                 'dummy "SELECT 1+1" '("col1")))))
 
 (provide 'clutch-test)
 ;;; clutch-test.el ends here

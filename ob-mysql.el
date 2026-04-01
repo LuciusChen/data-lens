@@ -1,4 +1,4 @@
-;;; ob-mysql.el --- Org-Babel mysql entry via ob-clutch -*- lexical-binding: t; -*-
+;;; ob-mysql.el --- Org-Babel MySQL compatibility shim -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 

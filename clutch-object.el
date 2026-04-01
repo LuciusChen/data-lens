@@ -1,4 +1,4 @@
-;;; clutch-object.el --- Object workflow for clutch -*- lexical-binding: t; -*-
+;;; clutch-object.el --- Object discovery and describe workflow -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -1207,6 +1207,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
       (clutch--remember-object-operation-error ,buffer ,conn ,entry ,op err)
       (signal (car err) (cdr err)))))
 
+;;;###autoload
 (defun clutch-describe-refresh (&optional _ignore-auto _noconfirm)
   "Refresh the current describe buffer."
   (interactive)
@@ -1236,6 +1237,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
 (define-derived-mode clutch-describe-mode special-mode "clutch-describe"
   "Major mode for clutch object describe buffers.")
 
+;;;###autoload
 (defun clutch-object-show-ddl-or-source (&optional entry)
   "Show DDL or source for ENTRY."
   (interactive)
@@ -1260,6 +1262,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
                                          (plist-get context :params)
                                          (plist-get context :product))))))
 
+;;;###autoload
 (defun clutch-object-describe (&optional entry)
   "Show a describe buffer for ENTRY."
   (interactive)
@@ -1276,6 +1279,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
                                            (plist-get context :params)
                                            (plist-get context :product)))))
 
+;;;###autoload
 (defun clutch-object-browse (&optional entry)
   "Insert SELECT * FROM ENTRY into a query console.
 When ENTRY is nil, use the current table-like object."
@@ -1351,6 +1355,7 @@ When ENTRY is nil, use the current table-like object."
       (1 (car targets))
       (_ (clutch--object-entry-reader conn "Jump to target: " targets)))))
 
+;;;###autoload
 (defun clutch-object-jump-target (&optional entry)
   "Jump from ENTRY to its target object."
   (interactive)
@@ -1364,6 +1369,7 @@ When ENTRY is nil, use the current table-like object."
     (clutch--remember-current-object target)
     (clutch-object-describe target)))
 
+;;;###autoload
 (defun clutch-object-default-action (&optional entry)
   "Run the default action for ENTRY."
   (interactive)
@@ -1381,6 +1387,7 @@ passed to the fallback reader."
                                 category
                                 allowed-types))
 
+;;;###autoload
 (defun clutch-copy-object-name (&optional entry)
   "Copy the object name from ENTRY to the kill ring."
   (interactive)
@@ -1391,6 +1398,7 @@ passed to the fallback reader."
     (clutch--remember-current-object entry)
     (message "Copied object name: %s" name)))
 
+;;;###autoload
 (defun clutch-copy-object-fqname (&optional entry)
   "Copy the fully qualified object name from ENTRY to the kill ring."
   (interactive)
@@ -1401,6 +1409,7 @@ passed to the fallback reader."
     (clutch--remember-current-object entry)
     (message "Copied object fqname: %s" fqname)))
 
+;;;###autoload
 (defun clutch-describe-table (table)
   "Describe TABLE using the unified object workflow."
   (interactive
@@ -1411,11 +1420,13 @@ passed to the fallback reader."
            (read-string "Table: "))))
   (clutch-object-describe (list :name table :type "TABLE")))
 
+;;;###autoload
 (defun clutch-describe-table-at-point ()
   "Describe the object at point, or prompt when none is resolved."
   (interactive)
   (clutch-describe-dwim))
 
+;;;###autoload
 (defun clutch-browse-table (table-or-entry)
   "Insert SELECT * FROM TABLE-OR-ENTRY at the end of a query console."
   (interactive
@@ -1558,6 +1569,7 @@ passed to the fallback reader."
     t)
    (t nil)))
 
+;;;###autoload
 (defun clutch-act-dwim (&optional entry)
   "Resolve ENTRY, or an object at point, and present its action UI."
   (interactive)
@@ -1566,6 +1578,7 @@ passed to the fallback reader."
     (unless (clutch--present-object-actions-natively entry)
       (user-error "No object action UI is available"))))
 
+;;;###autoload
 (defun clutch-jump (&optional entry)
   "Resolve ENTRY, or an object at point, and run its default action."
   (interactive)
@@ -1575,6 +1588,7 @@ passed to the fallback reader."
                                                 clutch-primary-object-types))))
     (clutch--run-object-action entry (clutch--object-default-action-id entry))))
 
+;;;###autoload
 (defun clutch-describe-dwim (&optional entry)
   "Resolve ENTRY, or an object at point, and open its describe view."
   (interactive)

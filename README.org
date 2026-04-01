@@ -264,6 +264,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | Key         | Action                     |
 |-------------+----------------------------|
 | =C-c C-c=   | Execute region or query at point |
+| =C-c ;=     | Execute statement at point (=;=-only delimiter; blank lines preserved) |
 | =C-c C-r=   | Execute selected region          |
 | =C-c C-b=   | Execute entire buffer      |
 | =C-c C-e=   | Connect; query consoles reconnect their own saved connection |
@@ -300,6 +301,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =s=            | Sort by column (toggles ASC/DESC on repeat)   |
 | =S=            | Sort descending                               |
 | =C=            | Jump to column                                |
+| =?=            | Show column type info at point                |
 | =g=            | Re-execute query                              |
 | =C-c '=       | Edit / re-edit at point                       |
 | =i=            | Stage new row for insertion                   |

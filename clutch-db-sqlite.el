@@ -1,4 +1,4 @@
-;;; clutch-db-sqlite.el --- SQLite backend for clutch-db -*- lexical-binding: t; -*-
+;;; clutch-db-sqlite.el --- Native backend over built-in sqlite -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 

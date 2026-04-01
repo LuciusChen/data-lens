@@ -1,4 +1,4 @@
-;;; clutch-db-mysql.el --- MySQL backend for clutch-db -*- lexical-binding: t; -*-
+;;; clutch-db-mysql.el --- Native backend over the MySQL wire client -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 

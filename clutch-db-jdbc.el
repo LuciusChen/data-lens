@@ -1,4 +1,4 @@
-;;; clutch-db-jdbc.el --- JDBC backend for clutch-db via clutch-jdbc-agent -*- lexical-binding: t; -*-
+;;; clutch-db-jdbc.el --- JDBC backend over the Java sidecar -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 

@@ -1,4 +1,4 @@
-;;; clutch-ui.el --- Result UI helpers for clutch -*- lexical-binding: t; -*-
+;;; clutch-ui.el --- Result rendering and icon helpers -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -65,6 +65,9 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "Column name currently sorted by, or nil.")
 (defvar-local clutch--sort-descending nil
   "Non-nil if the current sort is descending.")
+(defvar-local clutch--result-column-details nil
+  "List of column detail plists aligned with `clutch--result-columns'.
+Each element corresponds to the same-index column.  Nil when unavailable.")
 (defvar-local clutch--where-filter nil
   "Current WHERE filter string, or nil if no filter is active.")
 (defvar-local clutch--refine-rect nil
@@ -99,6 +102,7 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (declare-function nerd-icons--function-name "nerd-icons" (name))
 (declare-function clutch--column-names "clutch-query" (columns))
 (declare-function clutch--compute-column-widths "clutch-query" (col-names rows columns))
+(declare-function clutch--cached-column-details "clutch-schema" (conn table))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--format-elapsed "clutch-query" (seconds))
 (declare-function clutch--format-value "clutch-query" (value))
@@ -111,6 +115,7 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (declare-function clutch--value-placeholder "clutch-query" (value col-def))
 (declare-function clutch--visible-columns "clutch-query" ())
 (declare-function clutch-result--detect-table "clutch-edit" ())
+(declare-function clutch-result--table-from-sql "clutch-edit" (sql))
 (declare-function clutch-result--extract-pk-vec "clutch-edit" (row pk-indices))
 (declare-function clutch-result--row-idx-at-line "clutch-edit" ())
 (declare-function clutch-result-mode "clutch" (&optional arg))
@@ -273,8 +278,8 @@ POSITION is `top', `middle', or `bottom' (default `middle')."
 
 (defun clutch--render-header (visible-cols widths)
   "Render the header row string for VISIBLE-COLS with WIDTHS.
-Each column name carries a `clutch-header-col' text property
-so the active-column overlay can find it."
+Each header cell body carries a `clutch-header-col' text property so
+column-local commands still work from padded whitespace."
   (let ((padding clutch-column-padding)
         (parts nil))
     (dolist (cidx visible-cols)
@@ -289,14 +294,16 @@ so the active-column overlay can find it."
              (trail (make-string (cdr pads) ?\s))
              (cell (concat lead truncated trail))
              (face 'clutch-header-face)
-             (pad-str (make-string padding ?\s)))
+             (pad-str (make-string padding ?\s))
+             (body nil))
         ;; Append base face so icon-specific face (e.g. pin color) is preserved.
         (add-face-text-property 0 (length cell) face 'append cell)
+        (setq body (concat pad-str cell pad-str))
+        (add-text-properties 0 (length body)
+                             `(clutch-header-col ,cidx)
+                             body)
         (push (concat (propertize "│" 'face 'clutch-border-face)
-                      pad-str
-                      (propertize cell
-                                  'clutch-header-col cidx)
-                      pad-str)
+                      body)
               parts)))
     (concat (mapconcat #'identity (nreverse parts) "")
             (propertize "│" 'face 'clutch-border-face))))
@@ -391,7 +398,8 @@ including the leading border and padding."
          (content (clutch--cell-display-content val w col-def edited))
          (padded  (clutch--string-pad content w (clutch--numeric-type-p col-def)))
          (face    (clutch--cell-face val edited cidx))
-         (pad-str (make-string clutch-column-padding ?\s)))
+         (pad-str (make-string clutch-column-padding ?\s))
+         (body nil))
     (when (and (eq face 'clutch-fk-face)
                (not (string-empty-p content)))
       (let ((start (if (clutch--numeric-type-p col-def)
@@ -401,15 +409,14 @@ including the leading border and padding."
         (setq face nil)))
     (when face
       (add-face-text-property 0 (length padded) face 'append padded))
-    (add-text-properties 0 (length padded)
+    (setq body (concat pad-str padded pad-str))
+    (add-text-properties 0 (length body)
                          `(clutch-row-idx ,ridx
                            clutch-col-idx ,cidx
                            clutch-full-value ,(if edited (cdr edited) val))
-                         padded)
+                         body)
     (concat (propertize "│" 'face 'clutch-border-face)
-            pad-str
-            padded
-            pad-str)))
+            body)))
 
 (defun clutch--render-row (row ridx visible-cols widths render-state)
   "Render a single data ROW at row index RIDX.
@@ -615,6 +622,39 @@ Columns with sort indicators get wider to fit the label."
           (aset widths cidx label-w))))
     widths))
 
+(defun clutch--column-info-string (cidx)
+  "Build the display string for column at CIDX from cached details."
+  (when-let* ((details clutch--result-column-details)
+              (col (nth cidx details)))
+    (let ((parts nil))
+      (when-let* ((comment (plist-get col :comment)))
+        (unless (string-empty-p comment)
+          (push comment parts)))
+      (when-let* ((default (plist-get col :default)))
+        (push (format "Default: %s" default) parts))
+      (push (format "Nullable: %s" (if (plist-get col :nullable) "YES" "NO")) parts)
+      (when-let* ((type (plist-get col :type)))
+        (push (format "Type: %s" type) parts))
+      (when-let* ((name (plist-get col :name)))
+        (push name parts))
+      (string-join parts "\n"))))
+
+(defun clutch--resolve-result-column-details (conn sql col-names)
+  "Resolve column details for result columns COL-NAMES.
+Uses CONN and SQL to detect the source table.  Checks the cache first;
+if missing, loads details via `clutch--ensure-column-details'.
+Returns a list of detail plists aligned with COL-NAMES, or nil."
+  (when-let* ((table (when sql
+                       (clutch-result--table-from-sql sql)))
+              (details (or (clutch--cached-column-details conn table)
+                           (clutch--ensure-column-details conn table))))
+    (let ((by-name (make-hash-table :test 'equal)))
+      (dolist (d details)
+        (puthash (downcase (plist-get d :name)) d by-name))
+      (mapcar (lambda (name)
+                (gethash (downcase name) by-name))
+              col-names))))
+
 (defun clutch--header-cell (cidx widths &optional active-cidx)
   "Build a single header cell string for column CIDX.
 WIDTHS is the effective width vector.
@@ -632,7 +672,8 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (face (cond
                 ((eql cidx active-cidx) 'clutch-header-active-face)
                 (t 'clutch-header-face)))
-         (pad-str (make-string clutch-column-padding ?\s)))
+         (pad-str (make-string clutch-column-padding ?\s))
+         (body nil))
     ;; Append base/underline style without overwriting icon-specific face.
     (add-face-text-property 0 (length label)
                             (list :inherit face :underline t)
@@ -644,13 +685,16 @@ ACTIVE-CIDX is the highlighted column index, if any."
           (put-text-property i (1+ i) 'face
                              (list '(:underline nil) icon-face)
                              label))))
+    (setq body (concat pad-str
+                       (propertize lead 'face face)
+                       label
+                       (propertize trail 'face face)
+                       pad-str))
+    (add-text-properties 0 (length body)
+                         `(clutch-header-col ,cidx)
+                         body)
     (concat (propertize "│" 'face 'clutch-border-face)
-            pad-str
-            (propertize lead 'face face)
-            (propertize label
-                        'clutch-header-col cidx)
-            (propertize trail 'face face)
-            pad-str)))
+            body)))
 
 (defun clutch--build-header-line (visible-cols widths nw &optional active-cidx)
   "Build the `header-line-format' string for the column header row.
@@ -1021,6 +1065,9 @@ If the result has columns, shows a table; otherwise shows DML summary."
       (if col-names
           (progn
             (clutch--init-select-result-state col-names columns rows)
+            (setq-local clutch--result-column-details
+                        (clutch--resolve-result-column-details
+                         (clutch-db-result-connection result) sql col-names))
             (clutch--display-select-result col-names rows columns))
         (clutch--display-dml-result result sql elapsed)))
     (clutch--show-result-buffer buf)))

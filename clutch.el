@@ -65,6 +65,8 @@
 (declare-function clutch--footer-mode-line-display "clutch-ui" ())
 (declare-function clutch--header-line-display "clutch-ui" ())
 (declare-function clutch--column-border-position "clutch-ui" (cidx))
+(declare-function clutch--column-info-string "clutch-ui" (cidx))
+(declare-function clutch--resolve-result-column-details "clutch-ui" (conn sql col-names))
 
 ;;;; Customization
 
@@ -1135,6 +1137,7 @@ executed outside clutch that would otherwise leave stale completions."
              collect db))
    #'string-collate-lessp))
 
+;;;###autoload
 (defun clutch-switch-database ()
   "Switch the current ClickHouse connection to another database by reconnecting."
   (interactive)
@@ -1170,6 +1173,7 @@ executed outside clutch that would otherwise leave stale completions."
            (plist-get context :product))
           (message "Current database: %s" database))))))
 
+;;;###autoload
 (defun clutch-switch-schema ()
   "Switch the current schema or database on the active connection."
   (interactive)
@@ -2251,6 +2255,7 @@ SQL keyword/function docs are shown even without a connection."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map sql-mode-map)
     (define-key map (kbd "C-c C-c") #'clutch-execute-dwim)
+    (define-key map (kbd "C-c ;") #'clutch-execute-statement-at-point)
     (define-key map (kbd "C-c C-r") #'clutch-execute-region)
     (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
     (define-key map (kbd "C-c C-e") #'clutch-connect)
@@ -2306,6 +2311,7 @@ Key bindings:
 
 ;;;; Cell navigation
 
+;;;###autoload
 (defun clutch-result-next-cell ()
   "Move point to the next cell (right, then wrap to next row)."
   (interactive)
@@ -2320,6 +2326,7 @@ Key bindings:
   (when (use-region-p)
     (setq deactivate-mark nil)))
 
+;;;###autoload
 (defun clutch-result-prev-cell ()
   "Move point to the previous cell (left, then wrap to prev row)."
   (interactive)
@@ -2335,6 +2342,7 @@ Key bindings:
   (when (use-region-p)
     (setq deactivate-mark nil)))
 
+;;;###autoload
 (defun clutch-result-down-cell ()
   "Move to the same column in the next row."
   (interactive)
@@ -2345,6 +2353,7 @@ Key bindings:
   (when (use-region-p)
     (setq deactivate-mark nil)))
 
+;;;###autoload
 (defun clutch-result-up-cell ()
   "Move to the same column in the previous row."
   (interactive)
@@ -2366,6 +2375,7 @@ Priority: region rows > current row."
       (when-let* ((ridx (clutch-result--row-idx-at-line)))
         (list ridx))))
 
+;;;###autoload
 (defun clutch-result-discard-pending-at-point ()
   "Discard the staged change at point."
   (interactive)
@@ -2427,6 +2437,7 @@ Priority: region rows > current row."
     (define-key map "S" #'clutch-result-sort-by-column-desc)
     (define-key map "c" #'clutch-result-copy-dispatch)
     (define-key map "v" #'clutch-result-view-value)
+    (define-key map "?" #'clutch-result-column-info)
     (define-key map "W" #'clutch-result-apply-filter)
     (define-key map (kbd "RET") #'clutch-result-open-record)
     (define-key map "]" #'clutch-result-scroll-right)
@@ -2567,6 +2578,7 @@ Edit:
   (add-hook 'change-major-mode-hook #'clutch--result-buffer-cleanup nil t)
   (clutch--enable-window-size-hook))
 
+;;;###autoload
 (defun clutch-result-next-page ()
   "Go to the next data page."
   (interactive)
@@ -2575,6 +2587,7 @@ Edit:
       (user-error "Already on last page (fewer rows than page size)"))
     (clutch--execute-page (1+ clutch--page-current))))
 
+;;;###autoload
 (defun clutch-result-prev-page ()
   "Go to the previous data page."
   (interactive)
@@ -2582,6 +2595,7 @@ Edit:
     (user-error "Already on first page"))
   (clutch--execute-page (1- clutch--page-current)))
 
+;;;###autoload
 (defun clutch-result-first-page ()
   "Go to the first data page."
   (interactive)
@@ -2589,6 +2603,7 @@ Edit:
     (user-error "Already on first page"))
   (clutch--execute-page 0))
 
+;;;###autoload
 (defun clutch-result-last-page ()
   "Go to the last data page.
 Triggers a COUNT(*) query if total rows are not yet known."
@@ -2657,6 +2672,7 @@ Uses the rewrite layer so complex SQL is handled via derived-table count."
                 (clutch--sql-derived-table-alias "_clutch_count"))
       (clutch--sql-rewrite normalized 'count))))
 
+;;;###autoload
 (defun clutch-result-count-total ()
   "Query the total row count for the current base query."
   (interactive)
@@ -2699,6 +2715,7 @@ Uses the rewrite layer so complex SQL is handled via derived-table count."
       (clutch--refresh-display)
       (message "Total rows: %d" clutch--page-total-rows))))
 
+;;;###autoload
 (defun clutch-result-rerun ()
   "Re-execute the last query that produced this result buffer."
   (interactive)
@@ -2741,6 +2758,7 @@ Re-executes from the first page."
                        "Sort by column: ")
                      col-names nil t nil nil default)))
 
+;;;###autoload
 (defun clutch-result-sort-by-column ()
   "Sort results by a column.
 If the column is already sorted, toggle the direction."
@@ -2752,6 +2770,7 @@ If the column is already sorted, toggle the direction."
                        nil)))
     (clutch-result--sort col-name descending)))
 
+;;;###autoload
 (defun clutch-result-sort-by-column-desc ()
   "Sort results descending by a column."
   (interactive)
@@ -2759,6 +2778,7 @@ If the column is already sorted, toggle the direction."
 
 ;;;; WHERE filtering
 
+;;;###autoload
 (defun clutch-result-apply-filter ()
   "Apply or clear a WHERE filter on the current result query.
 When columns are available, prompts to pick a column first (defaulting
@@ -2837,6 +2857,7 @@ empty string at the condition prompt to clear the filter."
     (message "Filter: %d/%d rows match \"%s\""
              (length matching) (length clutch--result-rows) input)))
 
+;;;###autoload
 (defun clutch-result-filter ()
   "Filter visible rows by substring match (client-side).
 Prompts for a pattern; enter empty string to clear."
@@ -2869,6 +2890,7 @@ Prompts for a pattern; enter empty string to clear."
     map)
   "Keymap for `clutch-refine-mode'.")
 
+;;;###autoload
 (define-minor-mode clutch-refine-mode
   "Transient minor mode for visually refining a rectangular selection.
 \\<clutch-refine-mode-map>
@@ -2968,6 +2990,7 @@ Scans buffer once for this column — O(buffer)."
                  do (delete-overlay ov)
                  else collect ov)))
 
+;;;###autoload
 (defun clutch-refine-toggle-row ()
   "Toggle exclusion of the row at point."
   (interactive)
@@ -2985,6 +3008,7 @@ Scans buffer once for this column — O(buffer)."
         (user-error "Row not in selection"))
     (user-error "No row at point")))
 
+;;;###autoload
 (defun clutch-refine-toggle-col ()
   "Toggle exclusion of the column at point."
   (interactive)
@@ -3003,6 +3027,7 @@ Scans buffer once for this column — O(buffer)."
         (user-error "Column not in selection"))
     (user-error "No column at point")))
 
+;;;###autoload
 (defun clutch-refine-confirm ()
   "Confirm the current refine selection and execute the callback."
   (interactive)
@@ -3028,6 +3053,7 @@ Scans buffer once for this column — O(buffer)."
             clutch--refine-saved-mode-line nil)
       (funcall cb final-rect))))
 
+;;;###autoload
 (defun clutch-refine-cancel ()
   "Cancel refine mode without executing the callback."
   (interactive)
@@ -3100,21 +3126,25 @@ Otherwise, copy the current cell."
          (lambda (final-rect) (clutch-result-copy fmt final-rect))))
     (clutch-result-copy fmt)))
 
+;;;###autoload
 (defun clutch-result-copy-tsv ()
   "Copy as TSV."
   (interactive)
   (clutch-result--copy-fmt 'tsv))
 
+;;;###autoload
 (defun clutch-result-copy-csv ()
   "Copy as CSV with header."
   (interactive)
   (clutch-result--copy-fmt 'csv))
 
+;;;###autoload
 (defun clutch-result-copy-insert ()
   "Copy as INSERT statements."
   (interactive)
   (clutch-result--copy-fmt 'insert))
 
+;;;###autoload
 (defun clutch-result-copy-update ()
   "Copy as UPDATE statements."
   (interactive)
@@ -3335,6 +3365,7 @@ Without region: use current cell."
     (clutch--refresh-display)
     (kill-new summary)))
 
+;;;###autoload
 (defun clutch-result-aggregate (&optional refine)
   "Aggregate numeric values from selected columns or current cell.
 With prefix arg REFINE and an active region, enter visual refine mode."
@@ -3505,6 +3536,7 @@ blob type with non-text value → binary string; otherwise plain text."
      (t
       (clutch--view-plain-value val)))))
 
+;;;###autoload
 (defun clutch-result-view-value ()
   "Display the cell value at point in an appropriate pop-up buffer.
 Selects JSON, XML, or binary string view based on column type and content."
@@ -3682,6 +3714,27 @@ When point is at line-end or a border, scan backward to find the row."
         (goto-char (prop-match-beginning found))))
     (clutch--ensure-point-visible-horizontally)))
 
+;;;###autoload
+(defun clutch-result-column-info ()
+  "Show type information for the column at point.
+When details are not yet cached, attempts to load them from the database."
+  (interactive)
+  (let* ((cidx (or (get-text-property (point) 'clutch-col-idx)
+                   (get-text-property (point) 'clutch-header-col))))
+    (unless cidx
+      (user-error "No column at point"))
+    ;; Try to populate details on demand if missing.
+    (unless clutch--result-column-details
+      (when-let* ((sql (or clutch--last-query))
+                  (cols clutch--result-columns))
+        (setq-local clutch--result-column-details
+                    (clutch--resolve-result-column-details
+                     clutch-connection sql cols))))
+    (if-let* ((info (clutch--column-info-string cidx)))
+        (message "%s" (replace-regexp-in-string "\n" " | " info))
+      (message "%s (no detail info)" (nth cidx clutch--result-columns)))))
+
+;;;###autoload
 (defun clutch-result-goto-column ()
   "Jump to a specific column in the current row."
   (interactive)
@@ -3693,6 +3746,7 @@ When point is at line-end or a border, scan backward to find the row."
     (when idx
       (clutch-result--goto-col-idx idx))))
 
+;;;###autoload
 (defun clutch-result-export ()
   "Export the current result.
 Prompts for format:
@@ -3917,6 +3971,7 @@ When STMTS is nil, build statements from the current pending state."
         (concat (mapconcat (lambda (s) (concat s ";")) stmts "\n") "\n")
       "")))
 
+;;;###autoload
 (defun clutch-result-copy-pending-sql ()
   "Copy the staged SQL batch to the kill ring."
   (interactive)
@@ -3925,6 +3980,7 @@ When STMTS is nil, build statements from the current pending state."
     (message "Copied %d pending SQL statement%s"
              (length stmts) (if (= (length stmts) 1) "" "s"))))
 
+;;;###autoload
 (defun clutch-result-save-pending-sql ()
   "Save the staged SQL batch to a file."
   (interactive)
@@ -3940,6 +3996,7 @@ When STMTS is nil, build statements from the current pending state."
 
 ;;;; Horizontal scrolling and width adjustment
 
+;;;###autoload
 (defun clutch-result-scroll-right ()
   "Page the result window right with one-column overlap.
 The last column whose border falls within the current viewport becomes
@@ -3965,6 +4022,7 @@ remain visible after paging."
        (first-past   (set-window-hscroll win first-past))
        (t (message "Already at rightmost columns"))))))
 
+;;;###autoload
 (defun clutch-result-scroll-left ()
   "Page the result window left with one-column overlap.
 The column at the current left edge remains visible near the right
@@ -3992,6 +4050,7 @@ after paging."
                   (setq target border)))))
           (set-window-hscroll win (max 0 (or target 0))))))))
 
+;;;###autoload
 (defun clutch-result-widen-column ()
   "Widen the column at point by `clutch-column-width-step'."
   (interactive)
@@ -4002,6 +4061,7 @@ after paging."
         (clutch--refresh-display))
     (user-error "No column at point")))
 
+;;;###autoload
 (defun clutch-result-narrow-column ()
   "Narrow the column at point by `clutch-column-width-step'."
   (interactive)
@@ -4017,6 +4077,7 @@ after paging."
 (defvar-local clutch--pre-fullscreen-config nil
   "Window configuration saved before entering fullscreen.")
 
+;;;###autoload
 (defun clutch-result-fullscreen-toggle ()
   "Toggle fullscreen display for the result buffer.
 Expands the result buffer to fill the frame, or restores the
@@ -4058,6 +4119,7 @@ previous window layout."
   \\[clutch-record-refresh]	Refresh"
   (setq truncate-lines nil))
 
+;;;###autoload
 (defun clutch-result-open-record ()
   "Open the Record buffer showing the row at point.
 Reuses a single *clutch-record* buffer, updating it in place."
@@ -4151,6 +4213,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
                (clutch--value-to-literal val))
        clutch-connection))))
 
+;;;###autoload
 (defun clutch-record-toggle-expand ()
   "Toggle expand/collapse for long fields, or follow FK."
   (interactive)
@@ -4175,6 +4238,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
           (message "%s" (clutch--format-value val)))))
     (user-error "No field at point")))
 
+;;;###autoload
 (defun clutch-record-next-row ()
   "Show the next row in the Record buffer."
   (interactive)
@@ -4186,6 +4250,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
       (setq clutch-record--expanded-fields nil)
       (clutch-record--render))))
 
+;;;###autoload
 (defun clutch-record-prev-row ()
   "Show the previous row in the Record buffer."
   (interactive)
@@ -4195,6 +4260,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
     (setq clutch-record--expanded-fields nil)
     (clutch-record--render)))
 
+;;;###autoload
 (defun clutch-record-view-value ()
   "Display the field value at point in an appropriate pop-up buffer.
 Selects JSON, XML, or binary string view based on column type and content."
@@ -4209,6 +4275,7 @@ Selects JSON, XML, or binary string view based on column type and content."
                       (nth cidx clutch--result-column-defs)))))
     (clutch--dispatch-view val col-def)))
 
+;;;###autoload
 (defun clutch-record-refresh ()
   "Refresh the Record buffer."
   (interactive)
@@ -4360,9 +4427,10 @@ Accumulates input until a semicolon is found, then executes."
     ("R" "REPL"              clutch-repl)]
    ["Execute"
     ("x" "Query at point" clutch-execute-query-at-point)
+    ("X" "Statement (;-only)" clutch-execute-statement-at-point)
     ("r" "Region"         clutch-execute-region)
     ("b" "Buffer"         clutch-execute-buffer)
-   ("p" "Preview execution" clutch-preview-execution-sql)]
+    ("p" "Preview execution" clutch-preview-execution-sql)]
    ["Edit"
     ("'" "Indirect edit"  clutch-edit-indirect)]
    ["Objects"
@@ -4380,7 +4448,8 @@ Accumulates input until a semicolon is found, then executes."
     ("n" "Down row"          clutch-result-down-cell)
     ("p" "Up row"            clutch-result-up-cell)
     ("RET" "Open record"     clutch-result-open-record)
-    ("C" "Go to column"      clutch-result-goto-column)]
+    ("C" "Go to column"      clutch-result-goto-column)
+    ("?" "Column info"       clutch-result-column-info)]
    ["Query"
     ("g" "Re-execute"        clutch-result-rerun)
     ("x" "Preview execution" clutch-preview-execution-sql)

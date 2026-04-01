@@ -1,4 +1,4 @@
-;;; clutch-db-pg.el --- PostgreSQL backend for clutch-db -*- lexical-binding: t; -*-
+;;; clutch-db-pg.el --- Native backend over the PostgreSQL client -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 

@@ -1,4 +1,4 @@
-;;; mysql.el --- Pure Elisp MySQL client -*- lexical-binding: t; -*-
+;;; mysql.el --- Pure Elisp classic wire client -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 

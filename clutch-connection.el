@@ -1,4 +1,4 @@
-;;; clutch-connection.el --- Connection lifecycle for clutch -*- lexical-binding: t; -*-
+;;; clutch-connection.el --- Connection lifecycle and transaction commands -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
@@ -905,6 +905,7 @@ Does nothing in indirect SQL buffers (`clutch-indirect-mode')."
 
 ;;;; Transaction commands
 
+;;;###autoload
 (defun clutch-commit ()
   "Commit the current transaction."
   (interactive)
@@ -916,6 +917,7 @@ Does nothing in indirect SQL buffers (`clutch-indirect-mode')."
   (clutch--clear-tx-dirty clutch-connection)
   (message "Transaction committed"))
 
+;;;###autoload
 (defun clutch-rollback ()
   "Roll back the current transaction."
   (interactive)
@@ -927,6 +929,7 @@ Does nothing in indirect SQL buffers (`clutch-indirect-mode')."
   (clutch--clear-tx-dirty clutch-connection)
   (message "Transaction rolled back"))
 
+;;;###autoload
 (defun clutch-toggle-auto-commit ()
   "Toggle auto-commit mode for the current connection.
 When switching from manual-commit to auto-commit, the database commits

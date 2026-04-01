@@ -1,4 +1,4 @@
-;;; pg.el --- Pure Elisp PostgreSQL client -*- lexical-binding: t; -*-
+;;; pg.el --- Pure Elisp PostgreSQL protocol client -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 

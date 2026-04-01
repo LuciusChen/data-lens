@@ -1,4 +1,4 @@
-;;; clutch-db.el --- Generic database interface for clutch -*- lexical-binding: t; -*-
+;;; clutch-db.el --- Database backend protocol facade -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 

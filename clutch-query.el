@@ -1,4 +1,4 @@
-;;; clutch-query.el --- Query execution and result display for clutch -*- lexical-binding: t; -*-
+;;; clutch-query.el --- SQL execution and result workflow -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
@@ -212,6 +212,7 @@ window rather than replacing the current window."
         (clutch--activate-current-buffer-connection conn params product)
         (clutch--update-console-buffer-name)))))
 
+;;;###autoload
 (defun clutch-switch-console ()
   "Switch to an open clutch query console using `completing-read'."
   (interactive)
@@ -1152,6 +1153,7 @@ Prefers an exact error position; otherwise highlights the whole statement."
           (setq buffer-read-only t))))
     (pop-to-buffer buf)))
 
+;;;###autoload
 (defun clutch-preview-execution-sql ()
   "Preview the execution payload for the current workflow."
   (interactive)
@@ -1183,6 +1185,7 @@ Prefers an exact error position; otherwise highlights the whole statement."
 
 ;;;; Interactive commands
 
+;;;###autoload
 (defun clutch-execute-query-at-point ()
   "Execute the SQL query at point."
   (interactive)
@@ -1190,6 +1193,59 @@ Prefers an exact error position; otherwise highlights the whole statement."
                (sql (string-trim (buffer-substring-no-properties beg end))))
     (when (string-empty-p sql)
       (user-error "No query at point"))
+    (clutch--ensure-connection)
+    (clutch--execute-and-mark sql beg end)))
+
+(defun clutch--statement-bounds-at-point ()
+  "Return the SQL statement bounds using only semicolons as delimiters.
+Unlike `clutch--query-bounds-at-point', blank lines are ignored so that
+long statements spanning multiple paragraphs are captured whole.
+Semicolons inside strings, line comments, and block comments are skipped."
+  (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+         (pos (1- (point)))              ; 0-based index into TEXT
+         (len (length text))
+         (breaks nil)                    ; list of semicolon positions
+         (in-string nil)
+         (i 0))
+    ;; Collect all top-level semicolon positions using the same parser
+    ;; as `clutch--split-statements'.
+    (while (< i len)
+      (let ((ch (aref text i)))
+        (cond
+         (in-string
+          (when (= ch in-string) (setq in-string nil)))
+         ((= ch ?')  (setq in-string ?'))
+         ((= ch ?\") (setq in-string ?\"))
+         ((and (= ch ?-) (< (1+ i) len) (= (aref text (1+ i)) ?-))
+          (while (and (< i len) (/= (aref text i) ?\n)) (cl-incf i)))
+         ((and (= ch ?/) (< (1+ i) len) (= (aref text (1+ i)) ?*))
+          (cl-incf i 2)
+          (while (and (< (1+ i) len)
+                      (not (and (= (aref text i) ?*) (= (aref text (1+ i)) ?/))))
+            (cl-incf i))
+          (cl-incf i))
+         ((= ch ?\;) (push i breaks))))
+      (cl-incf i))
+    (setq breaks (nreverse breaks))
+    ;; Find the enclosing semicolons around point.
+    (let ((beg (point-min))
+          (end (point-max)))
+      (dolist (b breaks)
+        (if (<= b pos)
+            (setq beg (+ (point-min) b 1))
+          (when (= end (point-max))
+            (setq end (+ (point-min) b)))))
+      (cons beg end))))
+
+;;;###autoload
+(defun clutch-execute-statement-at-point ()
+  "Execute the SQL statement at point, delimited only by semicolons.
+Blank lines inside the statement are preserved."
+  (interactive)
+  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds-at-point))
+               (sql (string-trim (buffer-substring-no-properties beg end))))
+    (when (string-empty-p sql)
+      (user-error "No statement at point"))
     (clutch--ensure-connection)
     (clutch--execute-and-mark sql beg end)))
 
@@ -1262,6 +1318,7 @@ result buffer.  Stops and reports on the first error."
           (clutch-db-error
            (signal-statement-error err last)))))))
 
+;;;###autoload
 (defun clutch-execute-dwim (beg end)
   "Execute the region from BEG to END if active, otherwise execute query at point.
 When the region contains multiple semicolon-separated statements,
@@ -1283,6 +1340,7 @@ they are executed sequentially."
         (user-error "No query at point"))
       (clutch--execute-and-mark sql qb qe))))
 
+;;;###autoload
 (defun clutch-execute-region (beg end)
   "Execute SQL in the region from BEG to END."
   (interactive "r")
@@ -1291,6 +1349,7 @@ they are executed sequentially."
    (string-trim (buffer-substring-no-properties beg end))
    beg end))
 
+;;;###autoload
 (defun clutch-execute-buffer ()
   "Execute the entire buffer as a SQL query."
   (interactive)
@@ -1307,6 +1366,7 @@ Returns the connection or nil."
            when (clutch--connection-alive-p conn)
            return conn))
 
+;;;###autoload
 (defun clutch-execute (sql)
   "Execute SQL from any buffer.
 With an active region, execute the region.  Otherwise execute the
@@ -1348,6 +1408,7 @@ Go, Ruby, etc.)."
     map)
   "Keymap for `clutch-indirect-mode'.")
 
+;;;###autoload
 (define-minor-mode clutch-indirect-mode
   "Minor mode active in indirect SQL edit buffers.
 \\<clutch-indirect-mode-map>
@@ -1356,6 +1417,7 @@ Key bindings:
   \\[clutch-indirect-abort]	Abort and close"
   :lighter " Indirect")
 
+;;;###autoload
 (defun clutch-indirect-execute ()
   "Execute the SQL in the indirect buffer, then close it."
   (interactive)
@@ -1375,6 +1437,7 @@ Key bindings:
     (with-current-buffer (window-buffer (selected-window))
       (clutch--execute sql conn))))
 
+;;;###autoload
 (defun clutch-indirect-abort ()
   "Abort the indirect edit buffer."
   (interactive)
@@ -1393,6 +1456,7 @@ or the current line otherwise."
      (buffer-substring-no-properties
       (line-beginning-position) (line-end-position))))))
 
+;;;###autoload
 (defun clutch-edit-indirect ()
   "Open an indirect `clutch-mode' buffer with SQL extracted from context.
 With an active region, use the region.  When point is inside a

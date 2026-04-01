@@ -1,4 +1,4 @@
-;;; clutch-edit.el --- Result editing workflow for clutch -*- lexical-binding: t; -*-
+;;; clutch-edit.el --- Staged result edit and insert workflow -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -121,6 +121,7 @@ Scans text properties across the line."
     map)
   "Keymap for the cell edit buffer.")
 
+;;;###autoload
 (define-minor-mode clutch-result-edit-mode
   "Minor mode for editing a database cell value.
 \\<clutch-result-edit-mode-map>
@@ -303,6 +304,7 @@ All field types use the same delay so feedback timing is consistent."
   "Schedule local validation after any edit-buffer change."
   (clutch-result-edit--schedule-validation))
 
+;;;###autoload
 (defun clutch-result-edit-complete-field ()
   "Complete the current edit buffer when the column has candidates."
   (interactive)
@@ -317,6 +319,7 @@ All field types use the same delay so feedback timing is consistent."
         (erase-buffer)
         (insert choice)))))
 
+;;;###autoload
 (defun clutch-result-edit-set-current-time ()
   "Replace the current edit buffer contents with a current time value."
   (interactive)
@@ -328,6 +331,7 @@ All field types use the same delay so feedback timing is consistent."
     (insert value)
     (goto-char (point-max))))
 
+;;;###autoload
 (defun clutch-result-edit-json-field ()
   "Open a dedicated JSON editor for the current edit buffer."
   (interactive)
@@ -370,6 +374,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
         (funcall restorer)))
     (pop-to-buffer parent)))
 
+;;;###autoload
 (defun clutch-result-edit-json-finish ()
   "Save the JSON sub-editor contents back to the parent edit buffer."
   (interactive)
@@ -385,6 +390,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
        (goto-char (point-min)))
      (format "Updated JSON for %s" field-name))))
 
+;;;###autoload
 (defun clutch-result-edit-json-cancel ()
   "Cancel JSON sub-editing and return to the parent edit buffer."
   (interactive)
@@ -401,6 +407,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
           (fields (nth iidx clutch--pending-inserts)))
       (clutch-result-insert--open-buffer table (current-buffer) fields iidx))))
 
+;;;###autoload
 (defun clutch-result-edit-cell ()
   "Edit or re-edit the value at point in a dedicated buffer."
   (interactive)
@@ -439,6 +446,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
               (clutch-result-edit-json-field))
           (pop-to-buffer edit-buf))))))
 
+;;;###autoload
 (defun clutch-result-edit-finish ()
   "Stage the edit and return to the result buffer.
 Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to commit all staged edits."
@@ -457,6 +465,7 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
     (when cb
       (funcall cb new-value))))
 
+;;;###autoload
 (defun clutch-result-edit-cancel ()
   "Cancel the edit and return to the result buffer."
   (interactive)
@@ -643,6 +652,7 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
                         (mapconcat #'identity where-parts " AND "))))
             clutch--pending-deletes)))
 
+;;;###autoload
 (defun clutch-result-commit ()
   "Commit all pending changes: INSERT new rows, UPDATE edits, DELETE staged rows.
 Executes in order: INSERTs first, then UPDATEs, then DELETEs."
@@ -691,6 +701,7 @@ PK-INDICES are primary key column indices."
             (clutch-db-escape-identifier conn table)
             (mapconcat #'identity where-parts " AND "))))
 
+;;;###autoload
 (defun clutch-result-delete-rows ()
   "Stage selected rows for deletion.
 Use \\[clutch-result-commit] in the result buffer to commit."
@@ -745,6 +756,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     map)
   "Keymap for the `insert-buffer' JSON editor.")
 
+;;;###autoload
 (define-minor-mode clutch-result-insert-json-mode
   "Minor mode for editing JSON values from the insert buffer."
   :lighter " DB-Insert-JSON"
@@ -761,6 +773,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   (add-hook 'kill-buffer-hook #'clutch-result-insert--cleanup nil t)
   (clutch-result-insert--ensure-field-state))
 
+;;;###autoload
 (defun clutch-result-insert-mode (&optional _arg)
   "Activate `clutch-result-insert-major-mode', ignoring optional ARG."
   (interactive)
@@ -1247,6 +1260,7 @@ TIME defaults to `current-time'."
         (overlay-put clutch-result-insert--active-prefix-overlay 'evaporate t))
       (move-overlay clutch-result-insert--active-prefix-overlay line-start prefix-end))))
 
+;;;###autoload
 (defun clutch-result-insert-next-field ()
   "Move point to the next insert field value."
   (interactive)
@@ -1256,6 +1270,7 @@ TIME defaults to `current-time'."
         (clutch-result-insert--normalize-point))
     (user-error "No next insert field")))
 
+;;;###autoload
 (defun clutch-result-insert-prev-field ()
   "Move point to the previous insert field value."
   (interactive)
@@ -1265,11 +1280,13 @@ TIME defaults to `current-time'."
         (clutch-result-insert--normalize-point))
     (user-error "No previous insert field")))
 
+;;;###autoload
 (defun clutch-result-insert-submit-field ()
   "Accept the current field value and move to the next field."
   (interactive)
   (clutch-result-insert-next-field))
 
+;;;###autoload
 (defun clutch-result-insert-complete-field ()
   "Complete the current insert field.
 First try standard `completion-at-point' so Corfu/Company can integrate.
@@ -1290,6 +1307,7 @@ If nothing handles the completion, fall back to `completing-read'."
         (goto-char (car bounds))
         (insert choice)))))
 
+;;;###autoload
 (defun clutch-result-insert-fill-current-time ()
   "Replace the current insert field with a current date/time value."
   (interactive)
@@ -1307,6 +1325,7 @@ If nothing handles the completion, fall back to `completing-read'."
       (goto-char beg)
       (insert value))))
 
+;;;###autoload
 (defun clutch-result-insert-edit-json-field ()
   "Open a dedicated editor for the JSON field at point."
   (interactive)
@@ -1330,6 +1349,7 @@ If nothing handles the completion, fall back to `completing-read'."
                     clutch-result-insert-json--field-name field-name))
       buf)))
 
+;;;###autoload
 (defun clutch-result-insert-json-finish ()
   "Save the JSON editor contents back to the parent insert buffer."
   (interactive)
@@ -1349,6 +1369,7 @@ If nothing handles the completion, fall back to `completing-read'."
            (clutch-result-insert--validate-field-live field)
            (clutch-result-insert--normalize-point)))))))
 
+;;;###autoload
 (defun clutch-result-insert-json-cancel ()
   "Cancel JSON field editing and return to the insert buffer."
   (interactive)
@@ -1405,6 +1426,7 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
       (clutch-result-insert--populate-buffer table col-names fields))
     (pop-to-buffer buf)))
 
+;;;###autoload
 (defun clutch-result-insert-row ()
   "Open an edit buffer to INSERT a new row into the current table."
   (interactive)
@@ -1536,6 +1558,7 @@ FIELDS is an alist of (column-name . value-string)."
     (format "INSERT INTO %s (%s) VALUES (%s)"
             (clutch-db-escape-identifier conn table) cols vals)))
 
+;;;###autoload
 (defun clutch-result-insert-commit ()
   "Stage the new row for insertion and return to the result buffer.
 Use \\[clutch-result-commit] in the result buffer to commit."
@@ -1562,6 +1585,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
                  (length clutch--pending-inserts)
                  (if (= (length clutch--pending-inserts) 1) "" "s"))))))
 
+;;;###autoload
 (defun clutch-result-insert-cancel ()
   "Cancel the INSERT and close the edit buffer."
   (interactive)

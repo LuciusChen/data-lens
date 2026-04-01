@@ -1,4 +1,4 @@
-;;; clutch-schema.el --- Schema and metadata cache state for clutch -*- lexical-binding: t; -*-
+;;; clutch-schema.el --- Schema refresh and metadata caches -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 

@@ -1,4 +1,4 @@
-;;; ob-postgresql.el --- Org-Babel postgresql entry via ob-clutch -*- lexical-binding: t; -*-
+;;; ob-postgresql.el --- Org-Babel PostgreSQL compatibility shim -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 

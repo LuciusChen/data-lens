@@ -160,6 +160,7 @@ SQL query editing and execution mode. The primary entry point for interacting wi
 |-----|---------|-------------|
 | `C-c C-e` | `clutch-connect` | Connect; query consoles reconnect their own saved connection |
 | `C-c C-x` | `clutch-execute` | Execute SQL at point or region |
+| `C-c ;` | `clutch-execute-statement-at-point` | Execute statement (`;`-only delimiter; blank lines preserved) |
 | `C-c C-s` | `clutch-refresh-schema` | Refresh schema cache |
 | `C-c ?` | Transient dispatch | Main command menu |
 | `TAB` | Completion at point | Table/column name CAPF |
@@ -212,6 +213,7 @@ Interactive result browsing with column paging, sorting, filtering, mutations.
 | `]` / `[` | `clutch-result-scroll-right` / `clutch-result-scroll-left` | Page right / left (snap to column border) |
 | `=` / `-` | `clutch-result-widen-column` / `clutch-result-narrow-column` | Adjust column width |
 | `C` | `clutch-result-goto-column` | Jump to a column by name |
+| `?` | `clutch-result-column-info` | Show column type info at point |
 | `s` / `S` | `clutch-result-sort-by-column` / `clutch-result-sort-by-column-desc` | Sort by current column |
 | `W` | `clutch-result-apply-filter` | Apply SQL WHERE filter (column completion with auto-equal) |
 | `/` | `clutch-result-filter` | Client-side fuzzy filter |
@@ -316,6 +318,7 @@ Line-by-line SQL evaluation with history and inline results.
 | Command | Description |
 |---------|-------------|
 | `clutch-execute` | Execute SQL at point or selected region |
+| `clutch-execute-statement-at-point` | Execute statement using `;` as only delimiter (blank lines preserved) |
 | `clutch--refresh-current-schema` | Refresh schema (sync for native; async for JDBC) |
 
 ### Result Buffer
@@ -340,6 +343,7 @@ Line-by-line SQL evaluation with history and inline results.
 | `clutch-result-page-up` | Previous row page |
 | `clutch-result-scroll-right` | Page right, snapping to the next column border |
 | `clutch-result-scroll-left` | Page left, snapping to the previous column border |
+| `clutch-result-column-info` | Show column type/nullable/default info at point |
 
 ### Export
 

@@ -1,4 +1,4 @@
-;;; ob-clutch.el --- Org-Babel support via clutch-db -*- lexical-binding: t; -*-
+;;; ob-clutch.el --- Org-Babel backend bridge -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 

@@ -1,4 +1,4 @@
-;;; ob-sqlite.el --- Org-Babel sqlite entry via ob-clutch -*- lexical-binding: t; -*-
+;;; ob-sqlite.el --- Org-Babel SQLite compatibility shim -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
