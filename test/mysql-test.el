@@ -438,6 +438,108 @@
                   (kill-buffer buf)))
               buffers)))))
 
+(ert-deftest mysql-test-connect-ssl-mode-disabled-disables-auto-tls-retry ()
+  "ssl-mode disabled should keep MySQL 8 auth on plaintext and fail explicitly."
+  (let ((auth-tls-flags nil)
+        (buffers nil))
+    (cl-letf (((symbol-function 'mysql--tls-available-p) (lambda () t))
+              ((symbol-function 'mysql--open-connection)
+               (lambda (_host _port _timeout)
+                 (let ((buf (generate-new-buffer " *mysql-test-ssl-off*")))
+                   (push buf buffers)
+                   (cons (gensym "proc") buf))))
+              ((symbol-function 'mysql--authenticate)
+               (lambda (_conn _password tls)
+                 (push tls auth-tls-flags)
+                 (signal 'mysql-auth-error
+                         '("caching_sha2_password full authentication requires TLS"))))
+              ((symbol-function 'process-live-p) (lambda (_proc) t))
+              ((symbol-function 'delete-process) (lambda (_proc) nil)))
+      (unwind-protect
+          (should-error
+           (mysql-connect :host "127.0.0.1" :port 3306
+                          :user "root" :password "pw"
+                          :database "mysql" :ssl-mode 'disabled)
+           :type 'mysql-auth-error)
+        (should (equal auth-tls-flags '(nil)))
+        (mapc (lambda (buf)
+                (when (buffer-live-p buf)
+                  (kill-buffer buf)))
+              buffers)))))
+
+(ert-deftest mysql-test-connect-ssl-mode-off-alias-disables-auto-tls-retry ()
+  "ssl-mode off should remain accepted as an alias for disabled."
+  (let ((auth-tls-flags nil)
+        (buffers nil))
+    (cl-letf (((symbol-function 'mysql--tls-available-p) (lambda () t))
+              ((symbol-function 'mysql--open-connection)
+               (lambda (_host _port _timeout)
+                 (let ((buf (generate-new-buffer " *mysql-test-ssl-off*")))
+                   (push buf buffers)
+                   (cons (gensym "proc") buf))))
+              ((symbol-function 'mysql--authenticate)
+               (lambda (_conn _password tls)
+                 (push tls auth-tls-flags)
+                 (signal 'mysql-auth-error
+                         '("caching_sha2_password full authentication requires TLS"))))
+              ((symbol-function 'process-live-p) (lambda (_proc) t))
+              ((symbol-function 'delete-process) (lambda (_proc) nil)))
+      (unwind-protect
+          (should-error
+           (mysql-connect :host "127.0.0.1" :port 3306
+                          :user "root" :password "pw"
+                          :database "mysql" :ssl-mode 'off)
+           :type 'mysql-auth-error)
+        (should (equal auth-tls-flags '(nil)))
+        (mapc (lambda (buf)
+                (when (buffer-live-p buf)
+                  (kill-buffer buf)))
+              buffers)))))
+
+(ert-deftest mysql-test-connect-explicit-tls-nil-disables-auto-tls-retry ()
+  "Explicit :tls nil should force plaintext and fail without auto-retry."
+  (let ((auth-tls-flags nil)
+        (buffers nil))
+    (cl-letf (((symbol-function 'mysql--tls-available-p) (lambda () t))
+              ((symbol-function 'mysql--open-connection)
+               (lambda (_host _port _timeout)
+                 (let ((buf (generate-new-buffer " *mysql-test-tls-nil*")))
+                   (push buf buffers)
+                   (cons (gensym "proc") buf))))
+              ((symbol-function 'mysql--authenticate)
+               (lambda (_conn _password tls)
+                 (push tls auth-tls-flags)
+                 (signal 'mysql-auth-error
+                         '("caching_sha2_password full authentication requires TLS"))))
+              ((symbol-function 'process-live-p) (lambda (_proc) t))
+              ((symbol-function 'delete-process) (lambda (_proc) nil)))
+      (unwind-protect
+          (should-error
+           (mysql-connect :host "127.0.0.1" :port 3306
+                          :user "root" :password "pw"
+                          :database "mysql" :tls nil)
+           :type 'mysql-auth-error)
+        (should (equal auth-tls-flags '(nil)))
+        (mapc (lambda (buf)
+                (when (buffer-live-p buf)
+                  (kill-buffer buf)))
+              buffers)))))
+
+(ert-deftest mysql-test-connect-rejects-conflicting-tls-and-ssl-mode ()
+  "Explicit TLS should conflict with ssl-mode disabled."
+  (should-error (mysql-connect :host "127.0.0.1" :port 3306
+                               :user "root" :password "pw"
+                               :database "mysql"
+                               :tls t :ssl-mode 'disabled)
+                :type 'mysql-connection-error))
+
+(ert-deftest mysql-test-connect-rejects-unknown-ssl-mode ()
+  "Unknown ssl-mode values should fail early."
+  (should-error (mysql-connect :host "127.0.0.1" :port 3306
+                               :user "root" :password "pw"
+                               :database "mysql" :ssl-mode 'required)
+                :type 'mysql-connection-error))
+
 ;;;; Live integration tests (require a running MySQL server)
 
 (defmacro mysql-test--with-conn (var &rest body)

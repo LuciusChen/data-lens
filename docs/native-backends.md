@@ -42,7 +42,11 @@ usage notes for the native backends.  The JDBC sidecar has its own document in
 ### TLS
 
 When `:tls t` is used, certificate and hostname verification are enabled by
-default.
+default.  For MySQL, explicit `:tls nil` is a strict plaintext opt-out.
+
+For MySQL only, `:ssl-mode disabled` is a compatibility spelling for that same
+plaintext mode.  The older alias `off` is still accepted.  Either spelling
+disables the automatic MySQL 8 TLS reconnect path.
 
 Relevant variables:
 

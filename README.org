@@ -142,7 +142,10 @@ For networked backends, you can set =:connect-timeout= and
 =:read-idle-timeout= (seconds) per connection entry.  JDBC connections also
 accept =:query-timeout= and =:rpc-timeout=.
 TLS can be enabled per entry with =:tls t=; see backend TLS sections above for
-verification defaults and CA trustfile configuration.
+verification defaults and CA trustfile configuration.  For MySQL, =:tls nil=
+forces plaintext and suppresses the automatic MySQL 8 TLS retry path.
+MySQL connections also accept =:ssl-mode disabled= as a compatibility spelling;
+=off= remains accepted as an alias.
 
 JDBC backends use a driver symbol as =:backend= instead of =mysql=/=pg=.  See
 [[#jdbc-backend-clutch-db-jdbcel][JDBC Backend (clutch-db-jdbc.el)]] for the full list of supported databases and setup.
@@ -1035,6 +1038,9 @@ For local MySQL 8 containers, this =mysql.el= client may need TLS for
 =caching_sha2_password= authentication.  Container certificates are usually
 self-signed, so either bind =mysql-tls-verify-server= to =nil= for local live
 tests as above, or install the container CA in =mysql-tls-trustfiles=.
+For MySQL, explicit =:tls nil= or =:ssl-mode disabled= is a strict opt-out from
+TLS and auto-retry; use it only when the server actually permits non-TLS
+authentication.  =off= remains accepted as a compatibility alias.
 
 The same caveat applies to clutch's backend live tests in
 =test/clutch-db-test.el= when they target a local MySQL 8 container.

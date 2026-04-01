@@ -221,12 +221,17 @@ Each entry has the form:
   (NAME . (:host H :port P :user U [:password P] :database D
            [:backend SYM] [:sql-product SYM] [:pass-entry STR]
            [:url STR] [:display-name STR] [:props ALIST]
+           [:tls BOOLEAN] [:ssl-mode disabled]
            [:connect-timeout N] [:read-idle-timeout N]
            [:query-timeout N] [:rpc-timeout N]))
 NAME is a string used for `completing-read'.
 :backend is a symbol (\\='mysql, \\='pg, \\='sqlite, or \\='jdbc;
 default \\='mysql).
 :sql-product overrides `clutch-sql-product' for this connection.
+:tls enables TLS when non-nil.  For MySQL, an explicit `:tls nil' forces
+plaintext and suppresses the automatic MySQL 8 TLS retry path.
+:ssl-mode is currently MySQL-only; `disabled' is a compatibility spelling for
+the same explicit plaintext mode.  The older alias `off' is also accepted.
 
 Password resolution order:
   1. :password — used as-is when present.
@@ -249,6 +254,8 @@ Password resolution order:
                                     (:url string)
                                     (:display-name string)
                                     (:props (alist :key-type string :value-type string))
+                                    (:ssl-mode (choice (const :tag "Disabled" disabled)
+                                                       (const :tag "Off (alias)" off)))
                                     (:connect-timeout natnum)
                                     (:read-idle-timeout natnum)
                                     (:query-timeout natnum)

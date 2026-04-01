@@ -96,7 +96,8 @@ Each output plist has :name and :type-category."
 (defun clutch-db-mysql-connect (params)
   "Connect to MySQL using PARAMS plist.
 PARAMS keys: :host, :port, :user, :password, :database, :tls,
-:connect-timeout, :read-idle-timeout."
+:ssl-mode, :connect-timeout, :read-idle-timeout.
+For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
   (condition-case err
       (apply #'mysql-connect
              (cl-loop for (k v) on params by #'cddr

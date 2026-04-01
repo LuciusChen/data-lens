@@ -94,6 +94,20 @@
   :type 'boolean
   :group 'mysql)
 
+(defun mysql--normalize-ssl-mode (ssl-mode)
+  "Return the canonical TLS-disabling SSL-MODE, or nil when absent.
+MySQL's official spelling is `disabled'.  The compatibility alias `off' is
+also accepted."
+  (cond
+   ((null ssl-mode) nil)
+   ((memq ssl-mode '(disabled off)) 'disabled)
+   ((and (stringp ssl-mode)
+         (member (downcase ssl-mode) '("disabled" "off")))
+    'disabled)
+   (t
+    (signal 'mysql-connection-error
+            (list (format "Unsupported ssl-mode %S (supported: disabled)" ssl-mode))))))
+
 ;;;; Column type constants
 
 (defconst mysql-type-decimal     0)
@@ -730,11 +744,24 @@ Returns the converted Elisp value, or nil for SQL NULL."
      (equal message "caching_sha2_password full authentication requires TLS"))
     (_ nil)))
 
-(defun mysql--retry-auth-with-tls-p (err tls)
+(defun mysql--requested-tls-mode (tls tls-specified-p ssl-mode)
+  "Return the requested TLS mode for TLS, TLS-SPECIFIED-P, and SSL-MODE.
+The return value is one of the symbols `default', `required', or `disabled'."
+  (let ((normalized-ssl-mode (mysql--normalize-ssl-mode ssl-mode)))
+    (when (and normalized-ssl-mode tls-specified-p tls)
+      (signal 'mysql-connection-error
+              (list "Conflicting MySQL TLS options: :tls t cannot be combined with :ssl-mode disabled")))
+    (cond
+     (normalized-ssl-mode 'disabled)
+     ((and tls-specified-p (null tls)) 'disabled)
+     (tls 'required)
+     (t 'default))))
+
+(defun mysql--retry-auth-with-tls-p (err tls-mode)
   "Return non-nil when ERR should trigger a TLS reconnect retry.
-ERR is the condition data raised during authentication and TLS reflects the
-original connection attempt."
-  (and (not tls)
+ERR is the condition data raised during authentication and TLS-MODE is the
+original connection mode."
+  (and (eq tls-mode 'default)
        (mysql--tls-available-p)
        (mysql--caching-sha2-full-auth-requires-tls-p err)))
 
@@ -806,41 +833,48 @@ Returns (PROCESS . BUFFER)."
       (cons proc buf))))
 
 (cl-defun mysql-connect (&key (host "127.0.0.1") (port 3306) user password
-                                database tls (read-idle-timeout 30)
-                                (connect-timeout 10))
+                                database (tls nil tls-specified-p) ssl-mode
+                                (read-idle-timeout 30) (connect-timeout 10))
   "Connect to a MySQL server and authenticate.
 Returns a `mysql-conn' struct on success.
 
 HOST defaults to \"127.0.0.1\", PORT defaults to 3306.
 USER, PASSWORD, and DATABASE are strings (DATABASE is optional).
 When TLS is non-nil, upgrade the connection to TLS before authenticating.
+When TLS is explicitly nil, keep the connection on plaintext and suppress the
+automatic MySQL 8 TLS retry path.  When SSL-MODE is `disabled', also force
+plaintext; the compatibility alias `off' is accepted.  Combining `:tls t`
+with `:ssl-mode disabled' signals an error.
 READ-IDLE-TIMEOUT limits query I/O stalls.  CONNECT-TIMEOUT limits the initial
 TCP connection wait."
   (unless user
     (signal 'mysql-connection-error (list "No user specified")))
-  (when (and tls (not (mysql--tls-available-p)))
+  (let* ((tls-mode (mysql--requested-tls-mode tls tls-specified-p ssl-mode))
+         (tls (eq tls-mode 'required))
+         (ssl-mode (mysql--normalize-ssl-mode ssl-mode)))
+    (when (and tls (not (mysql--tls-available-p)))
     (signal 'mysql-connection-error (list "TLS requested but GnuTLS is not available")))
-  (pcase-let ((`(,proc . ,buf) (mysql--open-connection host port connect-timeout)))
-    (let ((conn (make-mysql-conn :process proc :buf buf
-                                 :host host :port port
-                                 :user user :database database
-                                 :read-idle-timeout read-idle-timeout)))
-      (condition-case err
-          (progn
-            (mysql--authenticate conn password tls)
-            conn)
-        (mysql-auth-error
-         (mysql--cleanup-connection-resources proc buf)
-         (if (mysql--retry-auth-with-tls-p err tls)
-             (mysql-connect :host host :port port
-                            :user user :password password
-                            :database database :tls t
-                            :read-idle-timeout read-idle-timeout
-                            :connect-timeout connect-timeout)
-           (signal (car err) (cdr err))))
-        (error
-         (mysql--cleanup-connection-resources proc buf)
-         (signal (car err) (cdr err)))))))
+    (pcase-let ((`(,proc . ,buf) (mysql--open-connection host port connect-timeout)))
+      (let ((conn (make-mysql-conn :process proc :buf buf
+                                   :host host :port port
+                                   :user user :database database
+                                   :read-idle-timeout read-idle-timeout)))
+        (condition-case err
+            (progn
+              (mysql--authenticate conn password tls)
+              conn)
+          (mysql-auth-error
+           (mysql--cleanup-connection-resources proc buf)
+           (if (mysql--retry-auth-with-tls-p err tls-mode)
+               (mysql-connect :host host :port port
+                              :user user :password password
+                              :database database :tls t :ssl-mode ssl-mode
+                              :read-idle-timeout read-idle-timeout
+                              :connect-timeout connect-timeout)
+             (signal (car err) (cdr err))))
+          (error
+           (mysql--cleanup-connection-resources proc buf)
+           (signal (car err) (cdr err))))))))
 
 (defun mysql--handle-auth-switch (conn password packet)
   "Handle an AUTH_SWITCH_REQUEST in PACKET for CONN.
