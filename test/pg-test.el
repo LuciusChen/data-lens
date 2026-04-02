@@ -459,6 +459,108 @@
               (should-not (plist-member captured-args :type)))
           (kill-buffer buf))))))
 
+(ert-deftest pg-test-connect-sslmode-require-negotiates-tls ()
+  "sslmode require should force a TLS negotiation."
+  (let ((negotiated nil)
+        (buffers nil))
+    (cl-letf (((symbol-function 'pg--tls-available-p) (lambda () t))
+              ((symbol-function 'pg--open-connection)
+               (lambda (_host _port _timeout)
+                 (let ((buf (generate-new-buffer " *pg-test-require*")))
+                   (push buf buffers)
+                   (cons (make-symbol "pg-test-proc") buf))))
+              ((symbol-function 'pg--negotiate-tls)
+               (lambda (conn)
+                 (setq negotiated t)
+                 (setf (pg-conn-tls conn) t)))
+              ((symbol-function 'pg--send-startup-message) #'ignore)
+              ((symbol-function 'pg--handle-authentication) #'ignore)
+              ((symbol-function 'pg--read-startup-messages) #'ignore))
+      (unwind-protect
+          (let ((conn (pg-connect :host "127.0.0.1" :port 5432
+                                  :user "postgres" :password "pw"
+                                  :database "postgres"
+                                  :sslmode 'require)))
+            (should negotiated)
+            (should (pg-conn-tls conn)))
+        (mapc (lambda (buf)
+                (when (buffer-live-p buf)
+                  (kill-buffer buf)))
+              buffers)))))
+
+(ert-deftest pg-test-connect-sslmode-prefer-falls-back-to-plaintext ()
+  "sslmode prefer should continue on plaintext when the server declines TLS."
+  (let ((upgraded nil)
+        (buffers nil))
+    (cl-letf (((symbol-function 'pg--tls-available-p) (lambda () t))
+              ((symbol-function 'pg--open-connection)
+               (lambda (_host _port _timeout)
+                 (let ((buf (generate-new-buffer " *pg-test-prefer*")))
+                   (push buf buffers)
+                   (cons (make-symbol "pg-test-proc") buf))))
+              ((symbol-function 'pg--send-ssl-request) (lambda (_conn) ?N))
+              ((symbol-function 'pg--upgrade-to-tls)
+               (lambda (_conn)
+                 (setq upgraded t)))
+              ((symbol-function 'pg--send-startup-message) #'ignore)
+              ((symbol-function 'pg--handle-authentication) #'ignore)
+              ((symbol-function 'pg--read-startup-messages) #'ignore))
+      (unwind-protect
+          (let ((conn (pg-connect :host "127.0.0.1" :port 5432
+                                  :user "postgres" :password "pw"
+                                  :database "postgres"
+                                  :sslmode "prefer")))
+            (should-not upgraded)
+            (should-not (pg-conn-tls conn)))
+        (mapc (lambda (buf)
+                (when (buffer-live-p buf)
+                  (kill-buffer buf)))
+              buffers)))))
+
+(ert-deftest pg-test-connect-explicit-tls-nil-skips-negotiation ()
+  "Explicit `:tls nil' should keep PostgreSQL on plaintext."
+  (let ((ssl-requested nil)
+        (buffers nil))
+    (cl-letf (((symbol-function 'pg--open-connection)
+               (lambda (_host _port _timeout)
+                 (let ((buf (generate-new-buffer " *pg-test-tls-nil*")))
+                   (push buf buffers)
+                   (cons (make-symbol "pg-test-proc") buf))))
+              ((symbol-function 'pg--send-ssl-request)
+               (lambda (_conn)
+                 (setq ssl-requested t)
+                 ?S))
+              ((symbol-function 'pg--send-startup-message) #'ignore)
+              ((symbol-function 'pg--handle-authentication) #'ignore)
+              ((symbol-function 'pg--read-startup-messages) #'ignore))
+      (unwind-protect
+          (let ((conn (pg-connect :host "127.0.0.1" :port 5432
+                                  :user "postgres" :password "pw"
+                                  :database "postgres"
+                                  :tls nil)))
+            (should-not ssl-requested)
+            (should-not (pg-conn-tls conn)))
+        (mapc (lambda (buf)
+                (when (buffer-live-p buf)
+                  (kill-buffer buf)))
+              buffers)))))
+
+(ert-deftest pg-test-connect-rejects-unsupported-sslmode ()
+  "Unsupported sslmode values should fail early."
+  (should-error (pg-connect :host "127.0.0.1" :port 5432
+                            :user "postgres" :password "pw"
+                            :database "postgres"
+                            :sslmode 'verify-ca)
+                :type 'pg-connection-error))
+
+(ert-deftest pg-test-connect-rejects-conflicting-tls-and-sslmode ()
+  "Conflicting TLS shorthands and sslmode should fail early."
+  (should-error (pg-connect :host "127.0.0.1" :port 5432
+                            :user "postgres" :password "pw"
+                            :database "postgres"
+                            :tls t :sslmode 'disable)
+                :type 'pg-connection-error))
+
 ;;;; Unit tests — SCRAM authentication helpers
 
 (ert-deftest pg-test-scram-client-first ()

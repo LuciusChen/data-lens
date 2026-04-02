@@ -103,9 +103,27 @@
 (defun clutch-db-pg-connect (params)
   "Connect to PostgreSQL using PARAMS plist.
 PARAMS keys: :host, :port, :user, :password, :database, :tls,
-:connect-timeout, :read-idle-timeout, :query-timeout."
+:sslmode, :schema, :connect-timeout, :read-idle-timeout, :query-timeout.
+`:tls' is a convenience shortcut; `:sslmode' is the canonical PostgreSQL name."
+  (setq params (clutch-db--normalize-connect-params 'pg params))
   (let ((schema (plist-get params :schema))
+        (tls-mode (plist-get params :clutch-tls-mode))
+        (sslmode (plist-get params :sslmode))
         conn)
+    (cl-remf params :clutch-tls-mode)
+    (pcase tls-mode
+      ('default
+       (cl-remf params :sslmode)
+       (cl-remf params :tls))
+      ('disable
+       (setq params (plist-put params :sslmode 'disable))
+       (cl-remf params :tls))
+      ('prefer
+       (setq params (plist-put params :sslmode 'prefer))
+       (cl-remf params :tls))
+      ('require
+       (setq params (plist-put params :sslmode (or sslmode 'require)))
+       (cl-remf params :tls)))
     (condition-case err
         (progn
           (setq conn

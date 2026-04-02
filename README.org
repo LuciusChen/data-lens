@@ -141,11 +141,12 @@ Use =":memory:"= for a transient in-memory database (data is lost when disconnec
 For networked backends, you can set =:connect-timeout= and
 =:read-idle-timeout= (seconds) per connection entry.  JDBC connections also
 accept =:query-timeout= and =:rpc-timeout=.
-TLS can be enabled per entry with =:tls t=; see backend TLS sections above for
-verification defaults and CA trustfile configuration.  For MySQL, =:tls nil=
-forces plaintext and suppresses the automatic MySQL 8 TLS retry path.
-MySQL connections also accept =:ssl-mode disabled= as a compatibility spelling;
-=off= remains accepted as an alias.
+TLS can be enabled per entry with =:tls t= as a shorthand; clutch normalizes
+that convenience form to backend-native settings.  For MySQL, prefer
+=:ssl-mode disabled= when you want plaintext; =off= remains accepted as a
+compatibility alias.  For PostgreSQL, prefer =:sslmode= with one of
+=disable=, =prefer=, =require=, or =verify-full=.  =:tls nil= remains accepted
+as shorthand for the explicit plaintext mode on MySQL and PostgreSQL.
 
 JDBC backends use a driver symbol as =:backend= instead of =mysql=/=pg=.  See
 [[#jdbc-backend-clutch-db-jdbcel][JDBC Backend (clutch-db-jdbc.el)]] for the full list of supported databases and setup.
@@ -1038,9 +1039,9 @@ For local MySQL 8 containers, this =mysql.el= client may need TLS for
 =caching_sha2_password= authentication.  Container certificates are usually
 self-signed, so either bind =mysql-tls-verify-server= to =nil= for local live
 tests as above, or install the container CA in =mysql-tls-trustfiles=.
-For MySQL, explicit =:tls nil= or =:ssl-mode disabled= is a strict opt-out from
-TLS and auto-retry; use it only when the server actually permits non-TLS
-authentication.  =off= remains accepted as a compatibility alias.
+For MySQL, =:ssl-mode disabled= is the explicit opt-out from TLS and auto-retry;
+use it only when the server actually permits non-TLS authentication.  =off=
+and =:tls nil= remain accepted as compatibility forms.
 
 The same caveat applies to clutch's backend live tests in
 =test/clutch-db-test.el= when they target a local MySQL 8 container.
@@ -1056,6 +1057,12 @@ emacs -batch -L . -l ert -l pg -l test/pg-test.el \
   --eval '(setq pg-test-port 5433)' \
   -f ert-run-tests-batch-and-exit
 #+end_src
+
+For PostgreSQL, =:sslmode prefer= is the closest match to libpq's default
+negotiation style.  =:sslmode require= and =:sslmode verify-full= both force
+TLS; the latter uses the current =pg-tls-verify-server= setting for hostname
+and certificate verification.  =:tls t= and =:tls nil= remain available as
+shorthand for =require= and =disable=.
 
 * Roadmap
 

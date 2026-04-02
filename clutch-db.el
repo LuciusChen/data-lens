@@ -54,6 +54,106 @@ Returns nil when no matching entry is found or auth-source-pass is absent."
       (when entry
         (cdr (assq 'secret (auth-source-pass-parse-entry entry)))))))
 
+(defun clutch-db--normalize-symbol-option (value)
+  "Return VALUE normalized to a lowercase symbol, or nil when absent."
+  (cond
+   ((null value) nil)
+   ((symbolp value)
+    (intern (downcase (symbol-name value))))
+   ((stringp value)
+    (intern (downcase value)))
+   (t value)))
+
+(defun clutch-db--normalize-mysql-ssl-mode (ssl-mode)
+  "Return canonical MySQL SSL-MODE, or signal `clutch-db-error'."
+  (pcase (clutch-db--normalize-symbol-option ssl-mode)
+    ('nil nil)
+    ((or 'disabled 'off) 'disabled)
+    (_
+     (signal 'clutch-db-error
+             (list (format "Unsupported MySQL :ssl-mode %S (supported: disabled)" ssl-mode))))))
+
+(defun clutch-db--normalize-pg-sslmode (sslmode)
+  "Return canonical PostgreSQL SSLMODE, or signal `clutch-db-error'."
+  (pcase (clutch-db--normalize-symbol-option sslmode)
+    ('nil nil)
+    ((or 'disable 'prefer 'require 'verify-full)
+     (clutch-db--normalize-symbol-option sslmode))
+    (_
+     (signal 'clutch-db-error
+             (list (format
+                    "Unsupported PostgreSQL :sslmode %S (supported: disable, prefer, require, verify-full)"
+                    sslmode))))))
+
+(defun clutch-db--normalize-mysql-connect-params (params)
+  "Return PARAMS normalized for the MySQL backend."
+  (let* ((params (copy-sequence params))
+         (tls-specified-p (plist-member params :tls))
+         (tls (plist-get params :tls))
+         (ssl-mode (clutch-db--normalize-mysql-ssl-mode
+                    (plist-get params :ssl-mode)))
+         (tls-mode (cond
+                    (ssl-mode 'disable)
+                    (tls-specified-p (if tls 'require 'disable))
+                    (t 'default))))
+    (when ssl-mode
+      (setq params (plist-put params :ssl-mode ssl-mode)))
+    (when (and ssl-mode tls-specified-p tls)
+      (signal 'clutch-db-error
+              (list "Conflicting MySQL TLS options: :tls t cannot be combined with :ssl-mode disabled")))
+    (setq params (plist-put params :clutch-tls-mode tls-mode))
+    (when (and tls-specified-p (null tls))
+      ;; Canonicalize the generic plaintext shortcut to MySQL's explicit name.
+      (setq params (plist-put params :ssl-mode 'disabled))
+      (cl-remf params :tls))
+    params))
+
+(defun clutch-db--normalize-pg-connect-params (params)
+  "Return PARAMS normalized for the PostgreSQL backend."
+  (let* ((params (copy-sequence params))
+         (tls-specified-p (plist-member params :tls))
+         (tls (plist-get params :tls))
+         (sslmode (clutch-db--normalize-pg-sslmode
+                   (plist-get params :sslmode)))
+         (tls-mode (pcase sslmode
+                     ((or 'disable 'prefer) sslmode)
+                     ((or 'require 'verify-full) 'require)
+                     (_ (if tls-specified-p
+                            (if tls 'require 'disable)
+                          'default)))))
+    (pcase sslmode
+      ('disable
+       (when (and tls-specified-p tls)
+         (signal 'clutch-db-error
+                 (list "Conflicting PostgreSQL TLS options: :tls t cannot be combined with :sslmode disable"))))
+      ('prefer
+       (when tls-specified-p
+         (signal 'clutch-db-error
+                 (list "Conflicting PostgreSQL TLS options: :sslmode prefer cannot be combined with :tls"))))
+      ((or 'require 'verify-full)
+       (when (and tls-specified-p (null tls))
+         (signal 'clutch-db-error
+                 (list (format "Conflicting PostgreSQL TLS options: :tls nil cannot be combined with :sslmode %s"
+                               sslmode))))))
+    (setq params (plist-put params :clutch-tls-mode tls-mode))
+    (cond
+     (sslmode
+      (setq params (plist-put params :sslmode sslmode))
+      (when tls-specified-p
+        (cl-remf params :tls)))
+     (tls-specified-p
+      ;; Canonicalize the generic boolean shortcut to PostgreSQL's official name.
+      (setq params (plist-put params :sslmode (if tls 'require 'disable)))
+      (cl-remf params :tls)))
+    params))
+
+(defun clutch-db--normalize-connect-params (backend params)
+  "Return connection PARAMS normalized for BACKEND."
+  (pcase backend
+    ('mysql (clutch-db--normalize-mysql-connect-params params))
+    ('pg (clutch-db--normalize-pg-connect-params params))
+    (_ params)))
+
 ;;;; Result struct
 
 (cl-defstruct clutch-db-result

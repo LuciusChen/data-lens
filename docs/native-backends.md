@@ -42,7 +42,8 @@ usage notes for the native backends.  The JDBC sidecar has its own document in
 ### TLS
 
 When `:tls t` is used, certificate and hostname verification are enabled by
-default.  For MySQL, explicit `:tls nil` is a strict plaintext opt-out.
+default.  For MySQL, explicit `:ssl-mode disabled` is the canonical plaintext
+opt-out; `:tls nil` remains a shorthand.
 
 For MySQL only, `:ssl-mode disabled` is a compatibility spelling for that same
 plaintext mode.  The older alias `off` is still accepted.  Either spelling
@@ -105,8 +106,14 @@ CA or set `mysql-tls-verify-server` to `nil` explicitly.
 
 ### TLS
 
-When `:tls t` is used, certificate and hostname verification are enabled by
-default.
+PostgreSQL accepts the upstream `:sslmode` name with `disable`, `prefer`,
+`require`, and `verify-full`.  `:tls t` and `:tls nil` remain convenience
+shorthands for `require` and `disable`.
+
+When `:sslmode require` or `:sslmode verify-full` is used, certificate and
+hostname verification are enabled by default through `pg-tls-verify-server`.
+When `:sslmode prefer` is used, clutch attempts TLS first and falls back to
+plaintext if the server declines SSL or GnuTLS is unavailable.
 
 Relevant variables:
 

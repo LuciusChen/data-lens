@@ -582,6 +582,53 @@ Reads auth messages and responds appropriately using PASSWORD."
   "Return non-nil if GnuTLS support is available."
   (and (fboundp 'gnutls-available-p) (gnutls-available-p)))
 
+(defun pg--normalize-sslmode (sslmode)
+  "Return canonical SSLMODE, or signal `pg-connection-error'."
+  (pcase (cond
+          ((null sslmode) nil)
+          ((symbolp sslmode) (intern (downcase (symbol-name sslmode))))
+          ((stringp sslmode) (intern (downcase sslmode)))
+          (t sslmode))
+    ('nil nil)
+    ((or 'disable 'prefer 'require 'verify-full)
+     (cond
+      ((symbolp sslmode) (intern (downcase (symbol-name sslmode))))
+      ((stringp sslmode) (intern (downcase sslmode)))
+      (t sslmode)))
+    (_
+     (signal 'pg-connection-error
+             (list
+              (format
+               "Unsupported sslmode %S (supported: disable, prefer, require, verify-full)"
+               sslmode))))))
+
+(defun pg--requested-tls-mode (tls tls-specified-p sslmode)
+  "Return the requested TLS mode for TLS, TLS-SPECIFIED-P, and SSLMODE.
+The return value is one of the symbols `default', `disable', `prefer', or
+`require'."
+  (let ((sslmode (pg--normalize-sslmode sslmode)))
+    (pcase sslmode
+      ('disable
+       (when (and tls-specified-p tls)
+         (signal 'pg-connection-error
+                 (list "Conflicting PostgreSQL TLS options: :tls t cannot be combined with :sslmode disable")))
+       'disable)
+      ('prefer
+       (when tls-specified-p
+         (signal 'pg-connection-error
+                 (list "Conflicting PostgreSQL TLS options: :sslmode prefer cannot be combined with :tls")))
+       'prefer)
+      ((or 'require 'verify-full)
+       (when (and tls-specified-p (null tls))
+         (signal 'pg-connection-error
+                 (list (format "Conflicting PostgreSQL TLS options: :tls nil cannot be combined with :sslmode %s"
+                               sslmode))))
+       'require)
+      (_
+       (if tls-specified-p
+           (if tls 'require 'disable)
+         'default)))))
+
 (defun pg--send-ssl-request (conn)
   "Send an SSLRequest for CONN to the server.
 Returns the server's response character (?S or ?N)."
@@ -661,8 +708,27 @@ Returns (PROCESS . BUFFER)."
       (_ (signal 'pg-connection-error
                  (list (format "Unexpected SSL response: %c" response)))))))
 
+(defun pg--maybe-negotiate-tls (conn tls-mode)
+  "Apply TLS-MODE to CONN before authentication."
+  (pcase tls-mode
+    ((or 'default 'disable) nil)
+    ('require
+     (unless (pg--tls-available-p)
+       (signal 'pg-connection-error
+               (list "TLS requested but GnuTLS is not available")))
+     (pg--negotiate-tls conn))
+    ('prefer
+     (when (pg--tls-available-p)
+       (let ((response (pg--send-ssl-request conn)))
+         (pcase response
+           (?S (pg--upgrade-to-tls conn))
+           (?N nil)
+           (_ (signal 'pg-connection-error
+                      (list (format "Unexpected SSL response: %c" response))))))))))
+
 (cl-defun pg-connect (&key (host "127.0.0.1") (port 5432) user password
-                             database tls (read-idle-timeout 30)
+                             database (tls nil tls-specified-p) sslmode
+                             (read-idle-timeout 30)
                              query-timeout
                              (connect-timeout 10))
   "Connect to a PostgreSQL server and authenticate.
@@ -670,16 +736,18 @@ Returns a `pg-conn' struct on success.
 
 HOST defaults to \"127.0.0.1\", PORT defaults to 5432.
 USER, PASSWORD, and DATABASE are strings.
-When TLS is non-nil, attempt TLS upgrade before authenticating.
+When TLS is non-nil, it is shorthand for `:sslmode require'.  When TLS is
+explicitly nil, it is shorthand for `:sslmode disable'.  SSLMODE accepts
+`disable', `prefer', `require', and `verify-full'.  `verify-full' follows the
+current `pg-tls-verify-server' verification settings.
 READ-IDLE-TIMEOUT limits query I/O stalls.  QUERY-TIMEOUT sets PostgreSQL
 statement_timeout in seconds for queries on this connection.
 CONNECT-TIMEOUT limits the initial
 TCP connection wait."
   (unless user
     (signal 'pg-connection-error (list "No user specified")))
-  (when (and tls (not (pg--tls-available-p)))
-    (signal 'pg-connection-error (list "TLS requested but GnuTLS is not available")))
-  (pcase-let ((`(,proc . ,buf) (pg--open-connection host port connect-timeout)))
+  (let ((tls-mode (pg--requested-tls-mode tls tls-specified-p sslmode)))
+    (pcase-let ((`(,proc . ,buf) (pg--open-connection host port connect-timeout)))
     (let ((conn (make-pg-conn :process proc :buf buf
                               :host host :port port
                               :user user :database database
@@ -687,7 +755,7 @@ TCP connection wait."
                               :query-timeout query-timeout)))
       (condition-case err
           (progn
-            (when tls (pg--negotiate-tls conn))
+            (pg--maybe-negotiate-tls conn tls-mode)
             (pg--send-startup-message conn)
             (pg--handle-authentication conn password)
             (pg--read-startup-messages conn)
@@ -695,7 +763,7 @@ TCP connection wait."
         (error
          (when (process-live-p proc) (delete-process proc))
          (when (buffer-live-p buf) (kill-buffer buf))
-         (signal (car err) (cdr err)))))))
+         (signal (car err) (cdr err))))))))
 
 (defun pg-disconnect (conn)
   "Disconnect from PostgreSQL server, sending Terminate.

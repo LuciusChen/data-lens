@@ -398,8 +398,9 @@ Connection profile plist keys:
 | `:url` | string | Full JDBC URL (JDBC backends; overrides host/port/database) |
 | `:props` | alist | Extra JDBC connection properties |
 | `:manual-commit` | boolean | JDBC only: disable auto-commit for this connection |
-| `:tls` | boolean | Enable TLS/SSL; for MySQL, explicit `nil` forces plaintext |
+| `:tls` | boolean | Convenience shorthand; maps to backend-native TLS settings |
 | `:ssl-mode` | symbol | MySQL only: `disabled` forces plaintext and suppresses auto-TLS retry (`off` alias accepted) |
+| `:sslmode` | symbol | PostgreSQL only: `disable`, `prefer`, `require`, or `verify-full` |
 | `:connect-timeout` | natnum | Connection timeout (seconds) |
 | `:read-idle-timeout` | natnum | Read idle timeout (seconds) |
 | `:query-timeout` | natnum | Server-side statement timeout (seconds) |

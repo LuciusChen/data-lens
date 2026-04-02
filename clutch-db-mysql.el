@@ -98,14 +98,27 @@ Each output plist has :name and :type-category."
 PARAMS keys: :host, :port, :user, :password, :database, :tls,
 :ssl-mode, :connect-timeout, :read-idle-timeout.
 For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
-  (condition-case err
-      (apply #'mysql-connect
-             (cl-loop for (k v) on params by #'cddr
-                      unless (memq k '(:sql-product :backend))
-                      append (list k v)))
-    (mysql-error
-     (signal 'clutch-db-error
-             (list (error-message-string err))))))
+  (setq params (clutch-db--normalize-connect-params 'mysql params))
+  (let ((tls-mode (plist-get params :clutch-tls-mode)))
+    (cl-remf params :clutch-tls-mode)
+    (pcase tls-mode
+      ('default
+       (cl-remf params :tls)
+       (cl-remf params :ssl-mode))
+      ('require
+       (setq params (plist-put params :tls t))
+       (cl-remf params :ssl-mode))
+      ('disable
+       (setq params (plist-put params :ssl-mode 'disabled))
+       (cl-remf params :tls)))
+    (condition-case err
+        (apply #'mysql-connect
+               (cl-loop for (k v) on params by #'cddr
+                        unless (memq k '(:sql-product :backend))
+                        append (list k v)))
+      (mysql-error
+       (signal 'clutch-db-error
+               (list (error-message-string err)))))))
 
 ;;;; Lifecycle methods
 

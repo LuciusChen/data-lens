@@ -40,15 +40,50 @@
 ;; `mysql-tls-verify-server' is defined in mysql.el; declare it special here so
 ;; local test bindings remain dynamic even before the backend requires mysql.el.
 (defvar mysql-tls-verify-server)
+(defvar clutch-connection)
 (defvar clutch-jdbc--error-details-by-conn)
 (defvar clutch-jdbc--busy-request-ids)
 (defvar clutch-jdbc--ignored-response-ids)
+(defvar mysql-type-long)
+(defvar mysql-type-float)
+(defvar mysql-type-double)
+(defvar mysql-type-decimal)
+(defvar mysql-type-longlong)
+(defvar mysql-type-date)
+(defvar mysql-type-time)
+(defvar mysql-type-datetime)
+(defvar mysql-type-timestamp)
+(defvar mysql-type-blob)
+(defvar mysql-type-json)
+(defvar pg-oid-int4)
+(defvar pg-oid-int8)
+(defvar pg-oid-float8)
+(defvar pg-oid-numeric)
+(defvar pg-oid-date)
+(defvar pg-oid-time)
+(defvar pg-oid-timestamp)
+(defvar pg-oid-timestamptz)
+(defvar pg-oid-bytea)
+(defvar pg-oid-json)
+(defvar pg-oid-jsonb)
 
 (declare-function clutch-db-mysql--type-category "clutch-db-mysql" (type character-set))
 (declare-function clutch-db-mysql--convert-columns "clutch-db-mysql" (columns))
+(declare-function clutch-db-mysql-connect "clutch-db-mysql" (params))
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
 (declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns))
 (declare-function clutch-db-pg-connect "clutch-db-pg" (params))
+(declare-function clutch--jdbc-backend-p "clutch" (backend))
+(declare-function clutch--backend-display-name-from-params "clutch" (params))
+(declare-function clutch--build-conn "clutch" (params))
+(declare-function clutch--format-value "clutch" (value))
+(declare-function clutch--value-to-literal "clutch" (value))
+(declare-function make-mysql-conn "mysql" (&rest args))
+(declare-function make-mysql-result "mysql" (&rest args))
+(declare-function mysql-conn-database "mysql" (conn))
+(declare-function make-pg-conn "pg" (&rest args))
+(declare-function make-pg-result "pg" (&rest args))
+(declare-function pg-conn-host "pg" (conn))
 
 ;;;; Test configuration
 
@@ -71,6 +106,47 @@
      (require 'mysql)
      (cl-letf (((symbol-value 'mysql-tls-verify-server) nil))
        ,@body)))
+
+;;;; Unit tests — connection parameter normalization
+
+(ert-deftest clutch-db-test-normalize-mysql-connect-params-canonicalizes-disabled ()
+  "MySQL plaintext options should normalize to `:ssl-mode disabled'."
+  (let ((params (clutch-db--normalize-connect-params
+                 'mysql
+                 '(:host "127.0.0.1" :tls nil :ssl-mode off))))
+    (should (eq (plist-get params :clutch-tls-mode) 'disable))
+    (should (eq (plist-get params :ssl-mode) 'disabled))
+    (should-not (plist-member params :tls))))
+
+(ert-deftest clutch-db-test-normalize-mysql-connect-params-rejects-conflict ()
+  "MySQL conflicting TLS options should fail early."
+  (should-error
+   (clutch-db--normalize-connect-params
+    'mysql '(:host "127.0.0.1" :tls t :ssl-mode disabled))
+   :type 'clutch-db-error))
+
+(ert-deftest clutch-db-test-normalize-pg-connect-params-canonicalizes-require ()
+  "PostgreSQL `:tls t' should normalize to `:sslmode require'."
+  (let ((params (clutch-db--normalize-connect-params
+                 'pg '(:host "127.0.0.1" :tls t))))
+    (should (eq (plist-get params :clutch-tls-mode) 'require))
+    (should (eq (plist-get params :sslmode) 'require))
+    (should-not (plist-member params :tls))))
+
+(ert-deftest clutch-db-test-normalize-pg-connect-params-preserves-prefer ()
+  "PostgreSQL `:sslmode prefer' should stay in official form."
+  (let ((params (clutch-db--normalize-connect-params
+                 'pg '(:host "127.0.0.1" :sslmode "prefer"))))
+    (should (eq (plist-get params :clutch-tls-mode) 'prefer))
+    (should (eq (plist-get params :sslmode) 'prefer))
+    (should-not (plist-member params :tls))))
+
+(ert-deftest clutch-db-test-normalize-pg-connect-params-rejects-unsupported-mode ()
+  "Unsupported PostgreSQL sslmodes should fail early."
+  (should-error
+   (clutch-db--normalize-connect-params
+    'pg '(:host "127.0.0.1" :sslmode verify-ca))
+   :type 'clutch-db-error))
 
 ;;;; Unit tests — clutch-db-result struct
 
@@ -1405,6 +1481,47 @@
         (should-not (plist-member captured-args :schema))
         (should (equal executed-sql "SET search_path TO \"app\""))
         (should (equal (clutch-db-current-schema conn) "app"))))))
+
+(ert-deftest clutch-db-test-pg-connect-normalizes-tls-to-sslmode ()
+  "PostgreSQL backend connect should pass canonical `:sslmode' to `pg-connect'."
+  (require 'clutch-db-pg)
+  (require 'pg)
+  (let (captured-args)
+    (cl-letf (((symbol-function 'pg-connect)
+               (lambda (&rest args)
+                 (setq captured-args args)
+                 (make-pg-conn :host "127.0.0.1" :port 5432
+                               :user "postgres" :database "test"))))
+      (clutch-db-pg-connect
+       '(:host "127.0.0.1"
+         :port 5432
+         :database "test"
+         :user "postgres"
+         :password "secret"
+         :tls t))
+      (should (eq (plist-get captured-args :sslmode) 'require))
+      (should-not (plist-member captured-args :tls)))))
+
+(ert-deftest clutch-db-test-mysql-connect-normalizes-tls-nil-to-ssl-mode ()
+  "MySQL backend connect should pass canonical `:ssl-mode' to `mysql-connect'."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let (captured-args)
+    (cl-letf (((symbol-function 'mysql-connect)
+               (lambda (&rest args)
+                 (setq captured-args args)
+                 (make-mysql-conn :host "127.0.0.1" :port 3306
+                                  :user "root" :database "mysql"))))
+      (clutch-db-mysql-connect
+       '(:host "127.0.0.1"
+         :port 3306
+         :database "mysql"
+         :user "root"
+         :password "secret"
+         :tls nil))
+      (should-not (plist-member captured-args :clutch-tls-mode))
+      (should (eq (plist-get captured-args :ssl-mode) 'disabled))
+      (should-not (plist-member captured-args :tls)))))
 
 (ert-deftest clutch-db-test-pg-interrupt-query-returns-t-after-cancel ()
   "PostgreSQL interrupt should report success when cancel completes."
