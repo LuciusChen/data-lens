@@ -3349,6 +3349,36 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
               (should-not (string-match-p "before" rendered)))))
       (kill-buffer result-buf))))
 
+(ert-deftest clutch-test-record-render-inherits-live-connection-context ()
+  "Record view should reuse the parent result buffer connection context."
+  (let ((result-buf (generate-new-buffer "*clutch-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--connection-params '(:backend mysql :host "db")
+                        clutch--conn-sql-product 'mysql
+                        clutch--result-columns '("id" "name")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "name" :type-category text))
+                        clutch--result-rows '((1 "before"))
+                        clutch--cached-pk-indices '(0)
+                        clutch--pending-edits nil
+                        clutch--fk-info nil))
+          (with-temp-buffer
+            (clutch-record-mode)
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--row-idx 0
+                        clutch-record--expanded-fields nil)
+            (clutch-record--render)
+            (should (eq clutch-connection 'fake-conn))
+            (should (equal clutch--connection-params '(:backend mysql :host "db")))
+            (should (eq clutch--conn-sql-product 'mysql))
+            (let ((line (clutch--header-with-disconnect-badge
+                         clutch-record--header-base)))
+              (should-not (string-match-p "Disconnected" line)))))
+      (kill-buffer result-buf))))
+
 ;;;; Unit tests — separator rendering
 
 (ert-deftest clutch-test-render-separator ()

@@ -4199,6 +4199,10 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
          (inhibit-read-only t))
     (unless (< ridx (length rows))
       (user-error "Row %d no longer exists" ridx))
+    (clutch--bind-connection-context
+     (buffer-local-value 'clutch-connection result-buf)
+     (buffer-local-value 'clutch--connection-params result-buf)
+     (buffer-local-value 'clutch--conn-sql-product result-buf))
     (erase-buffer)
     (setq-local clutch-record--header-base
                 (propertize (format " Record: row %d/%d" (1+ ridx) (length rows))
