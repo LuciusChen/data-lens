@@ -3171,8 +3171,10 @@ Otherwise, copy the current cell."
 Enable --refine to exclude rows/columns interactively before copying
 \(requires an active region set with C-x SPC or mouse)."
   ["Options"
+   :pad-keys t
    ("-r" "Exclude rows/cols interactively (needs region)" "--refine")]
   ["Copy as"
+   :pad-keys t
    ("t" "TSV"             clutch-result-copy-tsv)
    ("c" "CSV with header" clutch-result-copy-csv)
    ("i" "INSERT"          clutch-result-copy-insert)
@@ -4439,7 +4441,8 @@ Accumulates input until a semicolon is found, then executes."
 ;;;###autoload
 (transient-define-prefix clutch-dispatch ()
   "Main dispatch menu for clutch."
-  [["Connection"
+  [ :pad-keys t
+   ["Connection"
     ("c" "Connect"    clutch-connect)
     ("d" "Disconnect" clutch-disconnect)
     ("m" "Commit"            clutch-commit)
@@ -4463,7 +4466,8 @@ Accumulates input until a semicolon is found, then executes."
 
 (transient-define-prefix clutch-result-dispatch ()
   "Dispatch menu for clutch result buffer."
-  [["Navigate"
+  [ :pad-keys t
+   ["Navigate"
     ("TAB" "Next cell"       clutch-result-next-cell)
     ("<backtab>" "Prev cell" clutch-result-prev-cell)
     ("n" "Down row"          clutch-result-down-cell)
@@ -4484,7 +4488,8 @@ Accumulates input until a semicolon is found, then executes."
     ("W" "WHERE filter"      clutch-result-apply-filter)
     ("s" "Sort ASC"          clutch-result-sort-by-column)
     ("S" "Sort DESC"         clutch-result-sort-by-column-desc)]]
-  [["Pages"
+  [ :pad-keys t
+   ["Pages"
     ("N" "Next page"         clutch-result-next-page)
     ("P" "Prev page"         clutch-result-prev-page)
     ("M-<" "First page"      clutch-result-first-page)
@@ -4502,13 +4507,15 @@ Accumulates input until a semicolon is found, then executes."
     ("=" "Widen column"      clutch-result-widen-column)
     ("-" "Narrow column"     clutch-result-narrow-column)
     ("f" "Fullscreen"        clutch-result-fullscreen-toggle)]]
-  [["Copy / Export (region/rect: C-x SPC)"
+  [ :pad-keys t
+   ["Copy / Export (region/rect: C-x SPC)"
     ("c" "Copy… (-r to refine rows/cols)" clutch-result-copy-dispatch)
     ("e" "Export"                         clutch-result-export)]])
 
 (transient-define-prefix clutch-record-dispatch ()
   "Dispatch menu for clutch record buffer."
-  [["Navigate"
+  [ :pad-keys t
+   ["Navigate"
     ("n" "Next row"     clutch-record-next-row)
     ("p" "Prev row"     clutch-record-prev-row)
     ("RET" "Expand/FK"  clutch-record-toggle-expand)]
