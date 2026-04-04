@@ -2473,6 +2473,7 @@ Priority: region rows > current row."
     ;; Delete / Insert
     (define-key map "d" #'clutch-result-delete-rows)
     (define-key map "i" #'clutch-result-insert-row)
+    (define-key map "I" #'clutch-clone-row-to-insert)
     (define-key map (kbd "C-c C-k") #'clutch-result-discard-pending-at-point)
     ;; Override pixel-scroll with line-based scrolling
     (define-key map [wheel-up] #'scroll-down-line)
@@ -4118,6 +4119,7 @@ previous window layout."
     (define-key map "n" #'clutch-record-next-row)
     (define-key map "p" #'clutch-record-prev-row)
     (define-key map "v" #'clutch-record-view-value)
+    (define-key map "I" #'clutch-clone-row-to-insert)
     (define-key map "q" #'quit-window)
     (define-key map "g" #'clutch-record-refresh)
     (define-key map (kbd "C-c ?") #'clutch-record-dispatch)
@@ -4492,6 +4494,7 @@ Accumulates input until a semicolon is found, then executes."
    ["Mutate"
     ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
     ("i" "Stage insert"      clutch-result-insert-row)
+    ("I" "Clone row → insert" clutch-clone-row-to-insert)
     ("d" "Stage delete"      clutch-result-delete-rows)
     ("C-c C-c" "Commit pending" clutch-result-commit)
     ("C-c C-k" "Discard pending at point" clutch-result-discard-pending-at-point)]
@@ -4510,6 +4513,7 @@ Accumulates input until a semicolon is found, then executes."
     ("p" "Prev row"     clutch-record-prev-row)
     ("RET" "Expand/FK"  clutch-record-toggle-expand)]
    ["Other"
+    ("I" "Clone row → insert" clutch-clone-row-to-insert)
     ("v" "View value" clutch-record-view-value)
     ("g" "Refresh" clutch-record-refresh)
     ("q" "Quit"    quit-window)]])

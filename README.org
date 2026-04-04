@@ -309,6 +309,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =g=            | Re-execute query                              |
 | =C-c '=       | Edit / re-edit at point                       |
 | =i=            | Stage new row for insertion                   |
+| =I=            | Clone current row into a prefilled insert form (without PK values) |
 | =d=            | Stage row(s) for deletion (supports region)   |
 | =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
 | =C-c C-k=     | Discard pending change at point               |
@@ -343,14 +344,24 @@ while completion stays on Emacs' completion keys.
 | =M-TAB= / =C-M-i=    | Complete current field value (prefers CAPF; falls back to chooser) |
 | =C-c '=              | Edit current JSON field in a dedicated buffer   |
 | =C-c .=              | Set current date/time field to "now"            |
+| =C-c C-a=            | Toggle sparse vs all-column layout              |
+| =C-c C-y=            | Import TSV / CSV from region or kill ring       |
 | =C-c C-c=            | Stage new row / update staged insert            |
 | =C-c C-k=            | Cancel                                          |
 
-Field labels are read-only, aligned to a shared value column, and may show tags
-such as =generated=, =default=..., =enum=, =bool=, =json=, and =required=.
-The active field line is highlighted.  Insert buffers also validate locally as
-you type: obvious enum / bool / json / numeric / date-time mistakes are shown
-inline on the current field before staging.
+Insert buffers open in a *sparse* layout by default: required/no-default fields
+show first, and prefilled values stay visible.  =C-c C-a= expands back to *all
+columns*, including generated/defaulted ones, without losing anything you've
+already typed.  Field labels are read-only, aligned to a shared value column,
+and may show tags such as =generated=, =default=..., =enum=, =bool=, =json=,
+and =required=.  The active field line is highlighted.  Insert buffers also
+validate locally as you type: obvious enum / bool / json / numeric / date-time
+mistakes are shown inline on the current field before staging.
+
+=C-c C-y= imports delimited text directly into the form.  A single imported row
+prefills the current insert buffer; multiple rows are staged immediately as
+pending inserts.  Header-based imports map by column name; otherwise clutch maps
+positionally using the fields currently visible in the insert form.
 
 JSON fields still support direct editing in the insert buffer, but =C-c '= opens
 an on-demand child editor for more comfortable multi-line editing.  Saving that
@@ -397,6 +408,7 @@ Typical flow:
 |-------------+-------------------------------|
 | =RET=       | Expand long field / follow FK |
 | =n= / =p=  | Next row / previous row       |
+| =I=         | Clone current record into a prefilled insert form (without PK values) |
 | =v=         | View field value (JSON / XML / BLOB preview) |
 | =g=         | Refresh                       |
 | =q=         | Quit                          |
@@ -459,27 +471,30 @@ Typical flow:
 
 #+begin_src
 1. SELECT * FROM users;      → C-c C-c to execute
-2. i                          → opens insert buffer with all column fields
-3. RET / TAB / S-TAB          → move quickly between fields
+2. i                          → opens a sparse insert buffer for the result table
+3. I                          → clones the current row into a prefilled insert buffer without PK values
+4. RET / TAB / S-TAB          → move quickly between fields
                                field labels are read-only, aligned, and can show tags like [enum], [json], [default=...]
-4. M-TAB / C-M-i              → complete enum / bool-like fields (falls back to a chooser if needed)
-5. C-c ' on a JSON field      → open a dedicated JSON editor when the value gets large
-6. C-c .                      → set current date/time field to "now"
-7. Inline validation          → field-level mistakes show up immediately while editing
+5. C-c C-a                    → expand back to all columns when needed
+6. C-c C-y                    → import TSV / CSV into the form; multi-row import stages rows directly
+7. M-TAB / C-M-i              → complete enum / bool-like fields (falls back to a chooser if needed)
+8. C-c ' on a JSON field      → open a dedicated JSON editor when the value gets large
+9. C-c .                      → set current date/time field to "now"
+10. Inline validation          → field-level mistakes show up immediately while editing
                                JSON validation waits for a short idle pause
                                validation uses compact inline tokens so long errors do not deform the form layout
-8. C-c C-c                    → validate locally, then stage (C-c C-k cancels)
+11. C-c C-c                    → validate locally, then stage (C-c C-k cancels)
                                staged rows appear as ghost rows in result buffer
                                left marker shows =I= and status line shows =I-<n>=
                                missing generated/defaulted columns render as <generated> / <default>
-9. C-c ' on a pending insert row → re-open that staged insert with its previous values
-10. Use normal Emacs region selection to select rows
-11. d                          → stage current row or selected region for deletion
+12. C-c ' on a pending insert row → re-open that staged insert with its previous values
+13. Use normal Emacs region selection to select rows
+14. d                          → stage current row or selected region for deletion
                                left marker shows =D= and status line shows =D-<n>=
                                deleted rows are visually marked in the result buffer
-12. C-c C-k                   → discard pending change at point
-13. g with pending changes    → prompts "Discard pending changes and re-run query?"
-14. C-c C-c in result buffer → confirmation prompt showing all statements
+15. C-c C-k                   → discard pending change at point
+16. g with pending changes    → prompts "Discard pending changes and re-run query?"
+17. C-c C-c in result buffer → confirmation prompt showing all statements
                                commits in order: INSERT → UPDATE → DELETE
                                edited rows show =E= in the left marker column and =E-<n>= in the status line
 #+end_src

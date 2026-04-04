@@ -650,7 +650,8 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           (with-temp-buffer
             (clutch-result-insert-mode 1)
             (setq-local clutch-result-insert--result-buffer result-buf
-                        clutch-result-insert--table "shipping_incidents")
+                        clutch-result-insert--table "shipping_incidents"
+                        clutch-result-insert--show-all-fields t)
             (cl-letf (((symbol-function 'clutch--ensure-column-details)
                        (lambda (_conn _table)
                          (list (list :name "id" :type "int" :generated t :nullable nil)
@@ -1415,7 +1416,8 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           (with-temp-buffer
             (clutch-result-insert-mode 1)
             (setq-local clutch-result-insert--result-buffer result-buf
-                        clutch-result-insert--table "shipping_incidents")
+                        clutch-result-insert--table "shipping_incidents"
+                        clutch-result-insert--show-all-fields t)
             (cl-letf (((symbol-function 'clutch--ensure-column-details)
                        (lambda (_conn _table)
                          (list (list :name "id" :type "int" :generated t :nullable nil)
@@ -1473,6 +1475,237 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                '(("severity" . "high")))
               (should (string-match-p "^severity \\[enum required\\]: high$"
                                       (buffer-string))))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-sparse-layout-toggle-preserves-hidden-values ()
+  "Sparse insert layout should hide defaulted fields without dropping their values."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
+        insert-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("id" "severity" "owner" "created_at")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "severity" :type-category text)
+                                                     (:name "owner" :type-category text)
+                                                     (:name "created_at" :type-category datetime))))
+          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table)
+                       (list (list :name "id" :type "int" :generated t :nullable nil)
+                             (list :name "severity" :type "enum('low','medium','high')" :nullable nil)
+                             (list :name "owner" :type "varchar(64)" :default "system" :nullable t)
+                             (list :name "created_at" :type "datetime"
+                                   :default "CURRENT_TIMESTAMP" :nullable t))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq insert-buf buf)
+                       buf)))
+            (clutch-result-insert--open-buffer "shipping_incidents" result-buf))
+          (with-current-buffer insert-buf
+            (should (string-match-p "^severity[ ]+\\[enum required\\]: $" (buffer-string)))
+            (should-not (string-match-p "^owner" (buffer-string)))
+            (should-not (string-match-p "^created_at" (buffer-string)))
+            (clutch-result-insert-toggle-field-layout)
+            (goto-char (point-min))
+            (re-search-forward "^owner.*: " nil t)
+            (insert "bob")
+            (clutch-result-insert-toggle-field-layout)
+            (should (string-match-p "^severity[ ]+\\[enum required\\]: $"
+                                    (buffer-string)))
+            (clutch-result-insert-toggle-field-layout)
+            (should (string-match-p "^owner[ ]+\\[default=system\\]: bob$"
+                                    (buffer-string)))))
+      (when (buffer-live-p insert-buf)
+        (kill-buffer insert-buf))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-clone-row-to-insert-prefills-effective-result-values ()
+  "Cloning a result row should reuse visible row values and staged edits."
+  (let ((result-buf (generate-new-buffer "*clutch-result*"))
+        insert-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (clutch-result-mode)
+            (setq-local clutch-connection 'fake-conn
+                        clutch--last-query "SELECT * FROM shipping_incidents"
+                        clutch--result-columns '("id" "severity" "owner" "created_at")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "severity" :type-category text)
+                                                     (:name "owner" :type-category text)
+                                                     (:name "created_at" :type-category datetime))
+                        clutch--result-rows '((1 "low" "alice" "2026-03-01 10:00:00"))
+                        clutch--filtered-rows nil
+                        clutch--cached-pk-indices '(0)
+                        clutch--pending-edits '((([1] . 1) . "high"))))
+          (cl-letf (((symbol-function 'clutch-result--row-idx-at-line)
+                     (lambda () 0))
+                    ((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table)
+                       (list (list :name "id" :type "int" :generated t :nullable nil)
+                             (list :name "severity" :type "enum('low','medium','high')" :nullable nil)
+                             (list :name "owner" :type "varchar(64)" :nullable t)
+                             (list :name "created_at" :type "datetime"
+                                   :default "CURRENT_TIMESTAMP" :nullable t))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq insert-buf buf)
+                       buf)))
+            (with-current-buffer result-buf
+              (clutch-clone-row-to-insert)))
+          (with-current-buffer insert-buf
+            (should-not (string-match-p "^id" (buffer-string)))
+            (should (string-match-p "^severity[ ]+\\[enum required\\]: high$"
+                                    (buffer-string)))
+            (should (string-match-p "^owner[ ]*: alice$" (buffer-string)))
+            (should (string-match-p "^created_at .*2026-03-01 10:00:00$"
+                                    (buffer-string)))))
+      (when (buffer-live-p insert-buf)
+        (kill-buffer insert-buf))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-clone-row-to-insert-works-from-record-buffer ()
+  "Cloning from a record buffer should prefill from the current record row."
+  (let ((result-buf (generate-new-buffer "*clutch-result*"))
+        (record-buf (generate-new-buffer "*clutch-record*"))
+        insert-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--last-query "SELECT * FROM shipping_incidents"
+                        clutch--result-columns '("id" "owner")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "owner" :type-category text))
+                        clutch--result-rows '((7 "carol"))))
+          (with-current-buffer record-buf
+            (clutch-record-mode)
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--row-idx 0))
+          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table)
+                       (list (list :name "id" :type "int" :generated t :nullable nil)
+                             (list :name "owner" :type "varchar(64)" :nullable t))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq insert-buf buf)
+                       buf)))
+            (with-current-buffer record-buf
+              (clutch-clone-row-to-insert)))
+          (with-current-buffer insert-buf
+            (should-not (string-match-p "^id" (buffer-string)))
+            (should (string-match-p "^owner[ ]*: carol$" (buffer-string)))))
+      (when (buffer-live-p insert-buf)
+        (kill-buffer insert-buf))
+      (when (buffer-live-p record-buf)
+        (kill-buffer record-buf))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-clone-row-to-insert-hides-primary-key-by-default ()
+  "Clone-to-insert should not prefill or sparsely render primary-key fields."
+  (let ((result-buf (generate-new-buffer "*clutch-result*"))
+        insert-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (clutch-result-mode)
+            (setq-local clutch-connection 'fake-conn
+                        clutch--last-query "SELECT * FROM incident_codes"
+                        clutch--result-columns '("id" "label")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "label" :type-category text))
+                        clutch--result-rows '((42 "duplicate me"))
+                        clutch--filtered-rows nil
+                        clutch--cached-pk-indices '(0)))
+          (cl-letf (((symbol-function 'clutch-result--row-idx-at-line)
+                     (lambda () 0))
+                    ((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table)
+                       (list (list :name "id" :type "int" :primary-key t :nullable nil)
+                             (list :name "label" :type "varchar(64)" :nullable nil))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq insert-buf buf)
+                       buf)))
+            (with-current-buffer result-buf
+              (clutch-clone-row-to-insert)))
+          (with-current-buffer insert-buf
+            (should-not (string-match-p "^id" (buffer-string)))
+            (should (string-match-p "^label[ ]+\\[required\\]: duplicate me$"
+                                    (buffer-string)))
+            (clutch-result-insert-toggle-field-layout)
+            (should (string-match-p "^id[ ]+\\[required\\]: $" (buffer-string)))))
+      (when (buffer-live-p insert-buf)
+        (kill-buffer insert-buf))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-import-delimited-parses-quoted-csv-row ()
+  "Single-row CSV import should prefill the current insert form."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
+        insert-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("owner" "severity")
+                        clutch--result-column-defs '((:name "owner" :type-category text)
+                                                     (:name "severity" :type-category text))))
+          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table)
+                       (list (list :name "owner" :type "varchar(64)" :nullable t)
+                             (list :name "severity" :type "enum('low','high')" :nullable nil))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq insert-buf buf)
+                       buf)))
+            (clutch-result-insert--open-buffer "shipping_incidents" result-buf))
+          (with-current-buffer insert-buf
+            (clutch-result-insert-import-delimited
+             "owner,severity\n\"Bob, Jr.\",high\n")
+            (should (string-match-p "^owner[ ]*: Bob, Jr\\.$" (buffer-string)))
+            (should (string-match-p "^severity[ ]+\\[enum required\\]: high$"
+                                    (buffer-string)))))
+      (when (buffer-live-p insert-buf)
+        (kill-buffer insert-buf))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-insert-import-delimited-stages-multi-row-header-mapping ()
+  "Multi-row delimited import should stage pending inserts by header names."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
+        insert-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("severity" "owner" "created_at")
+                        clutch--result-column-defs '((:name "severity" :type-category text)
+                                                     (:name "owner" :type-category text)
+                                                     (:name "created_at" :type-category datetime))
+                        clutch--pending-inserts nil))
+          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table)
+                       (list (list :name "severity" :type "enum('low','high')" :nullable nil)
+                             (list :name "owner" :type "varchar(64)" :nullable t)
+                             (list :name "created_at" :type "datetime"
+                                   :default "CURRENT_TIMESTAMP" :nullable t))))
+                    ((symbol-function 'clutch--refresh-display) #'ignore)
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq insert-buf buf)
+                       buf)))
+            (clutch-result-insert--open-buffer "shipping_incidents" result-buf))
+          (with-current-buffer insert-buf
+            (clutch-result-insert-import-delimited
+             "owner\tseverity\nbob\thigh\nann\tlow\n")
+            (should (equal (with-current-buffer result-buf
+                             clutch--pending-inserts)
+                           '((("owner" . "bob") ("severity" . "high"))
+                              (("owner" . "ann") ("severity" . "low")))))
+            (should (string-match-p "^severity[ ]+\\[enum required\\]: $"
+                                    (buffer-string)))))
+      (when (buffer-live-p insert-buf)
+        (kill-buffer insert-buf))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-insert-commit-validates-enum-bool-and-json-before-stage ()

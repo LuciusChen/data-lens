@@ -219,6 +219,7 @@ Interactive result browsing with column paging, sorting, filtering, mutations.
 | `/` | `clutch-result-filter` | Client-side fuzzy filter |
 | `C-c '` | `clutch-result-edit-cell` | Edit / re-edit current cell |
 | `i` | `clutch-result-insert-row` | Open insert buffer |
+| `I` | `clutch-clone-row-to-insert` | Clone current row into a prefilled insert buffer without PK values |
 | `d` | `clutch-result-delete-rows` | Stage row(s) for deletion |
 | `C-c C-c` | `clutch-result-commit` | Commit staged INSERT/UPDATE/DELETE changes |
 | `C-c C-k` | `clutch-result-discard-pending-at-point` | Discard pending change at point |
@@ -263,6 +264,7 @@ Full-width inspection of a single row; each field occupies one or more lines.
 | `n` | `clutch-record-next-row` | Next row |
 | `e` | `clutch-record-expand-field` | Expand long field (JSON, BLOB placeholder) |
 | `RET` | `clutch-record-follow-fk` | Follow FK to referenced row |
+| `I` | `clutch-clone-row-to-insert` | Clone current record into a prefilled insert buffer without PK values |
 | `q` | `quit-window` | Close record buffer |
 
 ---
@@ -279,10 +281,15 @@ Each field is displayed with:
 
 | Key | Command | Description |
 |-----|---------|-------------|
+| `RET` | `clutch-result-insert-submit-field` | Accept current field and move to next |
 | `TAB` | `clutch-result-insert-next-field` | Move to next field |
 | `S-TAB` | `clutch-result-insert-prev-field` | Move to previous field |
-| `RET` | `clutch-result-insert-edit-field` | Edit current field in minibuffer |
-| `C-c C-c` | `clutch-result-insert-create` | Validate and insert row |
+| `M-TAB` / `C-M-i` | `clutch-result-insert-complete-field` | Complete enum/bool-like values |
+| `C-c '` | `clutch-result-insert-edit-json-field` | Open JSON sub-editor for current field |
+| `C-c .` | `clutch-result-insert-fill-current-time` | Fill current temporal field with now |
+| `C-c C-a` | `clutch-result-insert-toggle-field-layout` | Toggle sparse vs all-column layout |
+| `C-c C-y` | `clutch-result-insert-import-delimited` | Import TSV / CSV into the form |
+| `C-c C-c` | `clutch-result-insert-commit` | Validate and stage row(s) |
 | `C-c C-k` | `clutch-result-insert-cancel` | Cancel and close buffer |
 
 ---
@@ -637,9 +644,12 @@ Footer shows staging status: `E-2  D-1  I-3  commit:C-c C-c  discard:C-c C-k`
 #### Insert Row
 
 1. `i` → open `clutch-result-insert-mode` buffer
-2. Each column displayed with field name (colored) + metadata tags + editable value
-3. Local validation on idle before staging
-4. `C-c C-c` → validate all fields → generate `INSERT INTO table (cols) VALUES (...)`
+2. Default layout is sparse: required / no-default fields first, plus any prefilled values
+3. `I` clones the current result/record row into a prefilled insert form without primary-key values
+4. `C-c C-a` expands back to all columns without dropping existing values
+5. `C-c C-y` imports TSV / CSV: one row prefills the form, multiple rows stage pending inserts immediately
+6. Local validation runs on idle before staging
+7. `C-c C-c` validates all visible/hidden field values and stages pending INSERT rows
 
 ### Mutation SQL Generation Rules
 
@@ -657,13 +667,28 @@ Each field in the insert buffer is annotated:
 
 | Tag | Condition | Behavior |
 |-----|-----------|----------|
-| `[generated]` | AUTO_INCREMENT, SERIAL, `GENERATED ALWAYS` | Prefilled with `<generated>`, read-only placeholder |
-| `[default=X]` | Column has explicit default | Placeholder `<default>` if not edited |
+| `[generated]` | AUTO_INCREMENT, SERIAL, `GENERATED ALWAYS` | Hidden in sparse mode; shown in all-column layout for awareness |
+| `[default=X]` | Column has explicit default | Hidden in sparse mode unless already prefilled; shown in all-column layout |
 | `[required]` | NOT NULL with no default | Error if submitted empty |
 | `[enum]` | ENUM or SET type | CAPF dropdown with allowed values |
 | `[bool]` | BOOLEAN type | Toggle editor |
 | `[json]` | JSON/JSONB type | Editor with syntax validation |
 | (no tag) | Regular column | Normal text input |
+
+### Sparse vs All-Column Layout
+
+- Sparse mode is the default insert view
+- Sparse mode shows non-generated columns that are required, have no default, or already carry a value
+- `C-c C-a` toggles to all columns and back
+- Hidden-field values are kept in canonical insert state, so toggling never drops edits
+
+### Delimited Import
+
+- `C-c C-y` reads from the active region, or the kill ring when no region is active
+- Single-row import updates the current form in place
+- Multi-row import stages pending inserts directly
+- Header-based imports map by column name
+- Header-less imports map positionally using the fields currently visible in the insert buffer
 
 ### Validation
 
