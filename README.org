@@ -326,6 +326,10 @@ Tip: the result-buffer status line uses compact staged-change tokens:
 =E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts.
 When a query result is not updateable because no primary key was detected,
 the same line shows =PK missing= and =E/D off=.
+Tip: SQL-backed result refreshes (=g=, =W=, sort, paging) keep the column
+header visible; busy state temporarily replaces the elapsed-time segment in the
+footer with a spinner instead of replacing the table header with the query-console
+connection header.
 Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the
 result transient as the exact staged SQL batch.
 

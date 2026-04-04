@@ -588,16 +588,17 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
     (aref clutch--spinner-frames clutch--spinner-index)))
 
 (defun clutch--update-mode-line ()
-  "Update mode-line and header-line with connection status."
+  "Update buffer-local execution UI with connection status."
   (let* ((base (if (derived-mode-p 'clutch-repl-mode) "clutch-repl" "clutch"))
          (spinner (clutch--spinner-string)))
     (setq mode-name
           (if (and clutch--executing-p spinner)
               (concat base " " (propertize spinner 'face 'success))
             base)))
-  ;; Use :eval so line-number-display-width is recomputed on each redraw,
-  ;; keeping alignment correct when display-line-numbers-mode is toggled.
-  (setq header-line-format '((:eval (clutch--build-connection-header-line))))
+  (when (derived-mode-p 'clutch-mode 'clutch-repl-mode)
+    ;; Use :eval so line-number-display-width is recomputed on each redraw,
+    ;; keeping alignment correct when display-line-numbers-mode is toggled.
+    (setq header-line-format '((:eval (clutch--build-connection-header-line)))))
   (force-mode-line-update))
 
 ;;;; JDBC backend detection

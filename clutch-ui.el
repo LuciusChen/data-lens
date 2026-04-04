@@ -8,6 +8,9 @@
 
 (require 'cl-lib)
 
+(defvar clutch--executing-p)
+(declare-function clutch--spinner-string "clutch-connection" ())
+
 (defvar-local clutch--aggregate-summary nil
   "Last aggregate summary plist for result footer, or nil.
 Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
@@ -566,11 +569,22 @@ the page length.  TOTAL-ROWS describes the full result size when known."
            (clutch--tx-header-line-segment clutch-connection)
            (clutch--footer-sort-part)
            (clutch--footer-mutation-capability-part)
-           (clutch--footer-pending-part)
-           (when clutch--query-elapsed
-             (concat (clutch--footer-icon '(mdicon . "nf-md-timer_outline") "⏱" hi)
-                     (propertize (clutch--format-elapsed clutch--query-elapsed)
-                                 'face hi)))))))
+           (clutch--footer-pending-part)))))
+
+(defun clutch--footer-timing-part ()
+  "Return the dynamic footer timing segment for the current result buffer."
+  (let ((hi 'font-lock-keyword-face))
+    (when-let* ((payload (cond
+                          (clutch--executing-p
+                           (and (clutch--spinner-string)
+                                (propertize (clutch--spinner-string)
+                                            'face 'success)))
+                          (clutch--query-elapsed
+                           (propertize
+                            (clutch--format-elapsed clutch--query-elapsed)
+                            'face hi)))))
+      (concat (clutch--footer-icon '(mdicon . "nf-md-timer_outline") "⏱" hi)
+              payload))))
 
 (defun clutch--footer-cursor-part ()
   "Return a mode-line segment showing the current row and column at point."
@@ -589,25 +603,28 @@ the page length.  TOTAL-ROWS describes the full result size when known."
                 (propertize col-name 'face hi))))))
 
 (defun clutch--render-footer (row-count page-num page-size total-rows)
-  "Return the mode-line footer string for pagination state.
+  "Return the static footer string for pagination state.
 ROW-COUNT and PAGE-NUM describe the visible page, and PAGE-SIZE sets
 the page length.  TOTAL-ROWS describes the full result size when known."
   (let ((sep (propertize "  •  " 'face 'font-lock-comment-face)))
     (mapconcat #'identity
-               (append (clutch--footer-main-parts row-count page-num page-size
-                                                  total-rows)
-                       (clutch--footer-filter-parts))
+               (clutch--footer-main-parts row-count page-num page-size
+                                          total-rows)
                sep)))
 
 (defun clutch--footer-mode-line-display ()
   "Return the display-ready mode-line string with dynamic cursor position."
   (let ((badge (clutch--disconnected-badge))
         (base (or clutch--footer-base-string ""))
+        (timing (clutch--footer-timing-part))
+        (filters (clutch--footer-filter-parts))
         (cursor (clutch--footer-cursor-part))
         (sep (propertize "  •  " 'face 'font-lock-comment-face)))
     (concat (propertize " " 'display '(space :align-to 0))
             (when badge (concat badge sep))
             base
+            (when timing (concat sep timing))
+            (when filters (concat sep (string-join filters sep)))
             (when cursor (concat sep cursor)))))
 
 (defun clutch--effective-widths ()

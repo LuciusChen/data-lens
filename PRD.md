@@ -173,6 +173,9 @@ SQL query editing and execution mode. The primary entry point for interacting wi
 **Buffer name pattern**: `*clutch-result: USER@HOST:PORT/DB*`
 
 Interactive result browsing with column paging, sorting, filtering, mutations.
+The result buffer owns the table header line; SQL-backed refreshes keep that
+header visible and reuse the elapsed-time footer slot as a spinner while the
+query is still running.
 
 **Buffer-local state**:
 

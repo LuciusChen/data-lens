@@ -2079,6 +2079,8 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         ;; Mode-line is now just the mode name.
         (clutch--update-mode-line)
         (should (equal mode-name "clutch"))
+        (should (equal header-line-format
+                       '((:eval (clutch--build-connection-header-line)))))
         ;; Auto-commit: shows Tx: Auto in success face.
         (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
                    (lambda (_conn) nil)))
@@ -2109,6 +2111,49 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (clutch--update-mode-line)
       (should (equal mode-name "clutch ⠹"))
       (should-not (string-match-p "\\[\\.\\.\\.\\]" mode-name)))))
+
+(ert-deftest clutch-test-result-footer-shows-spinner-when-executing ()
+  "Busy result buffers should show the current spinner frame in the footer."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (let ((clutch--footer-base-string "Σ 1 of ? rows")
+          (clutch--executing-p t)
+          (clutch--spinner-timer t)
+          (clutch--spinner-index 2))
+      (should (string-match-p "⠹"
+                              (clutch--footer-mode-line-display))))))
+
+(ert-deftest clutch-test-result-footer-spinner-replaces-elapsed-time ()
+  "Busy result buffers should use the elapsed-time slot for the spinner."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (let ((clutch--footer-base-string "Σ 1 of ? rows")
+          (clutch--query-elapsed 0.042)
+          (clutch--executing-p t)
+          (clutch--spinner-timer t)
+          (clutch--spinner-index 2))
+      (cl-letf (((symbol-function 'clutch--format-elapsed)
+                 (lambda (_seconds) "42ms")))
+        (let ((footer (substring-no-properties
+                       (clutch--footer-mode-line-display))))
+          (should (string-match-p "⏱ +⠹" footer))
+          (should-not (string-match-p "42ms" footer)))))))
+
+(ert-deftest clutch-test-result-footer-restores-elapsed-time-when-idle ()
+  "Idle result buffers should show elapsed time in the timing slot."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (let ((clutch--footer-base-string "Σ 1 of ? rows")
+          (clutch--query-elapsed 0.042)
+          (clutch--executing-p nil)
+          (clutch--spinner-timer t)
+          (clutch--spinner-index 2))
+      (cl-letf (((symbol-function 'clutch--format-elapsed)
+                 (lambda (_seconds) "42ms")))
+        (let ((footer (substring-no-properties
+                       (clutch--footer-mode-line-display))))
+          (should (string-match-p "⏱ +42ms" footer))
+          (should-not (string-match-p "⠹" footer)))))))
 
 (ert-deftest clutch-test-spinner-tick-stops-when-no-busy-buffers ()
   "Spinner timer should stop itself when no buffers are busy."
@@ -4478,6 +4523,29 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should spinner-started)
         (should execute-saw-spinner)
         (should-not clutch--executing-p)))))
+
+(ert-deftest clutch-test-execute-in-result-buffer-keeps-table-header-line ()
+  "Executing from a result buffer should not replace the table header line."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (let ((clutch-connection 'fake-conn)
+          (clutch--executing-p nil)
+          (header-line-format " result header")
+          seen-header)
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch--check-pending-changes) #'ignore)
+                ((symbol-function 'clutch--clear-error-position-overlay) #'ignore)
+                ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
+                ((symbol-function 'clutch--require-risky-dml-confirmation) #'ignore)
+                ((symbol-function 'clutch--spinner-start) #'ignore)
+                ((symbol-function 'redisplay) #'ignore)
+                ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
+                ((symbol-function 'clutch--execute-select)
+                 (lambda (&rest _args)
+                   (setq seen-header header-line-format))))
+        (clutch--execute "SELECT 1" clutch-connection)
+        (should (equal seen-header " result header"))
+        (should (equal header-line-format " result header"))))))
 
 (ert-deftest clutch-test-execute-quit-prefers-backend-interrupt-over-disconnect ()
   "Quit should keep the session when a backend interrupt succeeds."
