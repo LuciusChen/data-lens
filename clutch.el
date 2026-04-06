@@ -2483,6 +2483,7 @@ Priority: region rows > current row."
     (define-key map "S" #'clutch-result-sort-by-column-desc)
     (define-key map "c" #'clutch-result-copy-dispatch)
     (define-key map "v" #'clutch-result-view-value)
+    (define-key map "|" #'clutch-result-shell-command-on-cell)
     (define-key map "?" #'clutch-result-column-info)
     (define-key map "W" #'clutch-result-apply-filter)
     (define-key map (kbd "RET") #'clutch-result-open-record)
@@ -3593,6 +3594,23 @@ Selects JSON, XML, or binary string view based on column type and content."
   (pcase-let ((`(,_ridx ,cidx ,val) (or (clutch-result--cell-at-point)
                                          (user-error "No cell at point"))))
     (clutch--dispatch-view val (nth cidx clutch--result-column-defs))))
+
+;;;###autoload
+(defun clutch-result-shell-command-on-cell (command)
+  "Pipe the cell value at point through shell COMMAND and display the output."
+  (interactive "sShell command on cell: ")
+  (pcase-let ((`(,_ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
+                                          (user-error "No cell at point"))))
+    (let ((input (if (stringp val)
+                     val
+                   (clutch--format-value val))))
+      (clutch--view-in-buffer
+       (with-temp-buffer
+         (insert input)
+         (shell-command-on-region (point-min) (point-max) command t t)
+         (buffer-string))
+       "*clutch-shell-output*"
+       #'special-mode))))
 
 (defun clutch-result--build-insert-statements (indices col-indices table)
   "Return INSERT statement strings for INDICES rows using COL-INDICES into TABLE."
