@@ -8,15 +8,17 @@ Supports MySQL, PostgreSQL, and SQLite via pure Elisp backends, plus Oracle,
 SQL Server, DB2, Snowflake, and Amazon Redshift through a lightweight JVM
 sidecar (=clutch-jdbc-agent=, Java 17+).
 
-- =mysql.el= — pure Elisp MySQL wire protocol implementation (no external CLI needed)
-- =pg.el= — pure Elisp PostgreSQL wire protocol v3 implementation
 - =clutch-db.el= — generic database interface (=cl-defgeneric= dispatch)
 - =clutch-db-mysql.el= — MySQL backend adapter
 - =clutch-db-pg.el= — PostgreSQL backend adapter
 - =clutch-db-sqlite.el= — SQLite backend adapter (uses Emacs 29+ built-in sqlite)
 - =clutch-db-jdbc.el= — JDBC backend adapter (Oracle, SQL Server, DB2, Snowflake, Redshift, and any JDBC-compatible database)
 - =clutch.el= — interactive UI layer: single-page result browser, record view, FK navigation, editing, transient menus, REPL
-- =ob-clutch.el= — Org-Babel integration (mysql/postgresql/sqlite)
+- External native protocol dependencies:
+  - =mysql-wire= — pure Elisp MySQL wire protocol client
+  - =pg= — PostgreSQL client from =pg-el=
+
+For Org-Babel integration, install the separate =ob-clutch= package.
 
 #+CAPTION: Result browser with unified transient workflow (C-c ?), copy (c), full export (e), and horizontal scrolling via [ and ].
 [[file:docs/screenshots/clutch-overview.png]]
@@ -27,7 +29,8 @@ MariaDB 10.11 through the same =mysql= backend.  PostgreSQL support is
 functional and compatible, but has not been tested as extensively in daily
 use.
 SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external dependencies.
-The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar= (auto-downloaded on first use).
+The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar=
+(install via =M-x clutch-jdbc-ensure-agent=).
 For backend-specific implementation notes, see
 [[file:docs/native-backends.md][docs/native-backends.md]] for MySQL / PostgreSQL / SQLite and
 [[file:docs/jdbc-agent-protocol.md][docs/jdbc-agent-protocol.md]] for JDBC.
@@ -99,9 +102,15 @@ Clone this repository and add it to your =load-path=
 (skip this if installed via a package manager):
 
 #+begin_src emacs-lisp
+(add-to-list 'load-path "/path/to/mysql-wire")
+(add-to-list 'load-path "/path/to/pg-el")
 (add-to-list 'load-path "/path/to/clutch")
 (require 'clutch)
 #+end_src
+
+When installed from MELPA, =mysql-wire= and =pg= are pulled in as package
+dependencies.  For Org-Babel support, install the separate =ob-clutch=
+package.
 
 * Interactive Client
 
@@ -880,8 +889,9 @@ In the result buffer, the *Edit* group in the transient menu provides the unifie
 
 ** Org-Babel Integration
 
-Execute SQL directly in org files.  All backends (MySQL, PostgreSQL, SQLite,
-and JDBC databases) are supported via =ob-clutch.el=.
+Execute SQL directly in org files via the separate =ob-clutch= package.  It
+bridges clutch connections into Org-Babel block types for MySQL, PostgreSQL,
+SQLite, and the generic =clutch= backend used for JDBC databases.
 
 Configuration:
 
@@ -943,7 +953,7 @@ Generic form with explicit backend — required for JDBC databases:
 : SELECT TOP 10 * FROM sys.tables;
 : #+end_src
 
-Compatibility entry files:
+Compatibility entry files live in the =ob-clutch= package:
 - =ob-mysql.el=, =ob-postgresql.el=, =ob-sqlite.el= — thin language entry points for the named block types.
 - =ob-clutch.el= — core execution logic; also registers the generic =clutch= block type.
 
@@ -1016,72 +1026,33 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
 
 * Native Backend Usage
 
-For =mysql.el=, =pg.el=, and SQLite connection examples, TLS notes, timeout
+For =mysql-wire=, =pg=, and SQLite connection examples, TLS notes, timeout
 behavior, and helper APIs, see [[file:docs/native-backends.md][docs/native-backends.md]].
 
 * Testing
 
 ** Unit tests (no server required)
 
-=test/clutch-test.el= — UI layer, ~276 tests covering: value formatting and
-cell rendering, column width and single-page result layout, insert and edit buffer workflow
+=test/clutch-test.el= — UI layer, covering value formatting and cell rendering,
+column width and single-page result layout, insert and edit buffer workflow
 (TAB navigation, local validation, JSON sub-editor, enum/temporal completion),
 staged-commit lifecycle (PK-vec based edit/insert/delete, discard, commit
 ordering), object workflow and schema refresh state, SQL keyword completion
-(CAPF), REPL, MySQL/PG protocol correctness (IEEE 754 float decoding, PG type
-dispatch, PBKDF2-SHA256, buffer read-offset tracking).
+(CAPF), and REPL behavior.
 
 =test/clutch-db-test.el= — database backend layer, ~59 tests covering: JDBC
 connection and timeout mapping, query-timeout clamping, transaction
 (commit/rollback/autocommit toggle), schema refresh, cursor pagination, driver
 installation (Oracle, SQL Server, Redshift), agent JAR validation and lifecycle,
-=clutch-db-live-p= identity check, RPC timeout kill, cross-backend value
-formatting and null handling.
+=clutch-db-live-p= identity check, RPC timeout kill, native backend adapter
+mapping (mysql-wire / pg / sqlite), and cross-backend value formatting and null
+handling.
+
+The pure protocol packages (=mysql-wire= and =pg=) and the Org-Babel bridge
+(=ob-clutch=) now live in separate repositories and carry their own focused test
+suites.
 
 See =CLAUDE.md= §Pre-Commit Checklist for exact test commands.
-
-** MySQL live tests (require a running MySQL)
-
-#+begin_src sh
-docker run --rm -e MYSQL_ROOT_PASSWORD=testpass -e MYSQL_USER=testuser \
-  -e MYSQL_PASSWORD=testpass -e MYSQL_DATABASE=testdb -p 3307:3306 mysql:8
-
-mysql -h 127.0.0.1 -P 3307 -u testuser -ptestpass testdb < test/test-wide-table.sql
-emacs -batch -L . -l ert -l mysql -l test/mysql-test.el \
-  --eval '(setq mysql-tls-verify-server nil)' \
-  --eval '(setq mysql-test-password "testpass")' \
-  --eval '(setq mysql-test-port 3307)' \
-  -f ert-run-tests-batch-and-exit
-#+end_src
-
-For local MySQL 8 containers, this =mysql.el= client may need TLS for
-=caching_sha2_password= authentication.  Container certificates are usually
-self-signed, so either bind =mysql-tls-verify-server= to =nil= for local live
-tests as above, or install the container CA in =mysql-tls-trustfiles=.
-For MySQL, =:ssl-mode disabled= is the explicit opt-out from TLS and auto-retry;
-use it only when the server actually permits non-TLS authentication.  =off=
-and =:tls nil= remain accepted as compatibility forms.
-
-The same caveat applies to clutch's backend live tests in
-=test/clutch-db-test.el= when they target a local MySQL 8 container.
-
-** PostgreSQL live tests (require a running PostgreSQL)
-
-#+begin_src sh
-docker run --rm -e POSTGRES_USER=testuser -e POSTGRES_PASSWORD=testpass \
-  -e POSTGRES_DB=testdb -p 5433:5432 postgres:16-alpine
-
-emacs -batch -L . -l ert -l pg -l test/pg-test.el \
-  --eval '(setq pg-test-password "testpass")' \
-  --eval '(setq pg-test-port 5433)' \
-  -f ert-run-tests-batch-and-exit
-#+end_src
-
-For PostgreSQL, =:sslmode prefer= is the closest match to libpq's default
-negotiation style.  =:sslmode require= and =:sslmode verify-full= both force
-TLS; the latter uses the current =pg-tls-verify-server= setting for hostname
-and certificate verification.  =:tls t= and =:tls nil= remain available as
-shorthand for =require= and =disable=.
 
 * Roadmap
 

@@ -1,6 +1,10 @@
-;;; clutch-bench.el --- Lightweight live benchmarks for clutch -*- lexical-binding: t; -*-
+;;; clutch-bench.el --- Performance benchmarks for clutch -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Free Software Foundation, Inc.
+
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 

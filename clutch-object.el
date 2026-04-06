@@ -1,5 +1,11 @@
 ;;; clutch-object.el --- Object discovery and describe workflow -*- lexical-binding: t; -*-
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;;; Commentary:
 
 ;; Internal object discovery, describe, action, and Embark helpers loaded from `clutch.el'.

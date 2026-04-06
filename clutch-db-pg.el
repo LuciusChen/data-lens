@@ -2,6 +2,12 @@
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;; This file is part of clutch.
 
 ;; clutch is free software: you can redistribute it and/or modify
@@ -20,7 +26,8 @@
 ;;; Commentary:
 
 ;; PostgreSQL backend for the clutch generic database interface.
-;; Implements all `clutch-db-*' generics by dispatching on `pg-conn'.
+;; Implements all `clutch-db-*' generics by dispatching on `pgcon'.
+;; Adapted for upstream pg-el (Eric Marsden, https://github.com/emarsden/pg-el).
 
 ;;; Code:
 
@@ -28,23 +35,53 @@
 (require 'clutch-db)
 (require 'pg)
 
+(defvar pg-connect-timeout)
+(defvar pg-read-timeout)
+
+(declare-function pg-result "pg" (result what &rest arg))
+(declare-function pg-exec "pg" (con &rest args))
+(declare-function pg-connect-plist "pg" (dbname user &rest args))
+(declare-function pg-disconnect "pg" (con))
+(declare-function pg-cancel "pg" (con))
+(declare-function pg-connection-busy-p "pg" (con))
+(declare-function pgcon-process "pg" (object))
+(declare-function pgcon-dbname "pg" (object))
+(declare-function pgcon-connect-plist "pg" (object))
+(declare-function pg-escape-identifier "pg" (identifier))
+(declare-function pg-escape-literal "pg" (string))
 ;;;; OID → type-category mapping
 
+(defconst clutch-db-pg--oid-bool 16)
+(defconst clutch-db-pg--oid-bytea 17)
+(defconst clutch-db-pg--oid-int8 20)
+(defconst clutch-db-pg--oid-int2 21)
+(defconst clutch-db-pg--oid-int4 23)
+(defconst clutch-db-pg--oid-json 114)
+(defconst clutch-db-pg--oid-float4 700)
+(defconst clutch-db-pg--oid-float8 701)
+(defconst clutch-db-pg--oid-varchar 1043)
+(defconst clutch-db-pg--oid-date 1082)
+(defconst clutch-db-pg--oid-time 1083)
+(defconst clutch-db-pg--oid-timestamp 1114)
+(defconst clutch-db-pg--oid-timestamptz 1184)
+(defconst clutch-db-pg--oid-numeric 1700)
+(defconst clutch-db-pg--oid-jsonb 3802)
+
 (defconst clutch-db-pg--type-category-alist
-  `((,pg-oid-int2      . numeric)
-    (,pg-oid-int4      . numeric)
-    (,pg-oid-int8      . numeric)
-    (,pg-oid-float4    . numeric)
-    (,pg-oid-float8    . numeric)
-    (,pg-oid-numeric   . numeric)
-    (,pg-oid-bool      . text)
-    (,pg-oid-json      . json)
-    (,pg-oid-jsonb     . json)
-    (,pg-oid-bytea     . blob)
-    (,pg-oid-date      . date)
-    (,pg-oid-time      . time)
-    (,pg-oid-timestamp . datetime)
-    (,pg-oid-timestamptz . datetime))
+  `((,clutch-db-pg--oid-int2 . numeric)
+    (,clutch-db-pg--oid-int4 . numeric)
+    (,clutch-db-pg--oid-int8 . numeric)
+    (,clutch-db-pg--oid-float4 . numeric)
+    (,clutch-db-pg--oid-float8 . numeric)
+    (,clutch-db-pg--oid-numeric . numeric)
+    (,clutch-db-pg--oid-bool . text)
+    (,clutch-db-pg--oid-json . json)
+    (,clutch-db-pg--oid-jsonb . json)
+    (,clutch-db-pg--oid-bytea . blob)
+    (,clutch-db-pg--oid-date . date)
+    (,clutch-db-pg--oid-time . time)
+    (,clutch-db-pg--oid-timestamp . datetime)
+    (,clutch-db-pg--oid-timestamptz . datetime))
   "Alist mapping PostgreSQL OIDs to type-category symbols.")
 
 (defun clutch-db-pg--type-category (oid)
@@ -55,48 +92,88 @@
 (defun clutch-db-pg--convert-columns (pg-columns)
   "Convert PG-COLUMNS to `clutch-db' column plists."
   (mapcar (lambda (col)
-            (list :name (plist-get col :name)
-                  :type-category (clutch-db-pg--type-category
-                                  (plist-get col :type-oid))))
+            (pcase-let ((`(,name ,type-oid . ,_) col))
+              (list :name name
+                    :type-category (clutch-db-pg--type-category type-oid))))
           pg-columns))
 
 (defun clutch-db-pg--wrap-result (pg-result)
   "Convert PG-RESULT to a `clutch-db-result'."
-  (let ((cols (pg-result-columns pg-result)))
+  (let ((cols (clutch-db-pg--columns pg-result)))
     (make-clutch-db-result
-     :connection (pg-result-connection pg-result)
+     :connection (clutch-db-pg--result-connection pg-result)
      :columns (when cols (clutch-db-pg--convert-columns cols))
-     :rows (pg-result-rows pg-result)
-     :affected-rows (pg-result-affected-rows pg-result)
+     :rows (clutch-db-pg--rows pg-result)
+     :affected-rows (clutch-db-pg--affected-rows pg-result)
      :last-insert-id nil
      :warnings nil)))
 
-(defconst clutch-db-pg--current-schema-cache-key "clutch_current_schema"
+(defun clutch-db-pg--rows (pg-result)
+  "Return tuple rows from PG-RESULT."
+  (pg-result pg-result :tuples))
+
+(defun clutch-db-pg--columns (pg-result)
+  "Return attribute metadata from PG-RESULT."
+  (pg-result pg-result :attributes))
+
+(defun clutch-db-pg--result-connection (pg-result)
+  "Return the originating connection from PG-RESULT."
+  (pg-result pg-result :connection))
+
+(defun clutch-db-pg--affected-rows (pg-result)
+  "Return affected row count parsed from PG-RESULT status, or nil."
+  (when-let* ((status (pg-result pg-result :status))
+              (parts (split-string status))
+              (tail (car (last parts))))
+    (when (string-match-p "\\`[0-9]+\\'" tail)
+      (string-to-number tail))))
+
+(defun clutch-db-pg--connect-value (conn key)
+  "Return connection plist KEY for CONN."
+  (plist-get (pgcon-connect-plist conn) key))
+
+(defconst clutch-db-pg--current-schema-cache-key :clutch-current-schema
   "Connection-local cache key for the effective PostgreSQL schema.")
 
 (defun clutch-db-pg--cached-current-schema (conn)
   "Return cached current schema for CONN, or nil."
-  (cdr (assoc-string clutch-db-pg--current-schema-cache-key
-                     (pg-conn-parameters conn)
-                     t)))
+  (plist-get (pgcon-connect-plist conn) clutch-db-pg--current-schema-cache-key))
 
 (defun clutch-db-pg--cache-current-schema (conn schema)
   "Cache SCHEMA as the current schema for CONN."
-  (setf (pg-conn-parameters conn)
-        (cons (cons clutch-db-pg--current-schema-cache-key schema)
-              (cl-remove-if
-               (lambda (entry)
-                 (string-equal (car entry) clutch-db-pg--current-schema-cache-key))
-               (pg-conn-parameters conn))))
+  (let ((plist (plist-put (pgcon-connect-plist conn)
+                          clutch-db-pg--current-schema-cache-key
+                          schema)))
+    (setf (slot-value conn 'connect-plist) plist))
   schema)
+
+(defun clutch-db-pg--set-statement-timeout (conn timeout-seconds)
+  "Set CONN statement_timeout to TIMEOUT-SECONDS, or reset when nil."
+  (pg-exec conn
+           (if timeout-seconds
+               (format "SET statement_timeout = %d" (* timeout-seconds 1000))
+             "SET statement_timeout = DEFAULT")))
 
 (defun clutch-db-pg--set-search-path (conn schema)
   "Set CONN search_path to SCHEMA and update the local cache."
   (let ((schema (string-trim schema)))
-    (pg-query conn
-              (format "SET search_path TO %s"
-                      (pg-escape-identifier schema)))
+    (pg-exec conn
+             (format "SET search_path TO %s"
+                     (pg-escape-identifier schema)))
     (clutch-db-pg--cache-current-schema conn schema)))
+
+(defun clutch-db-pg--prefer-fallback-p (err)
+  "Return non-nil when ERR indicates the server refused TLS for prefer mode."
+  (string-match-p
+   "Couldn't establish TLS connection to PostgreSQL: read char"
+   (error-message-string err)))
+
+(defun clutch-db-pg--tls-options (sslmode)
+  "Return upstream pg-el TLS options for canonical SSLMODE."
+  (pcase sslmode
+    ('verify-full '(:verify-error t :verify-hostname-error t))
+    ((or 'require 'prefer) t)
+    (_ nil)))
 
 ;;;; Connect function
 
@@ -107,30 +184,47 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
 `:tls' is a convenience shortcut; `:sslmode' is the canonical PostgreSQL name."
   (setq params (clutch-db--normalize-connect-params 'pg params))
   (let ((schema (plist-get params :schema))
-        (tls-mode (plist-get params :clutch-tls-mode))
         (sslmode (plist-get params :sslmode))
+        (connect-timeout (plist-get params :connect-timeout))
+        (read-idle-timeout (plist-get params :read-idle-timeout))
+        (query-timeout (plist-get params :query-timeout))
         conn)
-    (cl-remf params :clutch-tls-mode)
-    (pcase tls-mode
-      ('default
-       (cl-remf params :sslmode)
-       (cl-remf params :tls))
-      ('disable
-       (setq params (plist-put params :sslmode 'disable))
-       (cl-remf params :tls))
-      ('prefer
-       (setq params (plist-put params :sslmode 'prefer))
-       (cl-remf params :tls))
-      ('require
-       (setq params (plist-put params :sslmode (or sslmode 'require)))
-       (cl-remf params :tls)))
     (condition-case err
         (progn
-          (setq conn
-                (apply #'pg-connect
-                       (cl-loop for (k v) on params by #'cddr
-                                unless (memq k '(:sql-product :backend :schema))
-                                append (list k v))))
+          (let* ((pg-connect-timeout (or connect-timeout pg-connect-timeout))
+                 (pg-read-timeout (or read-idle-timeout pg-read-timeout))
+                 (dbname (plist-get params :database))
+                 (user (plist-get params :user))
+                 (connect-args
+                  (cl-loop for key in '(:password :host :port)
+                           when (plist-member params key)
+                           append (list key (plist-get params key)))))
+            (setq conn
+                  (pcase sslmode
+                    ('prefer
+                     (if (and (fboundp 'gnutls-available-p)
+                              (gnutls-available-p))
+                         (condition-case tls-err
+                             (apply #'pg-connect-plist
+                                    dbname user
+                                    (append connect-args
+                                            (list :tls-options
+                                                  (clutch-db-pg--tls-options sslmode))))
+                           (pg-protocol-error
+                            (if (clutch-db-pg--prefer-fallback-p tls-err)
+                                (apply #'pg-connect-plist dbname user connect-args)
+                              (signal (car tls-err) (cdr tls-err)))))
+                       (apply #'pg-connect-plist dbname user connect-args)))
+                    ((or 'require 'verify-full)
+                     (apply #'pg-connect-plist
+                            dbname user
+                            (append connect-args
+                                    (list :tls-options
+                                          (clutch-db-pg--tls-options sslmode)))))
+                    (_
+                     (apply #'pg-connect-plist dbname user connect-args)))))
+          (when query-timeout
+            (clutch-db-pg--set-statement-timeout conn query-timeout))
           (when schema
             (clutch-db-pg--set-search-path conn schema))
           conn)
@@ -142,39 +236,41 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
 
 ;;;; Lifecycle methods
 
-(cl-defmethod clutch-db-disconnect ((conn pg-conn))
+(cl-defmethod clutch-db-disconnect ((conn pgcon))
   "Disconnect PostgreSQL CONN."
   (condition-case nil
       (pg-disconnect conn)
     (pg-error nil)))
 
-(cl-defmethod clutch-db-live-p ((conn pg-conn))
+(cl-defmethod clutch-db-live-p ((conn pgcon))
   "Return non-nil if PostgreSQL CONN is live."
   (and conn
-       (pg-conn-p conn)
-       (process-live-p (pg-conn-process conn))))
+       (cl-typep conn 'pgcon)
+       (process-live-p (pgcon-process conn))))
 
-(cl-defmethod clutch-db-init-connection ((_conn pg-conn))
+(cl-defmethod clutch-db-init-connection ((_conn pgcon))
   "Initialize PostgreSQL CONN.
 No special init needed — encoding is set in startup message.")
 
 ;;;; Query methods
 
-(cl-defmethod clutch-db-query ((conn pg-conn) sql)
+(cl-defmethod clutch-db-query ((conn pgcon) sql)
   "Execute SQL on PostgreSQL CONN, returning a `clutch-db-result'."
   (condition-case err
-      (clutch-db-pg--wrap-result (pg-query conn sql))
+      (clutch-db-pg--wrap-result (pg-exec conn sql))
     (pg-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod clutch-db-interrupt-query ((conn pg-conn))
+(cl-defmethod clutch-db-interrupt-query ((conn pgcon))
   "Interrupt the current PostgreSQL query on CONN without dropping the session."
   (condition-case nil
-      (pg-cancel-query conn)
+      (progn
+        (pg-cancel conn)
+        t)
     (pg-error nil)))
 
-(cl-defmethod clutch-db-build-paged-sql ((_conn pg-conn) base-sql
+(cl-defmethod clutch-db-build-paged-sql ((_conn pgcon) base-sql
                                              page-num page-size
                                              &optional order-by)
   "Build a paginated SQL query for PostgreSQL from BASE-SQL.
@@ -185,43 +281,43 @@ controls the optional sort clause."
 
 ;;;; SQL dialect methods
 
-(cl-defmethod clutch-db-escape-identifier ((_conn pg-conn) name)
+(cl-defmethod clutch-db-escape-identifier ((_conn pgcon) name)
   "Escape NAME as a PostgreSQL identifier (double-quoted)."
   (pg-escape-identifier name))
 
-(cl-defmethod clutch-db-escape-literal ((_conn pg-conn) value)
+(cl-defmethod clutch-db-escape-literal ((_conn pgcon) value)
   "Escape VALUE as a PostgreSQL string literal."
   (pg-escape-literal value))
 
 ;;;; Schema methods
 
-(cl-defmethod clutch-db-list-schemas ((conn pg-conn))
+(cl-defmethod clutch-db-list-schemas ((conn pgcon))
   "Return visible schema names for PostgreSQL CONN."
   (condition-case err
-      (let ((result (pg-query
+      (let ((result (pg-exec
                      conn
                      "SELECT schema_name FROM information_schema.schemata \
 WHERE schema_name <> 'information_schema' \
   AND schema_name NOT LIKE 'pg\\_%' ESCAPE '\\' \
 ORDER BY schema_name")))
-        (mapcar #'car (pg-result-rows result)))
+        (mapcar #'car (clutch-db-pg--rows result)))
     (pg-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod clutch-db-current-schema ((conn pg-conn))
+(cl-defmethod clutch-db-current-schema ((conn pgcon))
   "Return the current effective schema for PostgreSQL CONN."
   (or (clutch-db-pg--cached-current-schema conn)
       (condition-case err
-          (let* ((result (pg-query conn "SELECT current_schema()"))
-                 (schema (caar (pg-result-rows result))))
+          (let* ((result (pg-exec conn "SELECT current_schema()"))
+                 (schema (caar (clutch-db-pg--rows result))))
             (when schema
               (clutch-db-pg--cache-current-schema conn schema)))
         (pg-error
          (signal 'clutch-db-error
                  (list (error-message-string err)))))))
 
-(cl-defmethod clutch-db-set-current-schema ((conn pg-conn) schema)
+(cl-defmethod clutch-db-set-current-schema ((conn pgcon) schema)
   "Switch PostgreSQL CONN to SCHEMA via search_path."
   (condition-case err
       (clutch-db-pg--set-search-path conn schema)
@@ -229,23 +325,23 @@ ORDER BY schema_name")))
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod clutch-db-list-tables ((conn pg-conn))
+(cl-defmethod clutch-db-list-tables ((conn pgcon))
   "Return table names for the current PostgreSQL database on CONN."
   (condition-case err
-      (let ((result (pg-query
+      (let ((result (pg-exec
                      conn
                      "SELECT tablename FROM pg_tables \
 WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
 ORDER BY tablename")))
-        (mapcar #'car (pg-result-rows result)))
+        (mapcar #'car (clutch-db-pg--rows result)))
     (pg-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod clutch-db-list-table-entries ((conn pg-conn))
+(cl-defmethod clutch-db-list-table-entries ((conn pgcon))
   "Return table/view entry plists for the current PostgreSQL schema on CONN."
   (condition-case err
-      (let ((result (pg-query
+      (let ((result (pg-exec
                      conn
                      "SELECT name, type
 FROM (
@@ -265,21 +361,21 @@ ORDER BY name")))
                    :type type
                    :schema "current_schema"
                    :source-schema "current_schema")))
-         (pg-result-rows result)))
+         (clutch-db-pg--rows result)))
     (pg-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod clutch-db-list-columns ((conn pg-conn) table)
+(cl-defmethod clutch-db-list-columns ((conn pgcon) table)
   "Return column names for TABLE on PostgreSQL CONN."
   (condition-case err
-      (let ((result (pg-query
+      (let ((result (pg-exec
                      conn
                      (format "SELECT column_name FROM information_schema.columns \
 WHERE table_name = %s AND table_schema = current_schema() \
 ORDER BY ordinal_position"
                              (pg-escape-literal table)))))
-        (mapcar #'car (pg-result-rows result)))
+        (mapcar #'car (clutch-db-pg--rows result)))
     (pg-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
@@ -295,13 +391,13 @@ ORDER BY ordinal_position"
         (push (format "DEFAULT %s" default-val) parts))
       (format "    %s" (mapconcat #'identity (nreverse parts) " ")))))
 
-(cl-defmethod clutch-db-show-create-table ((conn pg-conn) table)
+(cl-defmethod clutch-db-show-create-table ((conn pgcon) table)
   "Return synthesized DDL for TABLE on PostgreSQL CONN.
 PostgreSQL has no SHOW CREATE TABLE, so we build DDL from
 information_schema."
   (condition-case err
       (let* ((cols-result
-              (pg-query
+              (pg-exec
                conn
                (format "SELECT column_name, data_type, \
 character_maximum_length, column_default, is_nullable \
@@ -310,7 +406,7 @@ WHERE table_name = %s AND table_schema = current_schema() \
 ORDER BY ordinal_position"
                        (pg-escape-literal table))))
              (lines (mapcar #'clutch-db-pg--format-column-ddl
-                            (pg-result-rows cols-result))))
+                            (clutch-db-pg--rows cols-result))))
         (format "CREATE TABLE %s (\n%s\n);"
                 (pg-escape-identifier table)
                 (mapconcat #'identity lines ",\n")))
@@ -318,13 +414,13 @@ ORDER BY ordinal_position"
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod clutch-db-list-objects ((conn pg-conn) category)
+(cl-defmethod clutch-db-list-objects ((conn pgcon) category)
   "Return object entry plists for CATEGORY on PostgreSQL CONN."
   (condition-case err
       (pcase category
         ('indexes
          (let ((result
-                (pg-query
+                (pg-exec
                  conn
                  "SELECT i.indexname, i.tablename, ix.indisunique
 FROM pg_indexes i
@@ -339,10 +435,10 @@ ORDER BY i.tablename, i.indexname")))
                 (list :name name :type "INDEX" :schema "current_schema"
                       :source-schema "current_schema"
                       :target-table table-name :unique unique)))
-            (pg-result-rows result))))
+            (clutch-db-pg--rows result))))
         ('sequences
          (let ((result
-                (pg-query
+                (pg-exec
                  conn
                  "SELECT sequencename, min_value, max_value, increment_by, last_value
 FROM pg_sequences
@@ -354,10 +450,10 @@ ORDER BY sequencename")))
                 (list :name name :type "SEQUENCE" :schema "current_schema"
                       :source-schema "current_schema"
                       :min min :max max :increment increment :last last)))
-            (pg-result-rows result))))
+            (clutch-db-pg--rows result))))
         ('procedures
          (let ((result
-                (pg-query
+                (pg-exec
                  conn
                  "SELECT p.proname, p.oid
 FROM pg_proc p
@@ -371,10 +467,10 @@ ORDER BY p.proname")))
                 (list :name name :type "PROCEDURE" :schema "current_schema"
                       :source-schema "current_schema"
                       :identity (format "OID:%s" oid))))
-            (pg-result-rows result))))
+            (clutch-db-pg--rows result))))
         ('functions
          (let ((result
-                (pg-query
+                (pg-exec
                  conn
                  "SELECT p.proname, p.oid
 FROM pg_proc p
@@ -388,10 +484,10 @@ ORDER BY p.proname")))
                 (list :name name :type "FUNCTION" :schema "current_schema"
                       :source-schema "current_schema"
                       :identity (format "OID:%s" oid))))
-            (pg-result-rows result))))
+            (clutch-db-pg--rows result))))
         ('triggers
          (let ((result
-                (pg-query
+                (pg-exec
                  conn
                  "SELECT t.trigger_name, t.event_object_table, t.event_manipulation,
         t.action_timing, pg_t.oid
@@ -403,7 +499,7 @@ JOIN pg_trigger pg_t ON pg_t.tgrelid = c.oid
 WHERE t.trigger_schema = current_schema()
   AND NOT pg_t.tgisinternal
 ORDER BY t.event_object_table, t.trigger_name")))
-           (let ((rows (pg-result-rows result))
+           (let ((rows (clutch-db-pg--rows result))
                  grouped)
              (dolist (row rows (nreverse grouped))
                (pcase-let ((`(,name ,table-name ,event ,timing ,oid) row))
@@ -427,13 +523,13 @@ ORDER BY t.event_object_table, t.trigger_name")))
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod clutch-db-object-details ((conn pg-conn) entry)
+(cl-defmethod clutch-db-object-details ((conn pgcon) entry)
   "Return detail plists for PostgreSQL object ENTRY on CONN."
   (condition-case _err
       (pcase (upcase (or (plist-get entry :type) ""))
         ("INDEX"
          (let* ((result
-                 (pg-query
+                 (pg-exec
                   conn
                   (format "SELECT a.attname, k.ordinality,
        CASE WHEN ((pi.indoption::int2[])[k.ordinality] & 1) = 1
@@ -452,7 +548,7 @@ ORDER BY k.ordinality"
             (lambda (row)
               (pcase-let ((`(,name ,position ,descend) row))
                 (list :name name :position position :descend descend)))
-            (pg-result-rows result))))
+            (clutch-db-pg--rows result))))
         ((or "PROCEDURE" "FUNCTION")
          (let* ((oid (substring (plist-get entry :identity) 4))
                 (sql (concat
@@ -482,38 +578,38 @@ JOIN LATERAL generate_subscripts(COALESCE(p.proallargtypes,
                                           p.proargtypes::oid[]), 1) AS s(n) ON true
 WHERE p.oid = %s) args
 ORDER BY position" oid)))
-                (result (pg-query conn sql)))
+                (result (pg-exec conn sql)))
            (mapcar
             (lambda (row)
               (pcase-let ((`(,name ,type ,mode ,position) row))
                 (list :name name :type type :mode mode :position position)))
-            (pg-result-rows result))))
+            (clutch-db-pg--rows result))))
         (_ nil))
     (pg-error nil)))
 
-(cl-defmethod clutch-db-object-source ((conn pg-conn) entry)
+(cl-defmethod clutch-db-object-source ((conn pgcon) entry)
   "Return source text for PostgreSQL object ENTRY on CONN."
   (condition-case err
       (let ((oid (substring (plist-get entry :identity) 4)))
         (pcase (upcase (or (plist-get entry :type) ""))
           ((or "PROCEDURE" "FUNCTION")
-           (caar (pg-result-rows
-                  (pg-query conn (format "SELECT pg_get_functiondef(%s::oid)" oid)))))
+           (caar (clutch-db-pg--rows
+                  (pg-exec conn (format "SELECT pg_get_functiondef(%s::oid)" oid)))))
           ("TRIGGER"
-           (caar (pg-result-rows
-                  (pg-query conn (format "SELECT pg_get_triggerdef(%s::oid, true)" oid)))))
+           (caar (clutch-db-pg--rows
+                  (pg-exec conn (format "SELECT pg_get_triggerdef(%s::oid, true)" oid)))))
           (_ nil)))
     (pg-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod clutch-db-show-create-object ((conn pg-conn) entry)
+(cl-defmethod clutch-db-show-create-object ((conn pgcon) entry)
   "Return DDL text for PostgreSQL non-table ENTRY on CONN."
   (condition-case err
       (pcase (upcase (or (plist-get entry :type) ""))
         ("INDEX"
-         (caar (pg-result-rows
-                (pg-query
+         (caar (clutch-db-pg--rows
+                (pg-exec
                  conn
                  (format "SELECT pg_get_indexdef(idx.oid)
 FROM pg_class idx
@@ -523,8 +619,8 @@ WHERE idx.relkind = 'i'
   AND n.nspname = current_schema()"
                          (pg-escape-literal (plist-get entry :name)))))))
         ("VIEW"
-         (caar (pg-result-rows
-                (pg-query
+         (caar (clutch-db-pg--rows
+                (pg-exec
                  conn
                  (format "SELECT 'CREATE OR REPLACE VIEW ' || quote_ident(viewname) || E' AS\n' ||
        pg_get_viewdef((quote_ident(schemaname) || '.' || quote_ident(viewname))::regclass, true)
@@ -533,8 +629,8 @@ WHERE schemaname = current_schema()
   AND viewname = %s"
                          (pg-escape-literal (plist-get entry :name)))))))
         ("SEQUENCE"
-         (caar (pg-result-rows
-                (pg-query
+         (caar (clutch-db-pg--rows
+                (pg-exec
                  conn
                  (format "SELECT format(
   'CREATE SEQUENCE %%I.%%I INCREMENT BY %%s MINVALUE %%s MAXVALUE %%s START WITH %%s;',
@@ -548,26 +644,26 @@ WHERE schemaname = current_schema()
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
-(cl-defmethod clutch-db-table-comment ((conn pg-conn) table)
+(cl-defmethod clutch-db-table-comment ((conn pgcon) table)
   "Return the comment for TABLE on PostgreSQL CONN, or nil if none."
   (condition-case _err
-      (let* ((result (pg-query
+      (let* ((result (pg-exec
                       conn
                       (format "SELECT obj_description(c.oid) \
 FROM pg_class c \
 JOIN pg_namespace n ON n.oid = c.relnamespace \
 WHERE c.relname = %s AND n.nspname = current_schema()"
                               (pg-escape-literal table))))
-             (row (car (pg-result-rows result)))
+             (row (car (clutch-db-pg--rows result)))
              (comment (car row)))
         (when (and comment (not (string-empty-p comment)))
           comment))
     (pg-error nil)))
 
-(cl-defmethod clutch-db-primary-key-columns ((conn pg-conn) table)
+(cl-defmethod clutch-db-primary-key-columns ((conn pgcon) table)
   "Return primary key column names for TABLE on PostgreSQL CONN."
   (condition-case _err
-      (let ((result (pg-query
+      (let ((result (pg-exec
                      conn
                      (format "SELECT a.attname
 FROM pg_index i
@@ -575,10 +671,10 @@ JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
 WHERE i.indrelid = %s::regclass AND i.indisprimary
 ORDER BY array_position(i.indkey, a.attnum)"
                              (pg-escape-literal table)))))
-        (mapcar #'car (pg-result-rows result)))
+        (mapcar #'car (clutch-db-pg--rows result)))
     (pg-error nil)))
 
-(cl-defmethod clutch-db-foreign-keys ((conn pg-conn) table)
+(cl-defmethod clutch-db-foreign-keys ((conn pgcon) table)
   "Return foreign key info for TABLE on PostgreSQL CONN."
   (condition-case _err
       (let* ((sql (format "SELECT
@@ -596,15 +692,15 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
     AND tc.table_name = %s
     AND tc.table_schema = current_schema()"
                           (pg-escape-literal table)))
-             (result (pg-query conn sql)))
-        (cl-loop for row in (pg-result-rows result)
+             (result (pg-exec conn sql)))
+        (cl-loop for row in (clutch-db-pg--rows result)
                  collect (pcase-let ((`(,col-name ,ref-table ,ref-column) row))
                            (cons col-name
                                  (list :ref-table ref-table
                                        :ref-column ref-column)))))
     (pg-error nil)))
 
-(cl-defmethod clutch-db-referencing-objects ((conn pg-conn) table)
+(cl-defmethod clutch-db-referencing-objects ((conn pgcon) table)
   "Return table entries that reference TABLE on PostgreSQL CONN."
   (condition-case _err
       (let* ((sql (format "SELECT DISTINCT tc.table_name
@@ -617,11 +713,11 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
   AND ccu.table_schema = current_schema()
   AND ccu.table_name = %s"
                           (pg-escape-literal table)))
-             (result (pg-query conn sql)))
+             (result (pg-exec conn sql)))
         (mapcar (lambda (row)
                   (pcase-let ((`(,name) row))
                     (list :name name :type "TABLE")))
-                (pg-result-rows result)))
+                (clutch-db-pg--rows result)))
     (pg-error nil)))
 
 ;;;; Column details
@@ -661,11 +757,11 @@ FKS is an alist of (column-name . fk-plist)."
             :generated (and generated t)
             :comment (and comment (not (string-empty-p comment)) comment)))))
 
-(cl-defmethod clutch-db-column-details ((conn pg-conn) table)
+(cl-defmethod clutch-db-column-details ((conn pgcon) table)
   "Return detailed column info for TABLE on PostgreSQL CONN."
   (condition-case _err
       (let* ((col-result
-              (pg-query
+              (pg-exec
                conn
                (format "SELECT c.column_name, c.data_type, c.is_nullable, \
 c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
@@ -678,7 +774,7 @@ JOIN pg_attribute a ON a.attrelid = pc.oid AND a.attname = c.column_name \
 WHERE c.table_name = %s AND c.table_schema = current_schema() \
 ORDER BY c.ordinal_position"
                        (pg-escape-literal table))))
-             (col-rows (pg-result-rows col-result))
+             (col-rows (clutch-db-pg--rows col-result))
              (pk-cols  (clutch-db-primary-key-columns conn table))
              (fks      (clutch-db-foreign-keys conn table)))
         (mapcar (lambda (row) (clutch-db-pg--column-details-row row pk-cols fks))
@@ -687,29 +783,29 @@ ORDER BY c.ordinal_position"
 
 ;;;; Re-entrancy guard
 
-(cl-defmethod clutch-db-busy-p ((conn pg-conn))
+(cl-defmethod clutch-db-busy-p ((conn pgcon))
   "Return non-nil if PostgreSQL CONN is executing a query."
-  (pg-conn-busy conn))
+  (pg-connection-busy-p conn))
 
 ;;;; Metadata methods
 
-(cl-defmethod clutch-db-user ((conn pg-conn))
+(cl-defmethod clutch-db-user ((conn pgcon))
   "Return the user for PostgreSQL CONN."
-  (pg-conn-user conn))
+  (clutch-db-pg--connect-value conn 'user))
 
-(cl-defmethod clutch-db-host ((conn pg-conn))
+(cl-defmethod clutch-db-host ((conn pgcon))
   "Return the host for PostgreSQL CONN."
-  (pg-conn-host conn))
+  (clutch-db-pg--connect-value conn 'host))
 
-(cl-defmethod clutch-db-port ((conn pg-conn))
+(cl-defmethod clutch-db-port ((conn pgcon))
   "Return the port for PostgreSQL CONN."
-  (pg-conn-port conn))
+  (clutch-db-pg--connect-value conn 'port))
 
-(cl-defmethod clutch-db-database ((conn pg-conn))
+(cl-defmethod clutch-db-database ((conn pgcon))
   "Return the database for PostgreSQL CONN."
-  (pg-conn-database conn))
+  (pgcon-dbname conn))
 
-(cl-defmethod clutch-db-display-name ((_conn pg-conn))
+(cl-defmethod clutch-db-display-name ((_conn pgcon))
   "Return \"PostgreSQL\" as the display name."
   "PostgreSQL")
 

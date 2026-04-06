@@ -14,11 +14,11 @@ Emacs users lack a seamless, integrated database client that operates within the
 ### Solution
 
 clutch integrates directly into Emacs, offering:
-- Pure Elisp protocol implementations (no external dependencies for MySQL/PostgreSQL)
+- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages
 - Interactive SQL editing with completion
 - Unified transient-based mutation workflow (edit/delete/insert with staged preview/commit)
 - Schema caching and intelligent completion
-- Org-Babel integration for literate database notebooks
+- Optional Org-Babel integration via the separate `ob-clutch` package
 
 ### Target Users
 
@@ -60,11 +60,11 @@ clutch follows a **layered, interface-based architecture** with clear separation
          │             │             │                  │
          v             v             v                  v
     ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌──────────────┐
-    │mysql.el │  │  pg.el  │  │ Emacs    │  │ Java 17+ JVM │
-    │(pure    │  │(pure    │  │ 29+ built│  │ process +    │
-    │ Elisp   │  │ Elisp   │  │ -in      │  │ JDBC drivers │
-    │ wire    │  │ wire    │  │ sqlite-* │  │              │
-    │protocol)│  │protocol)│  │ functions│  │              │
+    │mysql-wire│ │ upstream│  │ Emacs    │  │ Java 17+ JVM │
+    │(external │ │ pg-el   │  │ 29+ built│  │ process +    │
+    │ pure     │ │ package)│  │ -in      │  │ JDBC drivers │
+    │ Elisp)   │ │         │  │ sqlite-* │  │              │
+    │          │ │         │  │ functions│  │              │
     └─────────┘  └─────────┘  └──────────┘  └──────────────┘
 ```
 
@@ -78,9 +78,9 @@ clutch follows a **layered, interface-based architecture** with clear separation
 | `clutch-db-pg.el` | ~350 | PostgreSQL backend adapter, OID-to-type mapping |
 | `clutch-db-sqlite.el` | ~330 | SQLite backend adapter (Emacs 29+ `sqlite-*` functions) |
 | `clutch-db-jdbc.el` | ~980 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
-| `ob-clutch.el` | ~265 | Org-Babel integration: connection caching, header argument parsing |
-| `mysql.el` | ~1460 | Pure Elisp MySQL wire protocol (no external CLI) |
-| `pg.el` | ~970 | Pure Elisp PostgreSQL wire protocol v3 |
+| External dependency: `mysql-wire` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
+| External dependency: `pg` | n/a | PostgreSQL client from upstream `pg-el` (separate package) |
+| Optional package: `ob-clutch` | n/a | Org-Babel integration bridge (separate package) |
 
 For JDBC-backed databases, one logical clutch connection now maps to two JDBC
 sessions inside the sidecar:
@@ -98,8 +98,8 @@ user queries on the same JDBC session.
 
 | Backend | Emacs Version | Implementation | Notes |
 |---------|---------------|----------------|-------|
-| **MySQL** | 28.1+ | `mysql.el` | No external CLI; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
-| **PostgreSQL** | 28.1+ | `pg.el` | Wire protocol v3; supports PG 12+ |
+| **MySQL** | 28.1+ | `mysql-wire` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
+| **PostgreSQL** | 28.1+ | `pg` | External `pg-el` package; supports PG 12+ |
 | **SQLite** | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
 
 ### JDBC Backends (via JVM Sidecar)
@@ -947,7 +947,7 @@ C-c C-d
 C-c C-o
 C-c C-l
 
-;; Org-Babel (add to init)
+;; Org-Babel (install separate ob-clutch package, then add to init)
 (require 'ob-clutch)
 ```
 

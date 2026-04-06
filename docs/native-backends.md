@@ -2,15 +2,15 @@
 
 `clutch` ships three non-JDBC backends that do not require a sidecar process:
 
-- `mysql.el` — pure Emacs Lisp MySQL wire protocol client
-- `pg.el` — pure Emacs Lisp PostgreSQL wire protocol v3 client
+- `mysql-wire` — external pure Emacs Lisp MySQL wire protocol client
+- `pg` — external PostgreSQL client from `pg-el`
 - `clutch-db-sqlite.el` — SQLite adapter over Emacs 29+ built-in `sqlite-*`
 
 Use this document for backend-specific connection, protocol, TLS, timeout, and
 usage notes for the native backends.  The JDBC sidecar has its own document in
 [`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).
 
-## MySQL (`mysql.el`)
+## MySQL (`mysql-wire`)
 
 ### Scope
 
@@ -24,19 +24,19 @@ usage notes for the native backends.  The JDBC sidecar has its own document in
 ### Connection Example
 
 ```elisp
-(require 'mysql)
+(require 'mysql-wire)
 
-(setq conn (mysql-connect :host "127.0.0.1"
-                          :port 3306
-                          :user "root"
-                          :password "secret"
-                          :database "mydb"))
+(setq conn (mysql-wire-connect :host "127.0.0.1"
+                               :port 3306
+                               :user "root"
+                               :password "secret"
+                               :database "mydb"))
 
-(let ((result (mysql-query conn "SELECT * FROM users LIMIT 10")))
-  (mysql-result-columns result)
-  (mysql-result-rows result))
+(let ((result (mysql-wire-query conn "SELECT * FROM users LIMIT 10")))
+  (mysql-wire-result-columns result)
+  (mysql-wire-result-rows result))
 
-(mysql-disconnect conn)
+(mysql-wire-disconnect conn)
 ```
 
 ### TLS
@@ -51,9 +51,9 @@ disables the automatic MySQL 8 TLS reconnect path.
 
 Relevant variables:
 
-- `mysql-tls-trustfiles`
-- `mysql-tls-verify-server`
-- `mysql-tls-keylist`
+- `mysql-wire-tls-trustfiles`
+- `mysql-wire-tls-verify-server`
+- `mysql-wire-tls-keylist`
 
 For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS
 for authentication.  For self-signed local dev certificates, either trust the
@@ -61,23 +61,23 @@ CA or set `mysql-tls-verify-server` to `nil` explicitly.
 
 ### Convenience API
 
-- `with-mysql-connection`
-- `with-mysql-transaction`
-- `mysql-ping`
-- `mysql-escape-identifier`
-- `mysql-escape-literal`
-- `mysql-connect/uri`
+- `with-mysql-wire-connection`
+- `with-mysql-wire-transaction`
+- `mysql-wire-ping`
+- `mysql-wire-escape-identifier`
+- `mysql-wire-escape-literal`
+- `mysql-wire-connect-uri`
 
 ### Prepared Statements
 
 ```elisp
-(let ((stmt (mysql-prepare conn "SELECT * FROM users WHERE id = ?")))
-  (let ((result (mysql-execute stmt 42)))
-    (mysql-result-rows result))
-  (mysql-stmt-close stmt))
+(let ((stmt (mysql-wire-prepare conn "SELECT * FROM users WHERE id = ?")))
+  (let ((result (mysql-wire-execute stmt 42)))
+    (mysql-wire-result-rows result))
+  (mysql-wire-stmt-close stmt))
 ```
 
-## PostgreSQL (`pg.el`)
+## PostgreSQL (`pg`)
 
 ### Scope
 
@@ -91,15 +91,14 @@ CA or set `mysql-tls-verify-server` to `nil` explicitly.
 ```elisp
 (require 'pg)
 
-(setq conn (pg-connect :host "127.0.0.1"
-                       :port 5432
-                       :user "postgres"
-                       :password "secret"
-                       :database "mydb"))
+(setq conn (pg-connect-plist "mydb" "postgres"
+                             :password "secret"
+                             :host "127.0.0.1"
+                             :port 5432))
 
-(let ((result (pg-query conn "SELECT * FROM users LIMIT 10")))
-  (pg-result-columns result)
-  (pg-result-rows result))
+(let ((result (pg-exec conn "SELECT * FROM users LIMIT 10")))
+  (pg-result result :attributes)
+  (pg-result result :tuples))
 
 (pg-disconnect conn)
 ```
@@ -133,14 +132,14 @@ Relevant variables:
 
 ```elisp
 (with-pg-transaction conn
-  (pg-query conn "INSERT INTO users (name) VALUES ('alice')")
-  (pg-query conn "INSERT INTO users (name) VALUES ('bob')"))
+  (pg-exec conn "INSERT INTO users (name) VALUES ('alice')")
+  (pg-exec conn "INSERT INTO users (name) VALUES ('bob')"))
 ```
 
 ### Interrupts and Timeouts
 
 - `:query-timeout` maps to PostgreSQL `statement_timeout`.
-- `pg-cancel-query` sends a wire-protocol `CancelRequest` on an auxiliary
+- `pg-cancel` sends a wire-protocol `CancelRequest` on an auxiliary
   socket, then drains the main connection until `ReadyForQuery`.
 - In clutch UI terms, `C-g` on native PostgreSQL uses that path, so a cancelled
   query keeps the same session usable for the next SQL.

@@ -30,7 +30,8 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Architecture and Implementation
 
-- **Interface / implementation separation**: `mysql.el` and `pg.el` are pure protocol libraries with no UI. `clutch.el` depends on `clutch-db.el`, not protocol layers directly.
+- **Interface / implementation separation**: `mysql-wire` and upstream `pg` are external protocol libraries with no UI. `clutch.el` depends on `clutch-db.el`, not protocol layers directly.
+- **External dependency boundaries stay explicit**: `mysql-wire` and `pg` are required package dependencies. `ob-clutch` is a separate optional package and must not drift back into the `clutch` repo.
 - **Single responsibility per file**: Do not mix protocol code with rendering code.
 - **Keep `clutch.el` as the entry point**: External consumers should continue to load `(require 'clutch)`. When implementation moves out, `clutch.el` becomes the assembler, not a grab bag.
 - **Split by stable workflow boundaries**: Prefer modules such as result UI, object workflow, staged mutation flow, or schema/cache lifecycle. Do not split by vague internal labels like `common`, `utils`, or `helpers`.
@@ -41,8 +42,8 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Favor incremental modularization**: Move the smallest coherent slice first, then reload, byte-compile, and rerun focused tests before attempting the next extraction.
 - **No behavioral side effects on load**: Loading a file must not alter Emacs editing behavior (no modes enabled, no hooks fired). Package-level registration side effects are allowed: fringe bitmaps, `auto-mode-alist` entries, backend registrations, Embark action registrations, and `kill-emacs-hook` cleanup.
 - **Reuse Emacs infrastructure**: Use `completing-read`, `special-mode`, `text-property-search-forward`, standard hooks, and other stock primitives.
-- **Public naming**: `clutch-` for UI, `mysql-` / `pg-` for protocol. No double dash for public API.
-- **Private naming**: `clutch--`, `mysql--`, `pg--`. Never call private symbols across subsystem boundaries. Files split from the same subsystem (e.g., `clutch-query.el`, `clutch-object.el`, `clutch-edit.el`, `clutch-schema.el` all belong to the `clutch` subsystem) may call each other's `clutch--` symbols, but must add `declare-function` / `defvar` declarations for byte-compilation.
+- **Public naming**: `clutch-` for the clutch package. External protocol packages keep their own public namespaces (`mysql-wire-` / upstream `pg-`). No double dash for public API.
+- **Private naming**: `clutch--` inside the clutch repo. Never call private symbols across subsystem boundaries. Files split from the same subsystem (e.g., `clutch-query.el`, `clutch-object.el`, `clutch-edit.el`, `clutch-schema.el` all belong to the `clutch` subsystem) may call each other's `clutch--` symbols, but must add `declare-function` / `defvar` declarations for byte-compilation.
 - **Predicates**: Multi-word predicate names end in `-p`.
 - **Unused args**: Prefix with `_`.
 - **Prefer flat control flow**: Avoid deep `let` → `if` → `let` nesting. Use `if-let*`, `when-let*`, `pcase`, and `pcase-let`.
@@ -173,6 +174,8 @@ Read every changed line before committing.
 ### 2. Run all test files
 
 ```bash
+# Ensure external package dependencies (`mysql-wire` and `pg`) are installed or on load-path.
+
 # Main UI/logic tests
 emacs -batch -L . -l ert -l clutch \
   -l test/clutch-test.el \

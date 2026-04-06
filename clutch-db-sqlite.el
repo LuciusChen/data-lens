@@ -2,6 +2,12 @@
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;; This file is part of clutch.
 
 ;; clutch is free software: you can redistribute it and/or modify

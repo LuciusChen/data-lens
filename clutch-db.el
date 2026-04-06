@@ -2,6 +2,12 @@
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;; This file is part of clutch.
 
 ;; clutch is free software: you can redistribute it and/or modify
@@ -166,9 +172,9 @@ ROWS is a list of lists (one per row).
 AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   connection columns rows affected-rows last-insert-id warnings)
 
-;;;; SQL helpers (literal/comment awareness)
+;;;; SQL helpers (literal-or-comment awareness)
 
-(defun clutch-db-sql-skip-literal/comment (sql pos)
+(defun clutch-db-sql-skip-literal-or-comment (sql pos)
   "If POS in SQL starts a string literal or comment, return position past it.
 Handles single-quoted strings (with '' escape), -- line comments, and
 /* block comments */.  Double-quoted identifiers and backticks are NOT
@@ -198,7 +204,7 @@ treated as literals.  Returns nil when POS is at normal code."
              (or end len))
          nil)))))
 
-(defun clutch-db-sql-mask-literal/comment (sql)
+(defun clutch-db-sql-mask-literal-or-comment (sql)
   "Return a string the same length as SQL with literals/comments blanked.
 Single-quoted content (between the quotes) and comment text become spaces.
 Quote delimiters are preserved.  Double-quoted identifiers and backticks
@@ -208,7 +214,7 @@ are left intact.  Safe for multibyte strings (avoids `aset')."
         (pos 0)
         (len (length sql)))
     (while (< pos len)
-      (if-let* ((skip (clutch-db-sql-skip-literal/comment sql pos)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
           (if (= (aref sql pos) ?\')
               ;; String literal: preserve quote delimiters, blank content.
               (let* ((has-close (and (> skip (1+ pos))
@@ -239,7 +245,7 @@ START defaults to 0."
         (re (format "\\b%s\\b" pattern))
         found)
     (while (and (< pos len) (not found))
-      (if-let* ((skip (clutch-db-sql-skip-literal/comment sql pos)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
           (setq pos skip)
         (let ((ch (aref sql pos)))
           (cond

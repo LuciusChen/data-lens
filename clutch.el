@@ -5,7 +5,7 @@
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1"))
+;; Package-Requires: ((emacs "28.1") (mysql-wire "0.1") (pg "0.40"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
@@ -1356,7 +1356,7 @@ POINT-OFFSET is at the top level."
          (result (cons 0 len))
          (i 0))
     (while (< i len)
-      (if-let* ((skip (clutch-db-sql-skip-literal/comment text i)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment text i)))
           (setq i skip)
         (pcase (aref text i)
           (?\( (push i stack)
@@ -1386,7 +1386,7 @@ UNION / UNION ALL at depth 0 within that scope."
                (i 0))
     ;; Collect positions of depth-0 UNION keywords within the scope.
     (while (< i sub-len)
-      (if-let* ((skip (clutch-db-sql-skip-literal/comment sub i)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sub i)))
           (setq i skip)
         (pcase (aref sub i)
           (?\( (cl-incf depth) (cl-incf i))
@@ -1418,7 +1418,7 @@ Return (TABLES . ALIASES) where TABLES is a list of table names and
 ALIASES is an alist of (alias . table) pairs.
 String literals and comments are ignored via masking."
   (let ((case-fold-search t)
-        (masked (clutch-db-sql-mask-literal/comment text))
+        (masked (clutch-db-sql-mask-literal-or-comment text))
         (pos beg)
         tables aliases)
     (while (and (< pos end)
@@ -1470,7 +1470,7 @@ scopes first, so FROM/JOIN clauses remain visible from inside expressions."
         (case-fold-search t)
         (i 0))
     (while (< i len)
-      (if-let* ((skip (clutch-db-sql-skip-literal/comment text i)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment text i)))
           (setq i skip)
         (pcase (aref text i)
           (?\( (cl-incf depth) (cl-incf i))
@@ -1534,7 +1534,7 @@ outer FROM/JOIN clauses."
          (stmt-beg (car bounds))
          (text (buffer-substring-no-properties stmt-beg (cdr bounds)))
          (point-offset (- (point) stmt-beg))
-         (masked (clutch-db-sql-mask-literal/comment text))
+         (masked (clutch-db-sql-mask-literal-or-comment text))
          (inner (clutch--union-branch-range text point-offset))
          (outer (clutch--toplevel-union-branch-range text point-offset)))
     (or (clutch--find-alias-in-range text masked alias stmt-beg
@@ -1570,7 +1570,7 @@ without consulting syntax tables."
     (when (and (>= target 0) (< target len))
       (catch 'hit
         (while (< i len)
-          (if-let* ((skip (clutch-db-sql-skip-literal/comment text i)))
+          (if-let* ((skip (clutch-db-sql-skip-literal-or-comment text i)))
               (progn
                 (when (and (<= i target) (< target skip))
                   (throw 'hit nil))
@@ -1658,7 +1658,7 @@ Handles schema-qualified names like \"HR\".\"EMPLOYEES\" or `db`.`table`."
   "Return raw table identifiers referenced in the current statement."
   (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
     (let* ((text (buffer-substring-no-properties beg end))
-           (masked (clutch-db-sql-mask-literal/comment text))
+           (masked (clutch-db-sql-mask-literal-or-comment text))
            (case-fold-search t)
            found
            (pos 0))

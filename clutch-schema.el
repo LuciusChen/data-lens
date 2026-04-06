@@ -1,5 +1,11 @@
 ;;; clutch-schema.el --- Schema refresh and metadata caches -*- lexical-binding: t; -*-
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;;; Commentary:
 
 ;; Internal schema refresh and metadata cache state loaded from `clutch.el'.

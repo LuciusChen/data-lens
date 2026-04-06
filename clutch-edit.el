@@ -1,5 +1,11 @@
 ;;; clutch-edit.el --- Staged result edit and insert workflow -*- lexical-binding: t; -*-
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;;; Commentary:
 
 ;; Internal result editing, insert, and staged mutation helpers loaded from `clutch.el'.

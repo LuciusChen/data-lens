@@ -2,6 +2,12 @@
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;; This file is part of clutch.
 
 ;; clutch is free software: you can redistribute it and/or modify
@@ -701,22 +707,19 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
     p))
 
 (defun clutch-jdbc--setup-prerequisites (driver)
-  "Ensure agent jar and DRIVER jar are present, offering to download if missing."
+  "Ensure agent jar and DRIVER jar are present."
   (let ((jar (clutch-jdbc--agent-jar)))
     (unless (and (file-exists-p jar) (clutch-jdbc--agent-jar-valid-p jar))
-      (if (y-or-n-p "JDBC agent not found.  Download from GitHub? ")
-          (clutch-jdbc--download-agent-jar)
-        (user-error "Run M-x clutch-jdbc-ensure-agent to install the JDBC agent"))))
+      (user-error "JDBC agent not found.  Run M-x clutch-jdbc-ensure-agent")))
   (when-let* ((spec (alist-get driver clutch-jdbc--driver-sources))
               (filename (plist-get spec :filename))
               (dest (expand-file-name filename (clutch-jdbc--drivers-dir))))
     (unless (file-exists-p dest)
       (cond
        ((plist-get spec :maven)
-        (if (y-or-n-p (format "%s driver not found.  Download from Maven Central? "
-                              (capitalize (symbol-name driver))))
-            (clutch-jdbc-install-driver driver)
-          (user-error "Run M-x clutch-jdbc-install-driver RET %s" driver)))
+        (user-error "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
+                    (capitalize (symbol-name driver))
+                    driver))
        ((plist-get spec :manual)
         (user-error "%s driver requires manual download.\nURL: %s\nPlace as: %s"
                     (capitalize (symbol-name driver))

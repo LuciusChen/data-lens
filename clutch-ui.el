@@ -1,5 +1,11 @@
 ;;; clutch-ui.el --- Result rendering and icon helpers -*- lexical-binding: t; -*-
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;;; Commentary:
 
 ;; Internal result rendering and icon helpers loaded from `clutch.el'.

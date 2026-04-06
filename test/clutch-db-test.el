@@ -1,4 +1,8 @@
-;;; clutch-db-test.el --- Tests for clutch-db -*- lexical-binding: t; -*-
+;;; clutch-db-test.el --- ERT tests for clutch database backends -*- lexical-binding: t; -*-
+
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; URL: https://github.com/LuciusChen/clutch
 
 ;;; Commentary:
 
@@ -9,10 +13,10 @@
 ;;   docker run -d -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql:8
 ;;   docker run -d -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16
 ;;
-;; Note: MySQL 8 defaults to `caching_sha2_password'.  The native mysql.el
+;; Note: MySQL 8 defaults to `caching_sha2_password'.  The native mysql-wire
 ;; client retries with TLS when the server requires a secure channel; local
 ;; container certificates are typically self-signed, so the MySQL live helpers
-;; bind `mysql-tls-verify-server' to nil unless the test environment installs a
+;; bind `mysql-wire-tls-verify-server' to nil unless the test environment installs a
 ;; trusted CA.
 ;;
 ;; Run unit tests:
@@ -27,9 +31,14 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'ert)
+(require 'eieio)
 (require 'clutch-db)
 (require 'clutch-db-jdbc)
+
+(eval-when-compile
+  (require 'pg))
 
 ;; `clutch--schema-cache' lives in clutch.el (the UI layer), which is not
 ;; loaded in this test batch.  Declare it special here so that `let' bindings
@@ -37,36 +46,25 @@
 ;; that the bytecode in clutch-db-jdbc.el can see.
 (defvar clutch--schema-cache (make-hash-table :test 'equal))
 (defvar clutch-debug-buffer-name "*clutch-debug*")
-;; `mysql-tls-verify-server' is defined in mysql.el; declare it special here so
-;; local test bindings remain dynamic even before the backend requires mysql.el.
-(defvar mysql-tls-verify-server)
+;; `mysql-wire-tls-verify-server' is defined in mysql-wire.el; declare it
+;; special here so local test bindings remain dynamic even before the backend
+;; requires mysql-wire.el.
+(defvar mysql-wire-tls-verify-server)
 (defvar clutch-connection)
 (defvar clutch-jdbc--error-details-by-conn)
 (defvar clutch-jdbc--busy-request-ids)
 (defvar clutch-jdbc--ignored-response-ids)
-(defvar mysql-type-long)
-(defvar mysql-type-float)
-(defvar mysql-type-double)
-(defvar mysql-type-decimal)
-(defvar mysql-type-longlong)
-(defvar mysql-type-date)
-(defvar mysql-type-time)
-(defvar mysql-type-datetime)
-(defvar mysql-type-timestamp)
-(defvar mysql-type-blob)
-(defvar mysql-type-json)
-(defvar pg-oid-int4)
-(defvar pg-oid-int8)
-(defvar pg-oid-float8)
-(defvar pg-oid-numeric)
-(defvar pg-oid-date)
-(defvar pg-oid-time)
-(defvar pg-oid-timestamp)
-(defvar pg-oid-timestamptz)
-(defvar pg-oid-bytea)
-(defvar pg-oid-json)
-(defvar pg-oid-jsonb)
-
+(defvar mysql-wire-type-long)
+(defvar mysql-wire-type-float)
+(defvar mysql-wire-type-double)
+(defvar mysql-wire-type-decimal)
+(defvar mysql-wire-type-longlong)
+(defvar mysql-wire-type-date)
+(defvar mysql-wire-type-time)
+(defvar mysql-wire-type-datetime)
+(defvar mysql-wire-type-timestamp)
+(defvar mysql-wire-type-blob)
+(defvar mysql-wire-type-json)
 (declare-function clutch-db-mysql--type-category "clutch-db-mysql" (type character-set))
 (declare-function clutch-db-mysql--convert-columns "clutch-db-mysql" (columns))
 (declare-function clutch-db-mysql-connect "clutch-db-mysql" (params))
@@ -78,12 +76,13 @@
 (declare-function clutch--build-conn "clutch" (params))
 (declare-function clutch--format-value "clutch" (value))
 (declare-function clutch--value-to-literal "clutch" (value))
-(declare-function make-mysql-conn "mysql" (&rest args))
-(declare-function make-mysql-result "mysql" (&rest args))
-(declare-function mysql-conn-database "mysql" (conn))
-(declare-function make-pg-conn "pg" (&rest args))
-(declare-function make-pg-result "pg" (&rest args))
-(declare-function pg-conn-host "pg" (conn))
+(declare-function make-mysql-wire-conn "mysql-wire" (&rest args))
+(declare-function make-mysql-wire-result "mysql-wire" (&rest args))
+(declare-function mysql-wire-conn-database "mysql-wire" (conn))
+(declare-function make-pgcon "pg" (&rest args))
+(declare-function make-pgresult "pg" (&rest args))
+(declare-function pgcon-connect-plist "pg" (conn))
+(declare-function pgcon-dbname "pg" (conn))
 
 ;;;; Test configuration
 
@@ -99,12 +98,39 @@
 (defvar clutch-db-test-pg-password nil)
 (defvar clutch-db-test-pg-database "postgres")
 
+(defconst clutch-db-test--pg-oid-bytea 17)
+(defconst clutch-db-test--pg-oid-int8 20)
+(defconst clutch-db-test--pg-oid-int4 23)
+(defconst clutch-db-test--pg-oid-json 114)
+(defconst clutch-db-test--pg-oid-float8 701)
+(defconst clutch-db-test--pg-oid-date 1082)
+(defconst clutch-db-test--pg-oid-time 1083)
+(defconst clutch-db-test--pg-oid-timestamp 1114)
+(defconst clutch-db-test--pg-oid-timestamptz 1184)
+(defconst clutch-db-test--pg-oid-numeric 1700)
+(defconst clutch-db-test--pg-oid-jsonb 3802)
+
+(defun clutch-db-test--make-pgcon (&rest params)
+  "Return a lightweight upstream `pgcon' built from PARAMS."
+  (let* ((dbname (or (plist-get params :database)
+                     (plist-get params :dbname)
+                     "test"))
+         (conn (make-pgcon :dbname dbname :process nil)))
+    (oset conn connect-plist
+          (list 'method :tcp
+                'host (or (plist-get params :host) "localhost")
+                'port (or (plist-get params :port) 5432)
+                'dbname dbname
+                'user (plist-get params :user)
+                'password (plist-get params :password)))
+    conn))
+
 (defmacro clutch-db-test--with-local-mysql-tls (&rest body)
   "Run BODY with MySQL TLS verification disabled for local self-signed certs."
   (declare (indent 0))
   `(progn
-     (require 'mysql)
-     (cl-letf (((symbol-value 'mysql-tls-verify-server) nil))
+     (require 'mysql-wire)
+     (cl-letf (((symbol-value 'mysql-wire-tls-verify-server) nil))
        ,@body)))
 
 ;;;; Unit tests — connection parameter normalization
@@ -836,6 +862,61 @@
           (should (progn (clutch-jdbc--validate-agent-jar jar) t)))
       (delete-directory tmpdir t))))
 
+(ert-deftest clutch-db-test-jdbc-setup-prerequisites-requires-agent-command ()
+  "Missing JDBC agent should instruct the user to run the explicit install command."
+  (let ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
+        (clutch-jdbc-agent-version "0.1.2")
+        (clutch-jdbc-agent-dir nil))
+    (setq clutch-jdbc-agent-dir tmpdir)
+    (unwind-protect
+        (let ((err (should-error (clutch-jdbc--setup-prerequisites 'oracle)
+                                 :type 'user-error)))
+          (should (string-match-p
+                   "Run M-x clutch-jdbc-ensure-agent"
+                   (cadr err))))
+      (delete-directory tmpdir t))))
+
+(ert-deftest clutch-db-test-jdbc-setup-prerequisites-points-to-install-driver ()
+  "Missing Maven drivers should point users at `clutch-jdbc-install-driver'."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
+         (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
+         (clutch-jdbc-agent-dir tmpdir)
+         (clutch-jdbc-agent-version "0.1.2"))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "drivers" tmpdir) t)
+          (with-temp-file jar (insert "placeholder"))
+          (cl-letf (((symbol-function 'clutch-jdbc--agent-jar-valid-p)
+                     (lambda (_jar) t)))
+            (let ((err (should-error
+                        (clutch-jdbc--setup-prerequisites 'sqlserver)
+                        :type 'user-error)))
+              (should (string-match-p
+                       "Run M-x clutch-jdbc-install-driver RET sqlserver"
+                       (cadr err))))))
+      (delete-directory tmpdir t))))
+
+(ert-deftest clutch-db-test-jdbc-setup-prerequisites-reports-manual-driver-url ()
+  "Missing manual JDBC drivers should report the download URL and destination."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
+         (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
+         (clutch-jdbc-agent-dir tmpdir)
+         (clutch-jdbc-agent-version "0.1.2")
+         (dest (expand-file-name "db2jcc4.jar" (expand-file-name "drivers" tmpdir))))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "drivers" tmpdir) t)
+          (with-temp-file jar (insert "placeholder"))
+          (cl-letf (((symbol-function 'clutch-jdbc--agent-jar-valid-p)
+                     (lambda (_jar) t)))
+            (let ((err (should-error (clutch-jdbc--setup-prerequisites 'db2)
+                                     :type 'user-error)))
+              (should (string-match-p "requires manual download" (cadr err)))
+              (should (string-match-p "ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
+                                      (cadr err)))
+              (should (string-match-p (regexp-quote dest) (cadr err))))))
+      (delete-directory tmpdir t))))
+
 (ert-deftest clutch-db-test-jdbc-install-driver-installs-oracle-i18n-companion ()
   "Installing Oracle JDBC should also install the orai18n companion jar."
   (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
@@ -1084,7 +1165,7 @@
 
 (ert-deftest clutch-db-test-mysql-set-current-schema-updates-connection-database ()
   "MySQL schema switching should execute USE and update the connection database."
-  (let ((conn (make-mysql-conn :database "zj_test"))
+  (let ((conn (make-mysql-wire-conn :database "zj_test"))
         executed-sql)
     (cl-letf (((symbol-function 'clutch-db-query)
                (lambda (_conn sql)
@@ -1092,7 +1173,7 @@
                  (make-clutch-db-result :connection conn :affected-rows 0))))
       (should (equal (clutch-db-set-current-schema conn "cjh_test") "cjh_test"))
       (should (equal executed-sql "USE `cjh_test`"))
-      (should (equal (mysql-conn-database conn) "cjh_test")))))
+      (should (equal (mysql-wire-conn-database conn) "cjh_test")))))
 
 ;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
 
@@ -1189,35 +1270,35 @@
 (ert-deftest clutch-db-test-mysql-type-categories ()
   "Test MySQL type to category mapping."
   (require 'clutch-db-mysql)
-  (require 'mysql)
+  (require 'mysql-wire)
   ;; Numeric types
-  (should (eq (clutch-db-mysql--type-category mysql-type-long 33) 'numeric))
-  (should (eq (clutch-db-mysql--type-category mysql-type-float 33) 'numeric))
-  (should (eq (clutch-db-mysql--type-category mysql-type-double 33) 'numeric))
-  (should (eq (clutch-db-mysql--type-category mysql-type-decimal 33) 'numeric))
-  (should (eq (clutch-db-mysql--type-category mysql-type-longlong 33) 'numeric))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-long 33) 'numeric))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-float 33) 'numeric))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-double 33) 'numeric))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-decimal 33) 'numeric))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-longlong 33) 'numeric))
   ;; Date/time types
-  (should (eq (clutch-db-mysql--type-category mysql-type-date 33) 'date))
-  (should (eq (clutch-db-mysql--type-category mysql-type-time 33) 'time))
-  (should (eq (clutch-db-mysql--type-category mysql-type-datetime 33) 'datetime))
-  (should (eq (clutch-db-mysql--type-category mysql-type-timestamp 33) 'datetime))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-date 33) 'date))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-time 33) 'time))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-datetime 33) 'datetime))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-timestamp 33) 'datetime))
   ;; BLOB/TEXT split by charset
-  (should (eq (clutch-db-mysql--type-category mysql-type-blob 63) 'blob))
-  (should (eq (clutch-db-mysql--type-category mysql-type-blob 33) 'text))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-blob 63) 'blob))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-blob 33) 'text))
   ;; JSON
-  (should (eq (clutch-db-mysql--type-category mysql-type-json 63) 'json))
+  (should (eq (clutch-db-mysql--type-category mysql-wire-type-json 63) 'json))
   ;; Unknown type defaults to text
   (should (eq (clutch-db-mysql--type-category 9999 0) 'text)))
 
 (ert-deftest clutch-db-test-mysql-convert-columns ()
   "Test MySQL column conversion."
   (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let* ((mysql-cols (list (list :name "id" :type mysql-type-long :character-set 33)
-                           (list :name "data" :type mysql-type-json :character-set 63)
-                           (list :name "blob_bin" :type mysql-type-blob :character-set 63)
-                           (list :name "blob_txt" :type mysql-type-blob :character-set 33)
-                           (list :name "created" :type mysql-type-datetime :character-set 33)))
+  (require 'mysql-wire)
+  (let* ((mysql-cols (list (list :name "id" :type mysql-wire-type-long :character-set 33)
+                           (list :name "data" :type mysql-wire-type-json :character-set 63)
+                           (list :name "blob_bin" :type mysql-wire-type-blob :character-set 63)
+                           (list :name "blob_txt" :type mysql-wire-type-blob :character-set 33)
+                           (list :name "created" :type mysql-wire-type-datetime :character-set 33)))
          (converted (clutch-db-mysql--convert-columns mysql-cols)))
     (should (= (length converted) 5))
     (should (equal (plist-get (nth 0 converted) :name) "id"))
@@ -1236,31 +1317,29 @@
 (ert-deftest clutch-db-test-pg-type-categories ()
   "Test PostgreSQL OID to category mapping."
   (require 'clutch-db-pg)
-  (require 'pg)
   ;; Numeric types
-  (should (eq (clutch-db-pg--type-category pg-oid-int4) 'numeric))
-  (should (eq (clutch-db-pg--type-category pg-oid-int8) 'numeric))
-  (should (eq (clutch-db-pg--type-category pg-oid-float8) 'numeric))
-  (should (eq (clutch-db-pg--type-category pg-oid-numeric) 'numeric))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-int4) 'numeric))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-int8) 'numeric))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-float8) 'numeric))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-numeric) 'numeric))
   ;; Date/time types
-  (should (eq (clutch-db-pg--type-category pg-oid-date) 'date))
-  (should (eq (clutch-db-pg--type-category pg-oid-time) 'time))
-  (should (eq (clutch-db-pg--type-category pg-oid-timestamp) 'datetime))
-  (should (eq (clutch-db-pg--type-category pg-oid-timestamptz) 'datetime))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-date) 'date))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-time) 'time))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-timestamp) 'datetime))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-timestamptz) 'datetime))
   ;; BLOB/JSON
-  (should (eq (clutch-db-pg--type-category pg-oid-bytea) 'blob))
-  (should (eq (clutch-db-pg--type-category pg-oid-json) 'json))
-  (should (eq (clutch-db-pg--type-category pg-oid-jsonb) 'json))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-bytea) 'blob))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-json) 'json))
+  (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-jsonb) 'json))
   ;; Unknown OID defaults to text
   (should (eq (clutch-db-pg--type-category 999999) 'text)))
 
 (ert-deftest clutch-db-test-pg-convert-columns ()
   "Test PostgreSQL column conversion."
   (require 'clutch-db-pg)
-  (require 'pg)
-  (let* ((pg-cols (list (list :name "id" :type-oid pg-oid-int4)
-                        (list :name "data" :type-oid pg-oid-jsonb)
-                        (list :name "created" :type-oid pg-oid-timestamp)))
+  (let* ((pg-cols '(("id" 23 4)
+                    ("data" 3802 -1)
+                    ("created" 1114 8)))
          (converted (clutch-db-pg--convert-columns pg-cols)))
     (should (= (length converted) 3))
     (should (equal (plist-get (nth 0 converted) :name) "id"))
@@ -1275,8 +1354,8 @@
 (ert-deftest clutch-db-test-mysql-build-paged-sql ()
   "Test MySQL paged SQL generation."
   (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "localhost")))
+  (require 'mysql-wire)
+  (let ((conn (make-mysql-wire-conn :host "localhost")))
     ;; Basic pagination
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10)))
       (should (string-match-p "LIMIT 10" sql))
@@ -1310,8 +1389,7 @@
 (ert-deftest clutch-db-test-pg-build-paged-sql ()
   "Test PostgreSQL paged SQL generation."
   (require 'clutch-db-pg)
-  (require 'pg)
-  (let ((conn (make-pg-conn :host "localhost")))
+  (let ((conn (clutch-db-test--make-pgcon :host "localhost")))
     ;; Basic pagination
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10)))
       (should (string-match-p "LIMIT 10" sql))
@@ -1349,8 +1427,8 @@
 (ert-deftest clutch-db-test-mysql-escape ()
   "Test MySQL identifier and literal escaping via generic interface."
   (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "localhost")))
+  (require 'mysql-wire)
+  (let ((conn (make-mysql-wire-conn :host "localhost")))
     ;; Identifier escaping
     (should (equal (clutch-db-escape-identifier conn "table")
                    "`table`"))
@@ -1365,8 +1443,7 @@
 (ert-deftest clutch-db-test-pg-escape ()
   "Test PostgreSQL identifier and literal escaping via generic interface."
   (require 'clutch-db-pg)
-  (require 'pg)
-  (let ((conn (make-pg-conn :host "localhost")))
+  (let ((conn (clutch-db-test--make-pgcon :host "localhost")))
     ;; Identifier escaping
     (should (equal (clutch-db-escape-identifier conn "table")
                    "\"table\""))
@@ -1374,9 +1451,9 @@
                    "\"my\"\"table\""))
     ;; Literal escaping
     (should (equal (clutch-db-escape-literal conn "hello")
-                   "'hello'"))
+                   "E'hello'"))
     (should (equal (clutch-db-escape-literal conn "it's")
-                   "'it''s'"))))
+                   "E'it''s'"))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-escape ()
   "ClickHouse JDBC should leave simple identifiers bare and backtick-escape others."
@@ -1393,8 +1470,8 @@
 (ert-deftest clutch-db-test-mysql-metadata ()
   "Test MySQL metadata accessors."
   (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "example.com" :port 3307
+  (require 'mysql-wire)
+  (let ((conn (make-mysql-wire-conn :host "example.com" :port 3307
                                 :user "testuser" :database "testdb")))
     (should (equal (clutch-db-host conn) "example.com"))
     (should (= (clutch-db-port conn) 3307))
@@ -1405,9 +1482,8 @@
 (ert-deftest clutch-db-test-pg-metadata ()
   "Test PostgreSQL metadata accessors."
   (require 'clutch-db-pg)
-  (require 'pg)
-  (let ((conn (make-pg-conn :host "example.com" :port 5433
-                             :user "pguser" :database "pgdb")))
+  (let ((conn (clutch-db-test--make-pgcon :host "example.com" :port 5433
+                                          :user "pguser" :database "pgdb")))
     (should (equal (clutch-db-host conn) "example.com"))
     (should (= (clutch-db-port conn) 5433))
     (should (equal (clutch-db-user conn) "pguser"))
@@ -1417,13 +1493,12 @@
 (ert-deftest clutch-db-test-pg-list-schemas-filters-system-schemas ()
   "PostgreSQL schema listing should omit built-in system schemas."
   (require 'clutch-db-pg)
-  (require 'pg)
-  (let ((conn (make-pg-conn :database "test"))
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
         captured-sql)
-    (cl-letf (((symbol-function 'pg-query)
+    (cl-letf (((symbol-function 'pg-exec)
                (lambda (_conn sql)
                  (setq captured-sql sql)
-                 (make-pg-result :rows '(("app") ("public"))))))
+                 (make-pgresult :tuples '(("app") ("public"))))))
       (should (equal (clutch-db-list-schemas conn) '("app" "public")))
       (should (string-match-p "information_schema" captured-sql))
       (should (string-match-p "NOT LIKE 'pg" captured-sql)))))
@@ -1431,13 +1506,12 @@
 (ert-deftest clutch-db-test-pg-current-schema-caches-result ()
   "PostgreSQL current schema lookup should cache the result on the connection."
   (require 'clutch-db-pg)
-  (require 'pg)
-  (let ((conn (make-pg-conn :database "test"))
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
         (calls 0))
-    (cl-letf (((symbol-function 'pg-query)
+    (cl-letf (((symbol-function 'pg-exec)
                (lambda (_conn _sql)
                  (setq calls (1+ calls))
-                 (make-pg-result :rows '(("public"))))))
+                 (make-pgresult :tuples '(("public"))))))
       (should (equal (clutch-db-current-schema conn) "public"))
       (should (equal (clutch-db-current-schema conn) "public"))
       (should (= calls 1)))))
@@ -1445,13 +1519,12 @@
 (ert-deftest clutch-db-test-pg-set-current-schema-updates-search-path-cache ()
   "PostgreSQL schema switching should issue SET search_path and update cache."
   (require 'clutch-db-pg)
-  (require 'pg)
-  (let ((conn (make-pg-conn :database "test"))
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
         executed-sql)
-    (cl-letf (((symbol-function 'pg-query)
+    (cl-letf (((symbol-function 'pg-exec)
                (lambda (_conn sql)
                  (setq executed-sql sql)
-                 (make-pg-result :rows nil))))
+                 (make-pgresult :tuples nil))))
       (should (equal (clutch-db-set-current-schema conn "app") "app"))
       (should (equal executed-sql "SET search_path TO \"app\""))
       (should (equal (clutch-db-current-schema conn) "app")))))
@@ -1459,17 +1532,16 @@
 (ert-deftest clutch-db-test-pg-connect-applies-schema-via-search-path ()
   "PostgreSQL connect should restore a requested schema via search_path."
   (require 'clutch-db-pg)
-  (require 'pg)
   (let (captured-args executed-sql)
-    (cl-letf (((symbol-function 'pg-connect)
+    (cl-letf (((symbol-function 'pg-connect-plist)
                (lambda (&rest args)
                  (setq captured-args args)
-                 (make-pg-conn :host "127.0.0.1" :port 54321
-                               :user "system" :database "test")))
-              ((symbol-function 'pg-query)
+                 (clutch-db-test--make-pgcon :host "127.0.0.1" :port 54321
+                                             :user "system" :database "test")))
+              ((symbol-function 'pg-exec)
                (lambda (_conn sql)
                  (setq executed-sql sql)
-                 (make-pg-result :rows nil))))
+                 (make-pgresult :tuples nil))))
       (let ((conn (clutch-db-pg-connect
                    '(:host "127.0.0.1"
                      :port 54321
@@ -1477,21 +1549,21 @@
                      :user "system"
                      :password "123456"
                      :schema "app"))))
-        (should (equal (pg-conn-host conn) "127.0.0.1"))
-        (should-not (plist-member captured-args :schema))
+        (should (equal (nth 0 captured-args) "test"))
+        (should (equal (nth 1 captured-args) "system"))
+        (should-not (plist-member (nthcdr 2 captured-args) :schema))
         (should (equal executed-sql "SET search_path TO \"app\""))
         (should (equal (clutch-db-current-schema conn) "app"))))))
 
 (ert-deftest clutch-db-test-pg-connect-normalizes-tls-to-sslmode ()
-  "PostgreSQL backend connect should pass canonical `:sslmode' to `pg-connect'."
+  "PostgreSQL backend connect should map canonical SSLMODE to pg-el TLS args."
   (require 'clutch-db-pg)
-  (require 'pg)
   (let (captured-args)
-    (cl-letf (((symbol-function 'pg-connect)
+    (cl-letf (((symbol-function 'pg-connect-plist)
                (lambda (&rest args)
                  (setq captured-args args)
-                 (make-pg-conn :host "127.0.0.1" :port 5432
-                               :user "postgres" :database "test"))))
+                 (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                                             :user "postgres" :database "test"))))
       (clutch-db-pg-connect
        '(:host "127.0.0.1"
          :port 5432
@@ -1499,19 +1571,19 @@
          :user "postgres"
          :password "secret"
          :tls t))
-      (should (eq (plist-get captured-args :sslmode) 'require))
-      (should-not (plist-member captured-args :tls)))))
+      (should (eq (plist-get (nthcdr 2 captured-args) :tls-options) t))
+      (should-not (plist-member (nthcdr 2 captured-args) :tls)))))
 
-(ert-deftest clutch-db-test-mysql-connect-normalizes-tls-nil-to-ssl-mode ()
-  "MySQL backend connect should pass canonical `:ssl-mode' to `mysql-connect'."
+(ert-deftest clutch-db-test-mysql-wire-connect-normalizes-tls-nil-to-ssl-mode ()
+  "MySQL backend connect should pass canonical `:ssl-mode' to `mysql-wire-connect'."
   (require 'clutch-db-mysql)
-  (require 'mysql)
+  (require 'mysql-wire)
   (let (captured-args)
-    (cl-letf (((symbol-function 'mysql-connect)
+    (cl-letf (((symbol-function 'mysql-wire-connect)
                (lambda (&rest args)
                  (setq captured-args args)
-                 (make-mysql-conn :host "127.0.0.1" :port 3306
-                                  :user "root" :database "mysql"))))
+                 (make-mysql-wire-conn :host "127.0.0.1" :port 3306
+                                  :user "root" :database "mysql-wire"))))
       (clutch-db-mysql-connect
        '(:host "127.0.0.1"
          :port 3306
@@ -1526,10 +1598,9 @@
 (ert-deftest clutch-db-test-pg-interrupt-query-returns-t-after-cancel ()
   "PostgreSQL interrupt should report success when cancel completes."
   (require 'clutch-db-pg)
-  (require 'pg)
-  (let ((conn (make-pg-conn :host "127.0.0.1" :port 5432 :pid 11 :secret-key 22))
+  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432))
         called)
-    (cl-letf (((symbol-function 'pg-cancel-query)
+    (cl-letf (((symbol-function 'pg-cancel)
                (lambda (pg-conn)
                  (setq called pg-conn)
                  t)))
@@ -1539,9 +1610,8 @@
 (ert-deftest clutch-db-test-pg-interrupt-query-returns-nil-on-pg-error ()
   "PostgreSQL interrupt should degrade to nil when cancel errors."
   (require 'clutch-db-pg)
-  (require 'pg)
-  (let ((conn (make-pg-conn :host "127.0.0.1" :port 5432 :pid 11 :secret-key 22)))
-    (cl-letf (((symbol-function 'pg-cancel-query)
+  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432)))
+    (cl-letf (((symbol-function 'pg-cancel)
                (lambda (_pg-conn)
                  (signal 'pg-connection-error '("cancel failed")))))
       (should-not (clutch-db-interrupt-query conn)))))
@@ -1653,10 +1723,10 @@ Skips if `clutch-db-test-mysql-password' is nil."
 
 (ert-deftest clutch-db-test-mysql-show-create-table-empty-rows-errors-cleanly ()
   "MySQL show-create-table should signal `clutch-db-error' on empty row sets."
-  (let ((conn (make-mysql-conn :host "localhost")))
-    (cl-letf (((symbol-function 'mysql-query)
+  (let ((conn (make-mysql-wire-conn :host "localhost")))
+    (cl-letf (((symbol-function 'mysql-wire-query)
                (lambda (_conn _sql)
-                 (make-mysql-result :rows nil))))
+                 (make-mysql-wire-result :rows nil))))
       (should-error (clutch-db-show-create-table conn "missing_table")
                     :type 'clutch-db-error))))
 
@@ -2258,7 +2328,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
     (ert-skip "Need both MySQL and PostgreSQL for cross-backend tests"))
   ;; Test numeric
   (clutch-db-test--with-local-mysql-tls
-    (let ((mysql-conn (when clutch-db-test-mysql-password
+    (let ((mysql-wire-conn (when clutch-db-test-mysql-password
                         (clutch-db-connect
                          'mysql
                          (list :host clutch-db-test-mysql-host
@@ -2277,15 +2347,15 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
       (unwind-protect
           (progn
             ;; Both should return numeric type-category for integers
-            (when mysql-conn
-              (let* ((result (clutch-db-query mysql-conn "SELECT 42 AS n"))
+            (when mysql-wire-conn
+              (let* ((result (clutch-db-query mysql-wire-conn "SELECT 42 AS n"))
                      (cols (clutch-db-result-columns result)))
                 (should (eq (plist-get (car cols) :type-category) 'numeric))))
             (when pg-conn
               (let* ((result (clutch-db-query pg-conn "SELECT 42 AS n"))
                      (cols (clutch-db-result-columns result)))
                 (should (eq (plist-get (car cols) :type-category) 'numeric)))))
-        (when mysql-conn (clutch-db-disconnect mysql-conn))
+        (when mysql-wire-conn (clutch-db-disconnect mysql-wire-conn))
         (when pg-conn (clutch-db-disconnect pg-conn))))))
 
 (ert-deftest clutch-db-test-cross-null-handling ()
