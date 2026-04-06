@@ -118,9 +118,10 @@ Use \":memory:\" for a transient in-memory database."
   (let ((case-fold-search t))
     (string-match-p "\\`\\s-*\\(SELECT\\|WITH\\|EXPLAIN\\|PRAGMA\\)" sql)))
 
-(defun clutch-db-sqlite--run-select (handle sql)
-  "Execute a SELECT-like SQL on HANDLE; return a `clutch-db-result'."
-  (let* ((raw      (sqlite-select handle sql nil 'full))
+(defun clutch-db-sqlite--run-select (handle sql &optional values)
+  "Execute a SELECT-like SQL on HANDLE with optional VALUES.
+Return a `clutch-db-result'."
+  (let* ((raw      (sqlite-select handle sql values 'full))
          (col-names (car raw))
          (rows     (cdr raw))
          (cols     (clutch-db-sqlite--columns-from-names col-names rows)))
@@ -128,11 +129,12 @@ Use \":memory:\" for a transient in-memory database."
      :connection handle :columns cols :rows rows
      :affected-rows nil :last-insert-id nil :warnings nil)))
 
-(defun clutch-db-sqlite--run-dml (handle sql)
-  "Execute a DML SQL on HANDLE; return a `clutch-db-result'."
+(defun clutch-db-sqlite--run-dml (handle sql &optional values)
+  "Execute a DML SQL on HANDLE with optional VALUES.
+Return a `clutch-db-result'."
   (make-clutch-db-result
    :connection handle :columns nil :rows nil
-   :affected-rows (sqlite-execute handle sql)
+   :affected-rows (sqlite-execute handle sql values)
    :last-insert-id nil :warnings nil))
 
 ;;;; Query methods
@@ -146,6 +148,19 @@ Use \":memory:\" for a transient in-memory database."
             (if (clutch-db-sqlite--select-p sql)
                 (clutch-db-sqlite--run-select handle sql)
               (clutch-db-sqlite--run-dml handle sql))
+          (sqlite-error
+           (signal 'clutch-db-error (list (error-message-string err)))))
+      (setf (clutch-db-sqlite-conn-busy conn) nil))))
+
+(cl-defmethod clutch-db-execute-params ((conn clutch-db-sqlite-conn) sql params)
+  "Execute parameterized SQL on SQLite CONN with PARAMS."
+  (let ((handle (clutch-db-sqlite-conn-handle conn)))
+    (setf (clutch-db-sqlite-conn-busy conn) t)
+    (unwind-protect
+        (condition-case err
+            (if (clutch-db-sqlite--select-p sql)
+                (clutch-db-sqlite--run-select handle sql params)
+              (clutch-db-sqlite--run-dml handle sql params))
           (sqlite-error
            (signal 'clutch-db-error (list (error-message-string err)))))
       (setf (clutch-db-sqlite-conn-busy conn) nil))))

@@ -43,10 +43,16 @@
 
 (declare-function pg-result "pg" (result what &rest arg))
 (declare-function pg-exec "pg" (con &rest args))
+(declare-function pg-exec-prepared "pg" (con query typed-arguments &rest args))
 (declare-function pg-connect-plist "pg" (dbname user &rest args))
+(declare-function pg-prepare "pg" (con query argument-types &rest args))
+(declare-function pg-bind "pg" (con statement-name typed-arguments &rest args))
+(declare-function pg-describe-portal "pg" (con portal))
+(declare-function pg-fetch "pg" (con result &rest args))
 (declare-function pg-disconnect "pg" (con))
 (declare-function pg-cancel "pg" (con))
 (declare-function pg-connection-busy-p "pg" (con))
+(declare-function make-pgresult "pg" (&rest slot-value-pairs))
 (declare-function pgcon-process "pg" (object))
 (declare-function pgcon-dbname "pg" (object))
 (declare-function pgcon-connect-plist "pg" (object))
@@ -269,6 +275,74 @@ No special init needed — encoding is set in startup message.")
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
+(defun clutch-db-pg--rewrite-param-sql (sql)
+  "Return SQL with `?' placeholders rewritten to PostgreSQL `$N' form."
+  (let ((len (length sql))
+        (pos 0)
+        (index 1)
+        parts)
+    (while (< pos len)
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+          (progn
+            (push (substring sql pos skip) parts)
+            (setq pos skip))
+        (let ((ch (aref sql pos)))
+          (if (= ch ??)
+              (progn
+                (push (format "$%d" index) parts)
+                (cl-incf index)
+                (cl-incf pos))
+            (push (string ch) parts)
+            (cl-incf pos)))))
+    (apply #'concat (nreverse parts))))
+
+(defun clutch-db-pg--typed-arguments (params)
+  "Return PARAMS as pg-el typed arguments using unspecified types."
+  (mapcar (lambda (value)
+            (cons value nil))
+          params))
+
+(defun clutch-db-pg--bind-with-null-params (conn statement-name typed-arguments)
+  "Bind TYPED-ARGUMENTS to STATEMENT-NAME on CONN, preserving nil as SQL NULL."
+  (let ((orig-format (symbol-function 'format))
+        (orig-encode (symbol-function 'encode-coding-string)))
+    (cl-letf (((symbol-function 'format)
+               (lambda (fmt &rest args)
+                 (if (and (string= fmt "%s")
+                          (= (length args) 1)
+                          (null (car args)))
+                     nil
+                   (apply orig-format fmt args))))
+              ((symbol-function 'encode-coding-string)
+               (lambda (string coding-system &optional nocopy)
+                 (if (null string)
+                     nil
+                   (funcall orig-encode string coding-system nocopy)))))
+      (pg-bind conn statement-name typed-arguments :portal ""))))
+
+(defun clutch-db-pg--exec-prepared-with-nulls (conn sql typed-arguments)
+  "Execute SQL with TYPED-ARGUMENTS on CONN, preserving nil parameters."
+  (let* ((statement-name (pg-prepare conn sql (make-list (length typed-arguments) nil)))
+         (portal-name (clutch-db-pg--bind-with-null-params
+                       conn statement-name typed-arguments))
+         (result (make-pgresult :connection conn :portal portal-name)))
+    (pg-describe-portal conn portal-name)
+    (pg-fetch conn result)))
+
+(cl-defmethod clutch-db-execute-params ((conn pgcon) sql params)
+  "Execute parameterized SQL on PostgreSQL CONN with PARAMS."
+  (condition-case err
+      (let* ((pg-sql (clutch-db-pg--rewrite-param-sql sql))
+             (typed-arguments (clutch-db-pg--typed-arguments params))
+             (result (if (memq nil params)
+                         (clutch-db-pg--exec-prepared-with-nulls
+                          conn pg-sql typed-arguments)
+                       (pg-exec-prepared conn pg-sql typed-arguments))))
+        (clutch-db-pg--wrap-result result))
+    (pg-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
+
 (cl-defmethod clutch-db-interrupt-query ((conn pgcon))
   "Interrupt the current PostgreSQL query on CONN without dropping the session."
   (condition-case nil
@@ -305,6 +379,21 @@ controls the optional sort clause."
       params
     (signal 'clutch-db-error
             (list "PostgreSQL metadata refresh requires stored connection params"))))
+
+(defun clutch-db-pg--submit-metadata-task (conn work-fn callback &optional errback)
+  "Run metadata WORK-FN for CONN on its reusable background context.
+WORK-FN receives the live metadata context.  CALLBACK and ERRBACK run on the
+main thread."
+  (let ((params (clutch-db-pg--metadata-params conn)))
+    (clutch--worker-submit-contextual
+     conn
+     (lambda ()
+       (clutch-db-open-metadata-context conn params))
+     (lambda (context)
+       (clutch-db-close-metadata-context conn context))
+     work-fn
+     callback
+     errback)))
 
 (cl-defmethod clutch-db-open-metadata-context ((_conn pgcon) params)
   "Return a dedicated PostgreSQL metadata context built from PARAMS."
@@ -353,72 +442,40 @@ ORDER BY schema_name")))
 (cl-defmethod clutch-db-refresh-schema-async ((conn pgcon) callback
                                               &optional errback)
   "Refresh PostgreSQL schema names for CONN on a background worker."
-  (clutch--worker-submit
+  (clutch-db-pg--submit-metadata-task
    conn
-   (lambda ()
-     (let (context)
-       (unwind-protect
-           (progn
-             (setq context
-                   (clutch-db-open-metadata-context
-                    conn (clutch-db-pg--metadata-params conn)))
-             (clutch-db-list-tables context))
-         (when context
-           (clutch-db-close-metadata-context conn context)))))
+   (lambda (context)
+     (clutch-db-list-tables context))
    callback
    errback))
 
 (cl-defmethod clutch-db-list-columns-async ((conn pgcon) table callback
                                             &optional errback)
   "Fetch PostgreSQL column names for TABLE on CONN on a background worker."
-  (clutch--worker-submit
+  (clutch-db-pg--submit-metadata-task
    conn
-   (lambda ()
-     (let (context)
-       (unwind-protect
-           (progn
-             (setq context
-                   (clutch-db-open-metadata-context
-                    conn (clutch-db-pg--metadata-params conn)))
-             (clutch-db-list-columns context table))
-         (when context
-           (clutch-db-close-metadata-context conn context)))))
+   (lambda (context)
+     (clutch-db-list-columns context table))
    callback
    errback))
 
 (cl-defmethod clutch-db-column-details-async ((conn pgcon) table callback
                                               &optional errback)
   "Fetch PostgreSQL column details for TABLE on CONN on a background worker."
-  (clutch--worker-submit
+  (clutch-db-pg--submit-metadata-task
    conn
-   (lambda ()
-     (let (context)
-       (unwind-protect
-           (progn
-             (setq context
-                   (clutch-db-open-metadata-context
-                    conn (clutch-db-pg--metadata-params conn)))
-             (clutch-db-column-details context table))
-         (when context
-           (clutch-db-close-metadata-context conn context)))))
+   (lambda (context)
+     (clutch-db-column-details context table))
    callback
    errback))
 
 (cl-defmethod clutch-db-table-comment-async ((conn pgcon) table callback
                                              &optional errback)
   "Fetch the PostgreSQL comment for TABLE on CONN on a background worker."
-  (clutch--worker-submit
+  (clutch-db-pg--submit-metadata-task
    conn
-   (lambda ()
-     (let (context)
-       (unwind-protect
-           (progn
-             (setq context
-                   (clutch-db-open-metadata-context
-                    conn (clutch-db-pg--metadata-params conn)))
-             (clutch-db-table-comment context table))
-         (when context
-           (clutch-db-close-metadata-context conn context)))))
+   (lambda (context)
+     (clutch-db-table-comment context table))
    callback
    errback))
 
@@ -623,18 +680,10 @@ ORDER BY t.event_object_table, t.trigger_name")))
 (cl-defmethod clutch-db-list-objects-async ((conn pgcon) category callback
                                             &optional errback)
   "Fetch PostgreSQL object entries for CATEGORY on CONN on a background worker."
-  (clutch--worker-submit
+  (clutch-db-pg--submit-metadata-task
    conn
-   (lambda ()
-     (let (context)
-       (unwind-protect
-           (progn
-             (setq context
-                   (clutch-db-open-metadata-context
-                    conn (clutch-db-pg--metadata-params conn)))
-             (clutch-db-list-objects context category))
-         (when context
-           (clutch-db-close-metadata-context conn context)))))
+   (lambda (context)
+     (clutch-db-list-objects context category))
    callback
    errback))
 

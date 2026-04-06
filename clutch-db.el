@@ -418,6 +418,15 @@ started, nil when unsupported.")
 (cl-defgeneric clutch-db-query (conn sql)
   "Execute SQL on CONN and return a `clutch-db-result'.")
 
+(cl-defgeneric clutch-db-execute-params (conn sql params)
+  "Execute SQL on CONN with positional PARAMS.
+SQL uses `?' placeholders.  PARAMS is a list of Elisp values.
+Return the same shape as `clutch-db-query'.")
+
+(cl-defmethod clutch-db-execute-params ((conn t) sql params)
+  "Fallback parameter execution for CONN by literal substitution."
+  (clutch-db-query conn (clutch-db-render-sql-params conn sql params)))
+
 (cl-defgeneric clutch-db-interrupt-query (conn)
   "Interrupt the current query on CONN.
 Return non-nil when the query was handed off to a backend-specific
@@ -440,6 +449,60 @@ the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
 
 (cl-defgeneric clutch-db-escape-literal (conn value)
   "Escape VALUE as a SQL string literal for CONN's dialect.")
+
+(defun clutch-db--param-literal (conn value)
+  "Return VALUE rendered as an SQL literal for CONN."
+  (cond
+   ((null value) "NULL")
+   ((numberp value) (number-to-string value))
+   ((stringp value) (clutch-db-escape-literal conn value))
+   ((and (listp value)
+         (clutch-db-format-temporal value))
+    (clutch-db-escape-literal conn (clutch-db-format-temporal value)))
+   ((or (hash-table-p value) (vectorp value))
+    (clutch-db-escape-literal
+     conn
+     (condition-case nil
+         (json-serialize value)
+       (error (format "%S" value)))))
+   (t
+    (clutch-db-escape-literal conn (format "%S" value)))))
+
+(defun clutch-db-substitute-params (sql params render-fn)
+  "Return SQL with PARAMS substituted using RENDER-FN.
+SQL uses `?' positional placeholders.  PARAMS is a list of parameter values.
+RENDER-FN is called once per parameter and must return the replacement string."
+  (let ((len (length sql))
+        (pos 0)
+        (remaining params)
+        parts)
+    (while (< pos len)
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+          (progn
+            (push (substring sql pos skip) parts)
+            (setq pos skip))
+        (let ((ch (aref sql pos)))
+          (if (= ch ??)
+              (progn
+                (unless remaining
+                  (signal 'clutch-db-error
+                          (list (format "Not enough parameters for SQL template: %s" sql))))
+                (push (funcall render-fn (car remaining)) parts)
+                (setq remaining (cdr remaining))
+                (cl-incf pos))
+            (push (string ch) parts)
+            (cl-incf pos)))))
+    (when remaining
+      (signal 'clutch-db-error
+              (list (format "Too many parameters for SQL template: %s" sql))))
+    (apply #'concat (nreverse parts))))
+
+(defun clutch-db-render-sql-params (conn sql params)
+  "Return SQL rendered for CONN with PARAMS interpolated as SQL literals."
+  (clutch-db-substitute-params
+   sql params
+   (lambda (value)
+     (clutch-db--param-literal conn value))))
 
 ;; Schema
 

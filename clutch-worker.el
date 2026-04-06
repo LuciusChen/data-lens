@@ -37,10 +37,31 @@
   condvar
   queue
   closing-p
-  thread)
+  thread
+  context
+  context-closer)
 
 (defvar clutch--metadata-workers (make-hash-table :test 'eq)
   "Background metadata workers keyed by live connection object.")
+
+(defun clutch--worker-reset-context (worker)
+  "Close and clear WORKER's reusable metadata context."
+  (when-let* ((context (clutch--worker-context worker))
+              (closer (clutch--worker-context-closer worker)))
+    (setf (clutch--worker-context worker) nil
+          (clutch--worker-context-closer worker) nil)
+    (condition-case nil
+        (funcall closer context)
+      (error nil))))
+
+(defun clutch--worker-ensure-context (worker open-fn close-fn)
+  "Return WORKER's metadata context, creating it with OPEN-FN when needed.
+CLOSE-FN is recorded for later cleanup when the context is reset."
+  (or (clutch--worker-context worker)
+      (let ((context (funcall open-fn)))
+        (setf (clutch--worker-context worker) context
+              (clutch--worker-context-closer worker) close-fn)
+        context)))
 
 (defun clutch--worker-supported-p ()
   "Return non-nil when Emacs supports the worker primitives clutch needs."
@@ -52,26 +73,28 @@
 
 (defun clutch--worker-loop (worker)
   "Run WORKER's task loop until shutdown."
-  (catch 'done
-    (while t
-      (let (job)
-        (let ((mutex (clutch--worker-mutex worker)))
-          (mutex-lock mutex)
-          (unwind-protect
-              (progn
-                (while (and (null (clutch--worker-queue worker))
-                            (not (clutch--worker-closing-p worker)))
-                  (condition-wait (clutch--worker-condvar worker)))
-                (cond
-                 ((clutch--worker-queue worker)
-                  (setq job (car (clutch--worker-queue worker)))
-                  (setf (clutch--worker-queue worker)
-                        (cdr (clutch--worker-queue worker))))
-                 ((clutch--worker-closing-p worker)
-                  (throw 'done nil))))
-            (mutex-unlock mutex)))
-        (when job
-          (funcall job))))))
+  (unwind-protect
+      (catch 'done
+        (while t
+          (let (job)
+            (let ((mutex (clutch--worker-mutex worker)))
+              (mutex-lock mutex)
+              (unwind-protect
+                  (progn
+                    (while (and (null (clutch--worker-queue worker))
+                                (not (clutch--worker-closing-p worker)))
+                      (condition-wait (clutch--worker-condvar worker)))
+                    (cond
+                     ((clutch--worker-queue worker)
+                      (setq job (car (clutch--worker-queue worker)))
+                      (setf (clutch--worker-queue worker)
+                            (cdr (clutch--worker-queue worker))))
+                     ((clutch--worker-closing-p worker)
+                      (throw 'done nil))))
+                (mutex-unlock mutex)))
+            (when job
+              (funcall job)))))
+    (clutch--worker-reset-context worker)))
 
 (defun clutch--worker-create ()
   "Create and start a background metadata worker."
@@ -110,6 +133,38 @@ was queued."
                     (when callback
                       (run-at-time 0 nil callback result)))
                 (error
+                 (when errback
+                   (run-at-time 0 nil errback (error-message-string err))))))))
+      (let ((mutex (clutch--worker-mutex worker)))
+        (mutex-lock mutex)
+        (unwind-protect
+            (progn
+              (setf (clutch--worker-queue worker)
+                    (nconc (clutch--worker-queue worker) (list job)))
+              (condition-notify (clutch--worker-condvar worker)))
+          (mutex-unlock mutex)))
+      t)))
+
+(defun clutch--worker-submit-contextual (conn open-fn close-fn work-fn
+                                             callback &optional errback)
+  "Run WORK-FN for CONN with a reusable metadata context on a worker thread.
+OPEN-FN builds the metadata context the first time the worker needs one.
+CLOSE-FN releases that context during shutdown or when a task error forces a
+reset.  WORK-FN receives the live context and returns the value delivered to
+CALLBACK on the main thread.  ERRBACK receives an error-message string on the
+main thread.  Return non-nil when the task was queued."
+  (when (clutch--worker-supported-p)
+    (let* ((worker (clutch--worker-get conn))
+           (job
+            (lambda ()
+              (condition-case err
+                  (let* ((context (clutch--worker-ensure-context
+                                   worker open-fn close-fn))
+                         (result (funcall work-fn context)))
+                    (when callback
+                      (run-at-time 0 nil callback result)))
+                (error
+                 (clutch--worker-reset-context worker)
                  (when errback
                    (run-at-time 0 nil errback (error-message-string err))))))))
       (let ((mutex (clutch--worker-mutex worker)))

@@ -255,9 +255,11 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
      ((clutch--manual-commit-dirtying-query-p sql)
       (clutch--set-tx-dirty conn)))))
 
-(defun clutch--run-db-query (conn sql)
-  "Execute SQL on CONN and keep transaction UI state in sync."
-  (let ((result (clutch-db-query conn sql)))
+(defun clutch--run-db-query (conn sql &optional params)
+  "Execute SQL on CONN with optional PARAMS and keep transaction UI state in sync."
+  (let ((result (if params
+                    (clutch-db-execute-params conn sql params)
+                  (clutch-db-query conn sql))))
     (clutch--clear-connection-problem-capture conn)
     (clutch--record-tx-state-after-query conn sql)
     result))

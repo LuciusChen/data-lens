@@ -131,6 +131,7 @@
 (declare-function clutch-result--build-pending-insert-statements "clutch-edit" ())
 (declare-function clutch-result--build-update-statements "clutch-edit" ())
 (declare-function clutch-result--build-pending-delete-statements "clutch-edit" ())
+(declare-function clutch-result--render-statements "clutch-edit" (statements))
 (declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
 
 ;; Forward declarations — functions from clutch-db
@@ -1166,13 +1167,14 @@ Prefers an exact error position; otherwise highlights the whole statement."
                    clutch--pending-edits
                    clutch--pending-deletes)
                (mapconcat (lambda (s) (concat s ";"))
-                          (append
-                           (when clutch--pending-inserts
-                             (clutch-result--build-pending-insert-statements))
-                           (when clutch--pending-edits
-                             (clutch-result--build-update-statements))
-                           (when clutch--pending-deletes
-                             (clutch-result--build-pending-delete-statements)))
+                          (clutch-result--render-statements
+                           (append
+                            (when clutch--pending-inserts
+                              (clutch-result--build-pending-insert-statements))
+                            (when clutch--pending-edits
+                              (clutch-result--build-update-statements))
+                            (when clutch--pending-deletes
+                              (clutch-result--build-pending-delete-statements))))
                           "\n")
              (clutch-result--effective-query)))
           ((use-region-p)

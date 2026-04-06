@@ -36,7 +36,7 @@
 (declare-function clutch--execute "clutch-query" (sql &optional conn))
 (declare-function clutch--format-value "clutch-query" (value))
 (declare-function clutch--json-value-to-string "clutch-query" (value))
-(declare-function clutch--run-db-query "clutch-connection" (conn sql))
+(declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
 (declare-function clutch--sql-find-top-level-clause "clutch-query"
                   (sql pattern &optional start))
 (declare-function clutch--sql-normalize-for-rewrite "clutch-query" (sql))
@@ -47,6 +47,7 @@
 (declare-function clutch-result--selected-row-indices "clutch" ())
 (declare-function clutch-db-escape-identifier "clutch-db" (conn name))
 (declare-function clutch-db-escape-literal "clutch-db" (conn value))
+(declare-function clutch-db-substitute-params "clutch-db" (sql params render-fn))
 (declare-function clutch-db-foreign-keys "clutch-db" (conn table))
 (declare-function clutch-db-primary-key-columns "clutch-db" (conn table))
 
@@ -594,34 +595,51 @@ Returns hash-table mapping pk-vec -> list of (cidx . new-value)."
                   (truncate-string-to-width (string-trim stmt) 120 nil nil "…")))))
 
 (defun clutch--pk-where-parts (conn pk-names pk-values)
-  "Build WHERE clause parts for PK-NAMES with PK-VALUES using CONN."
-  (cl-mapcar (lambda (col val)
-               (format "%s %s"
-                       (clutch-db-escape-identifier conn col)
-                       (if (null val) "IS NULL"
-                         (format "= %s" (clutch--value-to-literal val)))))
-             pk-names pk-values))
+  "Return `(PARTS . PARAMS)' for PK-NAMES with PK-VALUES using CONN.
+NULL primary-key values stay literal as `IS NULL' and are not added to
+the parameter list."
+  (let (parts params)
+    (cl-mapc
+     (lambda (col val)
+       (let ((column-sql (clutch-db-escape-identifier conn col)))
+         (if (null val)
+             (push (format "%s IS NULL" column-sql) parts)
+           (push (format "%s = ?" column-sql) parts)
+           (push val params))))
+     pk-names pk-values)
+    (cons (nreverse parts) (nreverse params))))
+
+(defun clutch-result--render-statement (statement)
+  "Return preview SQL text for mutation STATEMENT."
+  (pcase-let ((`(,sql . ,params) statement))
+    (clutch-db-substitute-params sql params #'clutch--value-to-literal)))
+
+(defun clutch-result--render-statements (statements)
+  "Return preview SQL strings for mutation STATEMENTS."
+  (mapcar #'clutch-result--render-statement statements))
 
 (defun clutch-result--build-update-stmt (table pk-vec edits col-names pk-names)
-  "Build an UPDATE statement for TABLE.
+  "Build an UPDATE statement spec for TABLE.
 PK-VEC is the primary key vector, EDITS is a list of (cidx . value),
 COL-NAMES are column names, PK-NAMES are primary key column names."
   (let ((conn clutch-connection))
-    (let ((set-parts
-           (mapcar (lambda (e)
-                     (format "%s = %s"
-                             (clutch-db-escape-identifier
-                              conn (nth (car e) col-names))
-                             (clutch--value-to-literal (cdr e))))
-                   edits))
-          (where-parts (clutch--pk-where-parts conn pk-names (append pk-vec nil))))
-      (format "UPDATE %s SET %s WHERE %s"
-              (clutch-db-escape-identifier conn table)
-              (mapconcat #'identity set-parts ", ")
-              (mapconcat #'identity where-parts " AND ")))))
+    (let ((set-parts nil)
+          (set-params nil)
+          (where-spec (clutch--pk-where-parts conn pk-names (append pk-vec nil))))
+      (dolist (edit edits)
+        (push (format "%s = ?"
+                      (clutch-db-escape-identifier
+                       conn (nth (car edit) col-names)))
+              set-parts)
+        (push (cdr edit) set-params))
+      (cons (format "UPDATE %s SET %s WHERE %s"
+                    (clutch-db-escape-identifier conn table)
+                    (mapconcat #'identity (nreverse set-parts) ", ")
+                    (mapconcat #'identity (car where-spec) " AND "))
+            (append (nreverse set-params) (cdr where-spec))))))
 
 (defun clutch-result--build-update-statements ()
-  "Build UPDATE statements from `clutch--pending-edits'."
+  "Build UPDATE statement specs from `clutch--pending-edits'."
   (unless clutch--pending-edits
     (user-error "No pending edits"))
   (let* ((table (clutch--result-source-table-or-user-error "Build UPDATE"))
@@ -639,7 +657,7 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
     statements))
 
 (defun clutch-result--build-pending-insert-statements ()
-  "Build INSERT statements from `clutch--pending-inserts'."
+  "Build INSERT statement specs from `clutch--pending-inserts'."
   (let ((table (or (clutch-result--detect-table)
                    (user-error "Cannot detect source table"))))
     (mapcar (lambda (fields)
@@ -647,17 +665,18 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
             clutch--pending-inserts)))
 
 (defun clutch-result--build-pending-delete-statements ()
-  "Build DELETE statements from `clutch--pending-deletes'."
+  "Build DELETE statement specs from `clutch--pending-deletes'."
   (let* ((table (clutch--result-source-table-or-user-error "Build DELETE"))
          (pk-indices (clutch--result-pk-indices-or-user-error table "Build DELETE"))
          (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
          (conn clutch-connection))
     (mapcar (lambda (pk-vec)
-              (let ((where-parts
+              (let ((where-spec
                      (clutch--pk-where-parts conn pk-names (append pk-vec nil))))
-                (format "DELETE FROM %s WHERE %s"
-                        (clutch-db-escape-identifier conn table)
-                        (mapconcat #'identity where-parts " AND "))))
+                (cons (format "DELETE FROM %s WHERE %s"
+                              (clutch-db-escape-identifier conn table)
+                              (mapconcat #'identity (car where-spec) " AND "))
+                      (cdr where-spec))))
             clutch--pending-deletes)))
 
 ;;;###autoload
@@ -673,19 +692,27 @@ Executes in order: INSERTs first, then UPDATEs, then DELETEs."
                          (clutch-result--build-update-statements)))
          (delete-stmts (when clutch--pending-deletes
                          (clutch-result--build-pending-delete-statements)))
+         (insert-preview (when insert-stmts
+                           (clutch-result--render-statements insert-stmts)))
+         (update-preview (when update-stmts
+                           (clutch-result--render-statements update-stmts)))
+         (delete-preview (when delete-stmts
+                           (clutch-result--render-statements delete-stmts)))
          (all-stmts (append insert-stmts update-stmts delete-stmts))
-         (sql-text (mapconcat (lambda (s) (concat s ";")) all-stmts "\n")))
-    (clutch-result--ensure-where-guard delete-stmts "DELETE")
-    (clutch-result--ensure-where-guard update-stmts "UPDATE")
+         (preview-stmts (append insert-preview update-preview delete-preview))
+         (sql-text (mapconcat (lambda (s) (concat s ";")) preview-stmts "\n")))
+    (clutch-result--ensure-where-guard delete-preview "DELETE")
+    (clutch-result--ensure-where-guard update-preview "UPDATE")
     (when (yes-or-no-p (format "Execute %d statement%s?\n\n%s\n\nProceed? "
                                (length all-stmts)
                                (if (= (length all-stmts) 1) "" "s")
                                sql-text))
       (dolist (stmt all-stmts)
-        (condition-case err
-            (clutch--run-db-query clutch-connection stmt)
+        (pcase-let ((`(,sql . ,params) stmt))
+          (condition-case err
+              (clutch--run-db-query clutch-connection sql params)
           (clutch-db-error
-           (user-error "%s" (clutch--humanize-db-error (error-message-string err))))))
+           (user-error "%s" (clutch--humanize-db-error (error-message-string err)))))))
       (setq clutch--pending-edits nil
             clutch--pending-deletes nil
             clutch--pending-inserts nil
@@ -698,16 +725,17 @@ Executes in order: INSERTs first, then UPDATEs, then DELETEs."
 ;;;; Delete rows
 
 (defun clutch-result--build-delete-stmt (table row col-names pk-indices)
-  "Build a DELETE statement for TABLE.
+  "Build a DELETE statement spec for TABLE.
 ROW is the row data, COL-NAMES are column names,
 PK-INDICES are primary key column indices."
   (let* ((conn clutch-connection)
          (pk-names (mapcar (lambda (pki) (nth pki col-names)) pk-indices))
          (pk-values (mapcar (lambda (pki) (nth pki row)) pk-indices))
-         (where-parts (clutch--pk-where-parts conn pk-names pk-values)))
-    (format "DELETE FROM %s WHERE %s"
-            (clutch-db-escape-identifier conn table)
-            (mapconcat #'identity where-parts " AND "))))
+         (where-spec (clutch--pk-where-parts conn pk-names pk-values)))
+    (cons (format "DELETE FROM %s WHERE %s"
+                  (clutch-db-escape-identifier conn table)
+                  (mapconcat #'identity (car where-spec) " AND "))
+          (cdr where-spec))))
 
 ;;;###autoload
 (defun clutch-result-delete-rows ()
@@ -1979,17 +2007,23 @@ Skips columns with empty values."
     (clutch-result-insert--validate-field (car field) (cdr field))))
 
 (defun clutch-result-insert--build-sql (conn table fields)
-  "Build an INSERT SQL string for TABLE with FIELDS using CONN.
+  "Build an INSERT statement spec for TABLE with FIELDS using CONN.
 FIELDS is an alist of (column-name . value-string)."
-  (let ((cols (mapconcat (lambda (f) (clutch-db-escape-identifier conn (car f)))
+  (let ((cols (mapconcat (lambda (field)
+                           (clutch-db-escape-identifier conn (car field)))
                          fields ", "))
-        (vals (mapconcat (lambda (f)
-                           (let ((v (cdr f)))
-                             (if (string= (upcase v) "NULL") "NULL"
-                               (clutch-db-escape-literal conn v))))
-                         fields ", ")))
-    (format "INSERT INTO %s (%s) VALUES (%s)"
-            (clutch-db-escape-identifier conn table) cols vals)))
+        (placeholders (mapconcat (lambda (_field) "?") fields ", "))
+        (params (mapcar (lambda (field)
+                          (let ((value (cdr field)))
+                            (if (string= (upcase value) "NULL")
+                                nil
+                              value)))
+                        fields)))
+    (cons (format "INSERT INTO %s (%s) VALUES (%s)"
+                  (clutch-db-escape-identifier conn table)
+                  cols
+                  placeholders)
+          params)))
 
 ;;;###autoload
 (defun clutch-result-insert-commit ()

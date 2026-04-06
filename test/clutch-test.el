@@ -31,6 +31,8 @@
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
 (declare-function clutch--worker-supported-p "clutch-worker" ())
 (declare-function clutch--worker-submit "clutch-worker" (conn work-fn callback &optional errback))
+(declare-function clutch--worker-submit-contextual "clutch-worker"
+                  (conn open-fn close-fn work-fn callback &optional errback))
 (declare-function clutch--worker-shutdown "clutch-worker" (conn))
 
 ;;;; Test configuration
@@ -1998,6 +2000,49 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should (eq (plist-get (gethash "fake" clutch--schema-status-cache) :state)
                   'ready)))))
 
+(ert-deftest clutch-test-refresh-schema-cache-async-records-debug-submit-success-and-stale ()
+  "Async schema refresh should record submit, success, and stale-drop events."
+  (let ((clutch--schema-cache (make-hash-table :test 'equal))
+        (clutch--column-details-cache (make-hash-table :test 'equal))
+        (clutch--table-comment-cache (make-hash-table :test 'equal))
+        (clutch--help-doc-cache (make-hash-table :test 'equal))
+        (clutch--schema-status-cache (make-hash-table :test 'equal))
+        (clutch--schema-refresh-tickets (make-hash-table :test 'equal))
+        (clutch--schema-refresh-ticket-counter 0)
+        first-callback second-callback)
+    (with-temp-buffer
+      (let ((clutch-debug-mode t))
+        (setq-local clutch-connection 'fake-conn)
+        (cl-letf (((symbol-function 'clutch--connection-key)
+                   (lambda (_conn) "fake"))
+                  ((symbol-function 'clutch-db-live-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch--connection-alive-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch--backend-key-from-conn)
+                   (lambda (_conn) 'mysql))
+                  ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
+                  ((symbol-function 'clutch--invalidate-object-warmup) #'ignore)
+                  ((symbol-function 'clutch--schedule-object-warmup) #'ignore)
+                  ((symbol-function 'clutch-db-refresh-schema-async)
+                   (lambda (_conn callback &optional _errback)
+                     (if first-callback
+                         (setq second-callback callback)
+                       (setq first-callback callback))
+                     t))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args) buf)))
+          (clutch--clear-debug-capture)
+          (should (clutch--refresh-schema-cache-async 'fake-conn))
+          (should (clutch--refresh-schema-cache-async 'fake-conn))
+          (funcall first-callback '("stale_users"))
+          (funcall second-callback '("users" "orders"))
+          (let ((text (clutch-test--debug-buffer-string)))
+            (should (string-match-p "Operation: schema-refresh" text))
+            (should (string-match-p "Phase: submit" text))
+            (should (string-match-p "Phase: success" text))
+            (should (string-match-p "Phase: stale-drop" text))))))))
+
 (ert-deftest clutch-test-worker-submit-runs-callback ()
   "Metadata worker should deliver callback results back to the main thread."
   (skip-unless (clutch--worker-supported-p))
@@ -2014,6 +2059,113 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                         (< (float-time) deadline))
               (accept-process-output nil 0.01)))
           (should (equal result 42)))
+      (clutch--worker-shutdown 'fake-conn))))
+
+(ert-deftest clutch-test-worker-submit-contextual-reuses-context-until-shutdown ()
+  "Contextual metadata workers should reuse one context across queued tasks."
+  (skip-unless (clutch--worker-supported-p))
+  (let (first-result second-result
+        (opens 0)
+        (closes 0))
+    (unwind-protect
+        (progn
+          (should
+           (clutch--worker-submit-contextual
+            'fake-conn
+            (lambda ()
+              (cl-incf opens)
+              opens)
+            (lambda (_context)
+              (cl-incf closes))
+            (lambda (context)
+              (list :context context))
+            (lambda (value)
+              (setq first-result value))))
+          (let ((deadline (+ (float-time) 1.0)))
+            (while (and (null first-result)
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.01)))
+          (should (equal first-result '(:context 1)))
+          (should (= opens 1))
+          (should (= closes 0))
+          (should
+           (clutch--worker-submit-contextual
+            'fake-conn
+            (lambda ()
+              (cl-incf opens)
+              opens)
+            (lambda (_context)
+              (cl-incf closes))
+            (lambda (context)
+              (list :context context))
+            (lambda (value)
+              (setq second-result value))))
+          (let ((deadline (+ (float-time) 1.0)))
+            (while (and (null second-result)
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.01)))
+          (should (equal second-result '(:context 1)))
+          (should (= opens 1))
+          (clutch--worker-shutdown 'fake-conn)
+          (let ((deadline (+ (float-time) 1.0)))
+            (while (and (= closes 0)
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.01)))
+          (should (= closes 1)))
+      (clutch--worker-shutdown 'fake-conn))))
+
+(ert-deftest clutch-test-worker-submit-contextual-resets-context-after-errors ()
+  "Contextual metadata workers should reopen the context after task errors."
+  (skip-unless (clutch--worker-supported-p))
+  (let (result error-message
+        (opens 0)
+        (closes 0))
+    (unwind-protect
+        (progn
+          (should
+           (clutch--worker-submit-contextual
+            'fake-conn
+            (lambda ()
+              (cl-incf opens)
+              opens)
+            (lambda (_context)
+              (cl-incf closes))
+            (lambda (_context)
+              (error "metadata boom"))
+            #'ignore
+            (lambda (message)
+              (setq error-message message))))
+          (let ((deadline (+ (float-time) 1.0)))
+            (while (and (null error-message)
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.01)))
+          (should (string-match-p "metadata boom" error-message))
+          (should (= opens 1))
+          (should (= closes 1))
+          (should
+           (clutch--worker-submit-contextual
+            'fake-conn
+            (lambda ()
+              (cl-incf opens)
+              opens)
+            (lambda (_context)
+              (cl-incf closes))
+            (lambda (context)
+              context)
+            (lambda (value)
+              (setq result value))))
+          (let ((deadline (+ (float-time) 1.0)))
+            (while (and (null result)
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.01)))
+          (should (= result 2))
+          (should (= opens 2))
+          (clutch--worker-shutdown 'fake-conn)
+          (let ((deadline (+ (float-time) 1.0)))
+            (while (and (= closes 1)
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.01)))
+          (should (= closes 2)))
       (clutch--worker-shutdown 'fake-conn))))
 
 (ert-deftest clutch-test-install-schema-cache-batches-large-refreshes ()
@@ -2626,11 +2778,11 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                   clutch--pending-edits '(b)
                   clutch--pending-deletes '(c))
       (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
-                 (lambda () '("INSERT INTO t VALUES (1)")))
+                 (lambda () '(("INSERT INTO t VALUES (1)" . nil))))
                 ((symbol-function 'clutch-result--build-update-statements)
-                 (lambda () '("UPDATE t SET name='' WHERE id=1")))
+                 (lambda () '(("UPDATE t SET name='' WHERE id=1" . nil))))
                 ((symbol-function 'clutch-result--build-pending-delete-statements)
-                 (lambda () '("DELETE FROM t WHERE id=1")))
+                 (lambda () '(("DELETE FROM t WHERE id=1" . nil))))
                 ((symbol-function 'kill-new)
                  (lambda (text) (setq copied text))))
         (clutch-result-copy-pending-sql)
@@ -2644,7 +2796,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (with-temp-buffer
           (setq-local clutch--pending-edits '(b))
           (cl-letf (((symbol-function 'clutch-result--build-update-statements)
-                     (lambda () '("UPDATE t SET name='' WHERE id=1")))
+                     (lambda () '(("UPDATE t SET name='' WHERE id=1" . nil))))
                     ((symbol-function 'read-file-name)
                      (lambda (&rest _args) path)))
             (clutch-result-save-pending-sql)
@@ -2983,10 +3135,13 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   "Preview in result mode should show generated UPDATE SQL when edits exist."
   (with-temp-buffer
     (let (captured)
-      (setq-local clutch--pending-edits '(((0 . 1) . "v")))
+      (setq-local clutch-connection 'fake-conn
+                  clutch--pending-edits '(((0 . 1) . "v")))
       (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _modes) t))
                 ((symbol-function 'clutch-result--build-update-statements)
-                 (lambda () '("UPDATE t SET name='v' WHERE id=1")))
+                 (lambda () '(("UPDATE t SET name=? WHERE id=1" . ("v")))))
+                ((symbol-function 'clutch-db-escape-literal)
+                 (lambda (_conn value) (format "'%s'" value)))
                 ((symbol-function 'clutch--preview-sql-buffer)
                  (lambda (sql) (setq captured sql))))
         (clutch-preview-execution-sql)
@@ -3001,11 +3156,11 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                   clutch--pending-deletes '(c))
       (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _modes) t))
                 ((symbol-function 'clutch-result--build-pending-insert-statements)
-                 (lambda () '("INSERT INTO t VALUES (1)")))
+                 (lambda () '(("INSERT INTO t VALUES (1)" . nil))))
                 ((symbol-function 'clutch-result--build-update-statements)
-                 (lambda () '("UPDATE t SET name='' WHERE id=1")))
+                 (lambda () '(("UPDATE t SET name='' WHERE id=1" . nil))))
                 ((symbol-function 'clutch-result--build-pending-delete-statements)
-                 (lambda () '("DELETE FROM t WHERE id=1")))
+                 (lambda () '(("DELETE FROM t WHERE id=1" . nil))))
                 ((symbol-function 'clutch--preview-sql-buffer)
                  (lambda (sql) (setq captured sql))))
         (clutch-preview-execution-sql)
@@ -3256,6 +3411,24 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (let ((result (clutch--value-to-literal "it's")))
       (should (string-match-p "\\\\'" result)))))
 
+(ert-deftest clutch-test-execute-params-fallback-renders-sql-before-query ()
+  "Fallback parameter execution should render SQL via escape helpers."
+  (let (captured-sql)
+    (cl-letf (((symbol-function 'clutch-db-escape-literal)
+               (lambda (_conn value)
+                 (format "'%s'" value)))
+              ((symbol-function 'clutch-db-query)
+               (lambda (_conn sql)
+                 (setq captured-sql sql)
+                 'ok)))
+      (should (eq (clutch-db-execute-params
+                   'fake-conn
+                   "UPDATE demo SET name = ?, age = ? WHERE note IS ?"
+                   '("alice" 7 nil))
+                  'ok))
+      (should (equal captured-sql
+                     "UPDATE demo SET name = 'alice', age = 7 WHERE note IS NULL")))))
+
 ;;;; Unit tests — connection key
 
 (ert-deftest clutch-test-connection-key ()
@@ -3471,54 +3644,65 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                   (error-message-string err))))))))
 
 (ert-deftest clutch-test-build-delete-stmt-generates-where-from-pk ()
-  "DELETE statement should use primary key columns in WHERE clause."
+  "DELETE builder should parameterize primary-key values in WHERE."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (cl-letf (((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn id) (format "\"%s\"" id)))
-              ((symbol-function 'clutch-db-escape-literal)
-               (lambda (_conn v) (format "'%s'" v))))
+               (lambda (_conn id) (format "\"%s\"" id))))
       (let ((stmt (clutch-result--build-delete-stmt
                    "orders"
                    '(42 "alice" "2024-01-15")
                    '("id" "customer" "created_at")
                    '(0))))
-        (should (string-match-p "DELETE FROM \"orders\"" stmt))
-        (should (string-match-p "WHERE \"id\" = 42" stmt))
-        (should-not (string-match-p "customer" stmt))
-        (should-not (string-match-p "created_at" stmt))))))
+        (should (equal (car stmt)
+                       "DELETE FROM \"orders\" WHERE \"id\" = ?"))
+        (should (equal (cdr stmt) '(42)))))))
 
 (ert-deftest clutch-test-build-delete-stmt-compound-pk ()
-  "DELETE with compound primary key should AND all PK columns."
+  "DELETE with compound primary key should parameterize all PK columns."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (cl-letf (((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn id) (format "\"%s\"" id)))
-              ((symbol-function 'clutch-db-escape-literal)
-               (lambda (_conn v) (format "'%s'" v))))
+               (lambda (_conn id) (format "\"%s\"" id))))
       (let ((stmt (clutch-result--build-delete-stmt
                    "order_items"
                    '(7 99 3)
                    '("order_id" "item_id" "qty")
                    '(0 1))))
-        (should (string-match-p "WHERE \"order_id\" = 7 AND \"item_id\" = 99" stmt))
-        (should-not (string-match-p "qty" stmt))))))
+        (should (equal (car stmt)
+                       "DELETE FROM \"order_items\" WHERE \"order_id\" = ? AND \"item_id\" = ?"))
+        (should (equal (cdr stmt) '(7 99)))))))
 
 (ert-deftest clutch-test-build-delete-stmt-null-pk-uses-is-null ()
-  "DELETE should use IS NULL for NULL primary key values."
+  "DELETE should keep NULL PKs literal and exclude them from params."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (cl-letf (((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn id) (format "\"%s\"" id)))
-              ((symbol-function 'clutch-db-escape-literal)
-               (lambda (_conn v) (format "'%s'" v))))
+               (lambda (_conn id) (format "\"%s\"" id))))
       (let ((stmt (clutch-result--build-delete-stmt
                    "events"
                    '(nil "orphan")
                    '("parent_id" "name")
                    '(0))))
-        (should (string-match-p "WHERE \"parent_id\" IS NULL" stmt))
-        (should-not (string-match-p "= NULL" stmt))))))
+        (should (equal (car stmt)
+                       "DELETE FROM \"events\" WHERE \"parent_id\" IS NULL"))
+        (should-not (member nil (cdr stmt)))
+        (should (null (cdr stmt)))))))
+
+(ert-deftest clutch-test-build-insert-sql-returns-template-and-params ()
+  "INSERT builder should return a template plus parameter values."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn id) (format "\"%s\"" id))))
+      (let ((stmt (clutch-result-insert--build-sql
+                   'fake-conn
+                   "users"
+                   '(("id" . "7")
+                     ("name" . "alice")
+                     ("note" . "NULL")))))
+        (should (equal (car stmt)
+                       "INSERT INTO \"users\" (\"id\", \"name\", \"note\") VALUES (?, ?, ?)"))
+        (should (equal (cdr stmt) '("7" "alice" nil)))))))
 
 (ert-deftest clutch-test-next-page-errors-on-last-page ()
   "Next page should error when current page has fewer rows than page size."
@@ -6987,6 +7171,58 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                   :schema "APP" :source-schema "APP")))
       (should-not stored))))
 
+(ert-deftest clutch-test-object-warmup-records-submit-success-and-stale-debug-events ()
+  "Async object warmup should record submit, success, and stale-drop phases."
+  (let ((clutch--object-cache (make-hash-table :test 'equal))
+        (clutch--object-warmup-timers (make-hash-table :test 'equal))
+        (clutch--object-warmup-generations (make-hash-table :test 'equal))
+        timer-fn
+        async-callback)
+    (with-temp-buffer
+      (let ((clutch-debug-mode t))
+        (setq-local clutch-connection 'fake-conn)
+        (cl-letf (((symbol-function 'clutch--object-cache-key)
+                   (lambda (_conn) "fake-key"))
+                  ((symbol-function 'clutch--backend-key-from-conn)
+                   (lambda (_conn) 'mysql))
+                  ((symbol-function 'clutch--connection-alive-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch--object-cache-loaded-categories)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'clutch-db-busy-p)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'run-with-idle-timer)
+                   (lambda (_secs _repeat fn)
+                     (setq timer-fn fn)
+                     'fake-timer))
+                  ((symbol-function 'clutch-db-list-objects-async)
+                   (lambda (_conn _category callback &optional _errback)
+                     (setq async-callback callback)
+                     t))
+                  ((symbol-function 'clutch--store-object-cache-type-entries)
+                   (lambda (&rest _args) nil))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args) buf)))
+          (clutch--clear-debug-capture)
+          (clutch--schedule-object-warmup 'fake-conn)
+          (should timer-fn)
+          (funcall timer-fn)
+          (should async-callback)
+          (funcall async-callback
+                   '((:name "ORDER_IDX" :type "INDEX"
+                      :schema "APP" :source-schema "APP")))
+          (clutch--schedule-object-warmup 'fake-conn)
+          (funcall timer-fn)
+          (clutch--invalidate-object-warmup 'fake-conn)
+          (funcall async-callback
+                   '((:name "STALE_IDX" :type "INDEX"
+                      :schema "APP" :source-schema "APP")))
+          (let ((text (clutch-test--debug-buffer-string)))
+            (should (string-match-p "Operation: object-warmup" text))
+            (should (string-match-p "Phase: submit" text))
+            (should (string-match-p "Phase: success" text))
+            (should (string-match-p "Phase: stale-drop" text))))))))
+
 (ert-deftest clutch-test-object-cache-key-propagates-connection-key-errors ()
   "Object cache key should not silently hide connection-key failures."
   (cl-letf (((symbol-function 'clutch--connection-key)
@@ -7801,12 +8037,11 @@ Skips if `clutch-test-password' is nil."
     (cl-letf (((symbol-function 'clutch-result--detect-table) (lambda () "users"))
               ((symbol-function 'clutch-result--detect-primary-key) (lambda () '(0)))
               ((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn name) (format "`%s`" name)))
-              ((symbol-function 'clutch--value-to-literal) (lambda (v) (format "%s" v))))
+               (lambda (_conn name) (format "`%s`" name))))
       (let ((stmts (clutch-result--build-pending-delete-statements)))
         (should (= (length stmts) 1))
-        (should (string-match-p "WHERE" (car stmts)))
-        (should (string-match-p "42" (car stmts)))))))
+        (should (equal (caar stmts) "DELETE FROM `users` WHERE `id` = ?"))
+        (should (equal (cdar stmts) '(42)))))))
 
 (ert-deftest clutch-test-stage-edit-stores-pk-vec ()
   "Staging an edit stores (pk-vec . cidx) key, not (ridx . cidx)."
@@ -7836,14 +8071,12 @@ Skips if `clutch-test-password' is nil."
     (cl-letf (((symbol-function 'clutch-result--detect-table) (lambda () "users"))
               ((symbol-function 'clutch-result--detect-primary-key) (lambda () '(0)))
               ((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn name) (format "`%s`" name)))
-              ((symbol-function 'clutch--value-to-literal)
-               (lambda (v) (if (stringp v) (format "'%s'" v) (format "%s" v)))))
+               (lambda (_conn name) (format "`%s`" name))))
       (let ((stmts (clutch-result--build-update-statements)))
         (should (= (length stmts) 1))
-        (should (string-match-p "carol" (car stmts)))
-        (should (string-match-p "WHERE" (car stmts)))
-        (should (string-match-p "7" (car stmts)))))))
+        (should (equal (caar stmts)
+                       "UPDATE `users` SET `name` = ? WHERE `id` = ?"))
+        (should (equal (cdar stmts) '("carol" 7)))))))
 
 (ert-deftest clutch-test-discard-delete-removes-pk-entry ()
   "C-c C-k removes the matching pk-vec from pending-deletes."
@@ -7917,21 +8150,27 @@ Skips if `clutch-test-password' is nil."
     (setq-local clutch--pending-deletes (list (vector 2)))
     (let (executed)
       (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
-                 (lambda () '("INSERT INTO users (id, name) VALUES (3, 'c')")))
+                 (lambda () '(("INSERT INTO users (id, name) VALUES (?, ?)" . ("3" "c")))))
                 ((symbol-function 'clutch-result--build-update-statements)
-                 (lambda () '("UPDATE users SET name = 'a2' WHERE id = 1")))
+                 (lambda () '(("UPDATE users SET name = ? WHERE id = ?" . ("a2" 1)))))
                 ((symbol-function 'clutch-result--build-pending-delete-statements)
-                 (lambda () '("DELETE FROM users WHERE id = 2")))
+                 (lambda () '(("DELETE FROM users WHERE id = ?" . (2)))))
+                ((symbol-function 'clutch-db-escape-literal)
+                 (lambda (_conn value) (format "'%s'" value)))
                 ((symbol-function 'yes-or-no-p) (lambda (_) t))
-                ((symbol-function 'clutch-db-query)
-                 (lambda (_conn stmt) (push stmt executed)))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn sql &optional params)
+                   (push (cons sql params) executed)))
                 ((symbol-function 'clutch--execute) #'ignore))
         (clutch-result-commit)
         (should (= (length executed) 3))
         ;; executed is in reverse push order: last executed is at (nth 0 executed)
-        (should (string-prefix-p "INSERT" (nth 2 executed)))
-        (should (string-prefix-p "UPDATE" (nth 1 executed)))
-        (should (string-prefix-p "DELETE" (nth 0 executed)))))))
+        (should (string-prefix-p "INSERT" (car (nth 2 executed))))
+        (should (equal (cdr (nth 2 executed)) '("3" "c")))
+        (should (string-prefix-p "UPDATE" (car (nth 1 executed))))
+        (should (equal (cdr (nth 1 executed)) '("a2" 1)))
+        (should (string-prefix-p "DELETE" (car (nth 0 executed))))
+        (should (equal (cdr (nth 0 executed)) '(2)))))))
 
 ;;;; Quality fix tests
 

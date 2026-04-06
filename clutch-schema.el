@@ -337,29 +337,66 @@ When KEY is non-nil, clear that cache namespace instead of CONN's current key."
 (defun clutch--refresh-schema-cache-async (conn)
   "Refresh schema cache for CONN asynchronously when supported.
 Return non-nil when an asynchronous refresh was started."
-  (let ((ticket (clutch--begin-schema-refresh-ticket conn)))
+  (let ((ticket (clutch--begin-schema-refresh-ticket conn))
+        (backend (when clutch-debug-mode
+                   (condition-case nil
+                       (clutch--backend-key-from-conn conn)
+                     (error nil)))))
     (clutch--set-schema-status conn 'refreshing)
-    (clutch-db-refresh-schema-async
-     conn
-     (lambda (table-names)
-       (clutch--install-schema-cache conn table-names ticket))
-     (lambda (message)
-       (when (clutch--schema-refresh-ticket-current-p conn ticket)
-         (clutch--set-schema-status conn 'failed nil message)
-         (clutch--remember-problem-record
-          :connection conn
-          :problem (list :backend (clutch--backend-key-from-conn conn)
-                         :summary (clutch--humanize-db-error message)
-                         :diag (list :category "metadata"
-                                     :op "schema-refresh"
-                                     :raw-message message)))
-         (when clutch-debug-mode
-           (clutch--remember-debug-event
-            :connection conn
-            :op "schema-refresh"
-            :phase "error"
-            :backend (clutch--backend-key-from-conn conn)
-            :summary message)))))))
+    (let ((started
+           (clutch-db-refresh-schema-async
+            conn
+            (lambda (table-names)
+              (if (clutch--schema-refresh-ticket-current-p conn ticket)
+                  (progn
+                    (when clutch-debug-mode
+                      (clutch--remember-debug-event
+                       :connection conn
+                       :op "schema-refresh"
+                       :phase "success"
+                       :backend backend
+                       :summary (format "Loaded %d tables" (length table-names))))
+                    (clutch--install-schema-cache conn table-names ticket))
+                (when clutch-debug-mode
+                  (clutch--remember-debug-event
+                   :connection conn
+                   :op "schema-refresh"
+                   :phase "stale-drop"
+                   :backend backend
+                   :summary "Ignored stale schema refresh result"))))
+            (lambda (message)
+              (when (clutch--schema-refresh-ticket-current-p conn ticket)
+                (clutch--set-schema-status conn 'failed nil message)
+                (clutch--remember-problem-record
+                 :connection conn
+                 :problem (list :backend (clutch--backend-key-from-conn conn)
+                                :summary (clutch--humanize-db-error message)
+                                :diag (list :category "metadata"
+                                            :op "schema-refresh"
+                                            :raw-message message)))
+                (when clutch-debug-mode
+                  (clutch--remember-debug-event
+                   :connection conn
+                   :op "schema-refresh"
+                   :phase "error"
+                   :backend backend
+                   :summary message)))
+              (unless (clutch--schema-refresh-ticket-current-p conn ticket)
+                (when clutch-debug-mode
+                  (clutch--remember-debug-event
+                   :connection conn
+                   :op "schema-refresh"
+                   :phase "stale-drop"
+                   :backend backend
+                   :summary "Ignored stale schema refresh error")))))))
+      (when (and started clutch-debug-mode)
+        (clutch--remember-debug-event
+         :connection conn
+         :op "schema-refresh"
+         :phase "submit"
+         :backend backend
+         :summary "Queued background schema refresh"))
+      started)))
 
 (defun clutch--refresh-schema-cache (conn)
   "Refresh schema cache for CONN.
@@ -442,25 +479,74 @@ Fetches from the backend if not yet cached.  Returns column list."
 (defun clutch--ensure-columns-async (conn schema table)
   "Queue an async column-name fetch for TABLE in SCHEMA on CONN when needed."
   (let ((state (plist-get (clutch--columns-status conn table) :state))
-        (ticket (clutch--begin-columns-ticket)))
-    (unless (or (clutch--cached-columns schema table)
-                (memq state '(queued loading)))
+        (ticket (clutch--begin-columns-ticket))
+        (backend (when clutch-debug-mode
+                   (condition-case nil
+                       (clutch--backend-key-from-conn conn)
+                     (error nil)))))
+      (unless (or (clutch--cached-columns schema table)
+                  (memq state '(queued loading)))
       (clutch--set-columns-status conn table 'loading nil ticket)
-      (unless (clutch-db-list-columns-async
-               conn table
-               (lambda (columns)
-                 (when (clutch--columns-ticket-current-p conn table ticket)
-                   (when-let* ((live-schema (gethash (clutch--connection-key conn)
-                                                    clutch--schema-cache)))
-                     (puthash table columns live-schema))
-                   (clutch--clear-columns-status conn table)
-                   (clutch--refresh-schema-status-ui conn)))
-               (lambda (message)
-                 (when (clutch--columns-ticket-current-p conn table ticket)
-                   (clutch--set-columns-status conn table 'failed message ticket)
-                   (clutch--refresh-schema-status-ui conn))))
+      (let ((started
+             (clutch-db-list-columns-async
+              conn table
+              (lambda (columns)
+                (if (clutch--columns-ticket-current-p conn table ticket)
+                    (progn
+                      (when clutch-debug-mode
+                        (clutch--remember-debug-event
+                         :connection conn
+                         :op "list-columns"
+                         :phase "success"
+                         :backend backend
+                         :summary (format "Loaded %d column names for %s"
+                                          (length columns) table)
+                         :context (list :table table)))
+                      (when-let* ((live-schema (gethash (clutch--connection-key conn)
+                                                       clutch--schema-cache)))
+                        (puthash table columns live-schema))
+                      (clutch--clear-columns-status conn table)
+                      (clutch--refresh-schema-status-ui conn))
+                  (when clutch-debug-mode
+                    (clutch--remember-debug-event
+                     :connection conn
+                     :op "list-columns"
+                     :phase "stale-drop"
+                     :backend backend
+                     :summary (format "Ignored stale column-name result for %s" table)
+                     :context (list :table table)))))
+              (lambda (message)
+                (if (clutch--columns-ticket-current-p conn table ticket)
+                    (progn
+                      (clutch--set-columns-status conn table 'failed message ticket)
+                      (when clutch-debug-mode
+                        (clutch--remember-debug-event
+                         :connection conn
+                         :op "list-columns"
+                         :phase "error"
+                         :backend backend
+                         :summary message
+                         :context (list :table table)))
+                      (clutch--refresh-schema-status-ui conn))
+                  (when clutch-debug-mode
+                    (clutch--remember-debug-event
+                     :connection conn
+                     :op "list-columns"
+                     :phase "stale-drop"
+                     :backend backend
+                     :summary (format "Ignored stale column-name error for %s" table)
+                     :context (list :table table))))))))
+        (when (and started clutch-debug-mode)
+          (clutch--remember-debug-event
+           :connection conn
+           :op "list-columns"
+           :phase "submit"
+           :backend backend
+           :summary (format "Queued background column-name preheat for %s" table)
+           :context (list :table table)))
+        (unless started
         (clutch--ensure-columns conn schema table)
-        (clutch--refresh-schema-status-ui conn))
+          (clutch--refresh-schema-status-ui conn)))
       t)))
 
 (defun clutch--ensure-column-details (conn table &optional strict)
@@ -508,40 +594,88 @@ silently returning nil."
   "Start the next queued async column-details fetch for CONN."
   (unless (or (clutch--column-details-active conn)
               (not (clutch--connection-alive-p conn)))
-    (when-let* ((queue (clutch--column-details-queue conn))
-                (table (car queue))
-                (ticket (plist-get (clutch--column-details-status conn table) :ticket)))
+    (let ((backend (when clutch-debug-mode
+                     (condition-case nil
+                         (clutch--backend-key-from-conn conn)
+                       (error nil)))))
+      (when-let* ((queue (clutch--column-details-queue conn))
+                  (table (car queue))
+                  (ticket (plist-get (clutch--column-details-status conn table) :ticket)))
       (clutch--set-column-details-queue conn (cdr queue))
       (clutch--set-column-details-active conn table ticket)
       (clutch--set-column-details-status conn table 'loading nil ticket)
-      (unless (clutch-db-column-details-async
-               conn table
-               (lambda (details)
-                 (when (clutch--column-details-ticket-current-p conn table ticket)
-                 (let* ((key (clutch--connection-key conn))
-                         (cache (or (gethash key clutch--column-details-cache)
-                                    (let ((h (make-hash-table :test 'equal)))
-                                      (puthash key h clutch--column-details-cache)
-                                      h))))
-                    (puthash table details cache)
-                    (clutch--clear-column-details-status conn table)
-                    (clutch--clear-column-details-active conn)
-                    (clutch--refresh-result-metadata-buffers conn table)
-                    (clutch--refresh-schema-status-ui conn)
-                    (clutch--drain-column-details-async conn))))
-               (lambda (message)
-                 (when (clutch--column-details-ticket-current-p conn table ticket)
-                   (clutch--set-column-details-status conn table 'failed
-                                                      message ticket)
-                   (clutch--clear-column-details-active conn)
-                   (clutch--refresh-schema-status-ui conn)
-                   (clutch--drain-column-details-async conn))))
+      (let ((started
+             (clutch-db-column-details-async
+              conn table
+              (lambda (details)
+                (if (clutch--column-details-ticket-current-p conn table ticket)
+                    (let* ((key (clutch--connection-key conn))
+                           (cache (or (gethash key clutch--column-details-cache)
+                                      (let ((h (make-hash-table :test 'equal)))
+                                        (puthash key h clutch--column-details-cache)
+                                        h))))
+                      (when clutch-debug-mode
+                        (clutch--remember-debug-event
+                         :connection conn
+                         :op "column-details"
+                         :phase "success"
+                         :backend backend
+                         :summary (format "Loaded %d column details for %s"
+                                          (length details) table)
+                         :context (list :table table)))
+                      (puthash table details cache)
+                      (clutch--clear-column-details-status conn table)
+                      (clutch--clear-column-details-active conn)
+                      (clutch--refresh-result-metadata-buffers conn table)
+                      (clutch--refresh-schema-status-ui conn)
+                      (clutch--drain-column-details-async conn))
+                  (when clutch-debug-mode
+                    (clutch--remember-debug-event
+                     :connection conn
+                     :op "column-details"
+                     :phase "stale-drop"
+                     :backend backend
+                     :summary (format "Ignored stale column-detail result for %s" table)
+                     :context (list :table table)))))
+              (lambda (message)
+                (if (clutch--column-details-ticket-current-p conn table ticket)
+                    (progn
+                      (clutch--set-column-details-status conn table 'failed
+                                                         message ticket)
+                      (when clutch-debug-mode
+                        (clutch--remember-debug-event
+                         :connection conn
+                         :op "column-details"
+                         :phase "error"
+                         :backend backend
+                         :summary message
+                         :context (list :table table)))
+                      (clutch--clear-column-details-active conn)
+                      (clutch--refresh-schema-status-ui conn)
+                      (clutch--drain-column-details-async conn))
+                  (when clutch-debug-mode
+                    (clutch--remember-debug-event
+                     :connection conn
+                     :op "column-details"
+                     :phase "stale-drop"
+                     :backend backend
+                     :summary (format "Ignored stale column-detail error for %s" table)
+                     :context (list :table table))))))))
+        (when (and started clutch-debug-mode)
+          (clutch--remember-debug-event
+           :connection conn
+           :op "column-details"
+           :phase "submit"
+           :backend backend
+           :summary (format "Queued background column-detail preheat for %s" table)
+           :context (list :table table)))
+        (unless started
         (clutch--ensure-column-details conn table)
-        (clutch--clear-column-details-active conn)
-        (when (clutch--cached-column-details conn table)
-          (clutch--refresh-result-metadata-buffers conn table))
-        (clutch--refresh-schema-status-ui conn)
-        (clutch--drain-column-details-async conn)))))
+          (clutch--clear-column-details-active conn)
+          (when (clutch--cached-column-details conn table)
+            (clutch--refresh-result-metadata-buffers conn table))
+          (clutch--refresh-schema-status-ui conn)
+          (clutch--drain-column-details-async conn)))))))
 
 (defun clutch--ensure-column-details-async (conn table)
   "Queue an async column-detail fetch for TABLE on CONN when needed."
@@ -576,28 +710,76 @@ Returns a string or nil."
 (defun clutch--ensure-table-comment-async (conn table)
   "Queue an async table-comment fetch for TABLE on CONN when needed."
   (let ((state (plist-get (clutch--table-comment-status conn table) :state))
-        (ticket (clutch--begin-table-comment-ticket)))
-    (unless (or (not table)
-                (clutch--table-comment-cached-p conn table)
-                (memq state '(queued loading failed)))
+        (ticket (clutch--begin-table-comment-ticket))
+        (backend (when clutch-debug-mode
+                   (condition-case nil
+                       (clutch--backend-key-from-conn conn)
+                     (error nil)))))
+      (unless (or (not table)
+                  (clutch--table-comment-cached-p conn table)
+                  (memq state '(queued loading failed)))
       (clutch--set-table-comment-status conn table 'loading nil ticket)
-      (unless (clutch-db-table-comment-async
-               conn table
-               (lambda (comment)
-                 (when (clutch--table-comment-ticket-current-p conn table ticket)
-                   (let* ((key (clutch--connection-key conn))
-                          (cache (or (gethash key clutch--table-comment-cache)
-                                     (let ((h (make-hash-table :test 'equal)))
-                                       (puthash key h clutch--table-comment-cache)
-                                       h))))
-                     (puthash table comment cache))
-                   (clutch--clear-table-comment-status conn table)
-                   (clutch--refresh-schema-status-ui conn)))
-               (lambda (message)
-                 (when (clutch--table-comment-ticket-current-p conn table ticket)
-                   (clutch--set-table-comment-status conn table 'failed
-                                                     message ticket)
-                   (clutch--refresh-schema-status-ui conn))))
+      (let ((started
+             (clutch-db-table-comment-async
+              conn table
+              (lambda (comment)
+                (if (clutch--table-comment-ticket-current-p conn table ticket)
+                    (progn
+                      (when clutch-debug-mode
+                        (clutch--remember-debug-event
+                         :connection conn
+                         :op "table-comment"
+                         :phase "success"
+                         :backend backend
+                         :summary (format "Loaded table comment for %s" table)
+                         :context (list :table table)))
+                      (let* ((key (clutch--connection-key conn))
+                             (cache (or (gethash key clutch--table-comment-cache)
+                                        (let ((h (make-hash-table :test 'equal)))
+                                          (puthash key h clutch--table-comment-cache)
+                                          h))))
+                        (puthash table comment cache))
+                      (clutch--clear-table-comment-status conn table)
+                      (clutch--refresh-schema-status-ui conn))
+                  (when clutch-debug-mode
+                    (clutch--remember-debug-event
+                     :connection conn
+                     :op "table-comment"
+                     :phase "stale-drop"
+                     :backend backend
+                     :summary (format "Ignored stale table-comment result for %s" table)
+                     :context (list :table table)))))
+              (lambda (message)
+                (if (clutch--table-comment-ticket-current-p conn table ticket)
+                    (progn
+                      (clutch--set-table-comment-status conn table 'failed
+                                                        message ticket)
+                      (when clutch-debug-mode
+                        (clutch--remember-debug-event
+                         :connection conn
+                         :op "table-comment"
+                         :phase "error"
+                         :backend backend
+                         :summary message
+                         :context (list :table table)))
+                      (clutch--refresh-schema-status-ui conn))
+                  (when clutch-debug-mode
+                    (clutch--remember-debug-event
+                     :connection conn
+                     :op "table-comment"
+                     :phase "stale-drop"
+                     :backend backend
+                     :summary (format "Ignored stale table-comment error for %s" table)
+                     :context (list :table table))))))))
+        (when (and started clutch-debug-mode)
+          (clutch--remember-debug-event
+           :connection conn
+           :op "table-comment"
+           :phase "submit"
+           :backend backend
+           :summary (format "Queued background table-comment preheat for %s" table)
+           :context (list :table table)))
+        (unless started
         (condition-case err
             (let* ((key (clutch--connection-key conn))
                    (cache (or (gethash key clutch--table-comment-cache)
@@ -610,7 +792,7 @@ Returns a string or nil."
            (clutch--set-table-comment-status conn table 'failed
                                              (error-message-string err)
                                              ticket)))
-        (clutch--refresh-schema-status-ui conn))
+          (clutch--refresh-schema-status-ui conn)))
       t)))
 
 (defun clutch--parse-mysql-help-text (text)

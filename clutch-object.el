@@ -304,7 +304,11 @@ temporarily unavailable."
          (next (seq-find (lambda (category)
                            (not (memq category loaded)))
                          clutch--object-categories))
-         (generation (clutch--object-warmup-generation conn key)))
+         (generation (clutch--object-warmup-generation conn key))
+         (backend (when clutch-debug-mode
+                    (condition-case nil
+                        (clutch--backend-key-from-conn conn)
+                      (error nil)))))
     (cond
      ((or (not conn)
           (not (clutch--object-connection-alive-p conn))
@@ -328,21 +332,70 @@ temporarily unavailable."
                   (let ((type (clutch--object-category-type next)))
                     (unless
                         (and type
-                             (clutch-db-list-objects-async
-                              conn next
-                              (lambda (entries)
-                                (when (and conn
-                                           (clutch--object-connection-alive-p conn)
-                                           (= generation
-                                              (clutch--object-warmup-generation conn key)))
-                                  (clutch--store-object-cache-type-entries conn type entries)
-                                  (clutch--schedule-object-warmup conn)))
-                              (lambda (&rest _)
-                                (when (and conn
-                                           (clutch--object-connection-alive-p conn)
-                                           (= generation
-                                              (clutch--object-warmup-generation conn key)))
-                                  (clutch--schedule-object-warmup conn)))))
+                             (let ((started
+                                    (clutch-db-list-objects-async
+                                     conn next
+                                     (lambda (entries)
+                                       (if (and conn
+                                                (clutch--object-connection-alive-p conn)
+                                                (= generation
+                                                   (clutch--object-warmup-generation conn key)))
+                                           (progn
+                                             (when clutch-debug-mode
+                                               (clutch--remember-debug-event
+                                                :connection conn
+                                                :op "object-warmup"
+                                                :phase "success"
+                                                :backend backend
+                                                :summary (format "Loaded %d %s entries"
+                                                                 (length entries) next)
+                                                :context (list :object-category next)))
+                                             (clutch--store-object-cache-type-entries conn type entries)
+                                             (clutch--schedule-object-warmup conn))
+                                         (when clutch-debug-mode
+                                           (clutch--remember-debug-event
+                                            :connection conn
+                                            :op "object-warmup"
+                                            :phase "stale-drop"
+                                            :backend backend
+                                            :summary (format "Ignored stale %s warmup result"
+                                                             next)
+                                            :context (list :object-category next)))))
+                                     (lambda (message)
+                                       (if (and conn
+                                                (clutch--object-connection-alive-p conn)
+                                                (= generation
+                                                   (clutch--object-warmup-generation conn key)))
+                                           (progn
+                                             (when clutch-debug-mode
+                                               (clutch--remember-debug-event
+                                                :connection conn
+                                                :op "object-warmup"
+                                                :phase "error"
+                                                :backend backend
+                                                :summary (or message
+                                                             (format "%s warmup failed" next))
+                                                :context (list :object-category next)))
+                                             (clutch--schedule-object-warmup conn))
+                                         (when clutch-debug-mode
+                                           (clutch--remember-debug-event
+                                            :connection conn
+                                            :op "object-warmup"
+                                            :phase "stale-drop"
+                                            :backend backend
+                                            :summary (format "Ignored stale %s warmup error"
+                                                             next)
+                                            :context (list :object-category next))))))))
+                               (when (and started clutch-debug-mode)
+                                 (clutch--remember-debug-event
+                                  :connection conn
+                                  :op "object-warmup"
+                                  :phase "submit"
+                                  :backend backend
+                                  :summary (format "Queued background object warmup for %s"
+                                                   next)
+                                  :context (list :object-category next)))
+                               started))
                       (progn
                         (when type
                           (clutch--object-type-entries conn type))

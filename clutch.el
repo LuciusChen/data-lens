@@ -3639,21 +3639,24 @@ PK-INDICES are excluded."
                   (string-join invalid ", ")))))
 
 (defun clutch-result--build-update-statements-for-rows (rows col-indices op)
-  "Return UPDATE statements for ROWS using COL-INDICES.
+  "Return UPDATE preview statements for ROWS using COL-INDICES.
 OP is a short operation description used in user-facing error messages."
   (let* ((table (clutch--result-source-table-or-user-error op))
          (pk-indices (clutch--result-pk-indices-or-user-error table op))
          (set-col-indices (clutch-result--selected-update-col-indices
                            pk-indices col-indices op))
          (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
-         (col-names clutch--result-columns))
+         (col-names clutch--result-columns)
+         statements)
     (clutch-result--ensure-update-source-columns table set-col-indices op)
-    (cl-loop for row in rows
-             for pk-vec = (clutch-result--extract-pk-vec row pk-indices)
-             for edits = (cl-loop for cidx in set-col-indices
-                                  collect (cons cidx (nth cidx row)))
-             collect (clutch-result--build-update-stmt
-                      table pk-vec edits col-names pk-names))))
+    (dolist (row rows)
+      (let* ((pk-vec (clutch-result--extract-pk-vec row pk-indices))
+             (edits (cl-loop for cidx in set-col-indices
+                             collect (cons cidx (nth cidx row)))))
+        (push (clutch-result--build-update-stmt
+               table pk-vec edits col-names pk-names)
+              statements)))
+    (clutch-result--render-statements (nreverse statements))))
 
 (defun clutch-result--copy-rows-as-insert (&optional rect)
   "Copy row(s) as INSERT statement(s) to the kill ring.
@@ -4004,13 +4007,14 @@ Report success with MESSAGE-FMT and MESSAGE-ARGS."
   "Return the staged SQL statements that would run on commit."
   (unless (or clutch--pending-inserts clutch--pending-edits clutch--pending-deletes)
     (user-error "No pending SQL"))
-  (append
-   (when clutch--pending-inserts
-     (clutch-result--build-pending-insert-statements))
-   (when clutch--pending-edits
-     (clutch-result--build-update-statements))
-   (when clutch--pending-deletes
-     (clutch-result--build-pending-delete-statements))))
+  (clutch-result--render-statements
+   (append
+    (when clutch--pending-inserts
+      (clutch-result--build-pending-insert-statements))
+    (when clutch--pending-edits
+      (clutch-result--build-update-statements))
+    (when clutch--pending-deletes
+      (clutch-result--build-pending-delete-statements)))))
 
 (defun clutch-result--pending-sql-content (&optional stmts)
   "Return STMTS as a trailing-newline-terminated staged SQL batch string.
