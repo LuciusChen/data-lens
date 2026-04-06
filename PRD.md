@@ -551,22 +551,26 @@ Connection profile plist keys:
 
 ### Eager vs. Async Refresh
 
-- **Eager (synchronous)**: MySQL, PostgreSQL, SQLite — blocks until schema loaded on connect
-- **Async (background)**: JDBC — background refresh with ticket-based stale-response guard and timeout/failure exit
+- **Eager (synchronous)**: SQLite — lightweight in-process metadata path
+- **Async (background)**: MySQL, PostgreSQL, JDBC — background refresh with ticket-based stale-response guard and timeout/failure exit
   - Buffer status line shows: `[schema...]` (refreshing), `[schema~]` (stale), `[schema!]` (failed), `[schema Nt]` (ready)
   - `Nt` is the size of the current schema-cache snapshot; `schema 0t` means refresh succeeded but cached zero browseable objects
+  - Native MySQL/PostgreSQL use an isolated metadata context behind the existing async callback path; JDBC keeps using the agent's metadata session
+  - When thread-backed native refresh is unavailable, clutch falls back to the previous synchronous metadata path instead of leaving the cache stale forever
 
 ### Cache Invalidation
 
 - Manual: `clutch-refresh-schema` (`C-c C-s`)
 - Auto: after successful DDL execution (CREATE/ALTER/DROP)
-- Stale detection: JDBC only (schema status flag in async response)
+- Stale detection: all async-refresh backends reject stale responses via refresh tickets / generation checks
 
 ### Completion from Schema
 
 - `clutch--tables-in-buffer`: tables referenced in current SQL (buffer-chars-modified-tick cached)
 - `clutch--tables-in-query`: tables in last executed query (tick + region start/end cached)
 - CAPF suggests: table names, column names (scoped to detected tables), SQL keywords
+- Native MySQL/PostgreSQL CAPF/Eldoc are cache-first: cache misses queue background column-name / column-detail / table-comment preheat instead of blocking the editing hot path
+- Explicit detail commands stay synchronous by design: describe / DDL / result `?` can block, but passive metadata display should not
 
 ---
 
@@ -813,7 +817,19 @@ All backends implement these generic methods dispatched on connection type:
 | `clutch-db-use-database (conn db)` | Switch to named database |
 | `clutch-db-type-category (conn type)` | Map type string to `text\|numeric\|temporal` |
 | `clutch-db-format-temporal (val)` | Format temporal plist to ISO-8601 string |
-| `clutch-db-eager-schema-refresh-p (conn)` | Return t if schema refresh should be sync |
+| `clutch-db-eager-schema-refresh-p (conn)` | Return t if connect-time schema refresh should stay synchronous |
+
+Optional metadata-background methods:
+
+| Method | Description |
+|--------|-------------|
+| `clutch-db-open-metadata-context (conn params)` | Return an isolated metadata context for async work, or nil when unsupported |
+| `clutch-db-close-metadata-context (conn context)` | Close metadata context opened for async work |
+| `clutch-db-refresh-schema-async (conn callback &optional errback)` | Refresh table snapshot in the background |
+| `clutch-db-list-columns-async (conn table callback &optional errback)` | Load column names in the background |
+| `clutch-db-column-details-async (conn table callback &optional errback)` | Load detailed column metadata in the background |
+| `clutch-db-table-comment-async (conn table callback &optional errback)` | Load table comments in the background |
+| `clutch-db-list-objects-async (conn category callback &optional errback)` | Warm object discovery data in the background |
 
 ---
 

@@ -547,6 +547,398 @@
       (should (clutch-db-refresh-schema-async conn #'ignore))
       (should (= captured-timeout 7)))))
 
+(ert-deftest clutch-db-test-mysql-refresh-schema-async-uses-metadata-context ()
+  "Native MySQL schema refresh should run through a metadata context."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-wire-conn :host "127.0.0.1" :port 3306
+                                    :user "root" :database "mysql"))
+        callback-result
+        opened-params
+        closed-context
+        worker-called)
+    (cl-letf (((symbol-function 'clutch--connection-context)
+               (lambda (_conn)
+                 (list '(:host "127.0.0.1" :port 3306
+                         :user "root" :password "secret"
+                         :database "mysql")
+                       'mysql)))
+              ((symbol-function 'clutch--worker-submit)
+               (lambda (_conn work-fn callback &optional errback)
+                 (setq worker-called t)
+                 (should-not errback)
+                 (funcall callback (funcall work-fn))
+                 t))
+              ((symbol-function 'clutch-db-open-metadata-context)
+               (lambda (_conn params)
+                 (setq opened-params params)
+                 'mysql-metadata))
+              ((symbol-function 'clutch-db-list-tables)
+               (lambda (context)
+                 (should (eq context 'mysql-metadata))
+                 '("users" "orders")))
+              ((symbol-function 'clutch-db-close-metadata-context)
+               (lambda (_conn context)
+                 (setq closed-context context))))
+      (should (clutch-db-refresh-schema-async
+               conn
+               (lambda (tables)
+                 (setq callback-result tables))))
+      (should worker-called)
+      (should (equal opened-params
+                     '(:host "127.0.0.1" :port 3306
+                       :user "root" :password "secret"
+                       :database "mysql")))
+      (should (eq closed-context 'mysql-metadata))
+      (should (equal callback-result '("users" "orders"))))))
+
+(ert-deftest clutch-db-test-pg-refresh-schema-async-uses-metadata-context ()
+  "Native PostgreSQL schema refresh should run through a metadata context."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                                          :user "postgres" :database "test"))
+        callback-result
+        opened-params
+        closed-context
+        worker-called)
+    (cl-letf (((symbol-function 'clutch--connection-context)
+               (lambda (_conn)
+                 (list '(:host "127.0.0.1" :port 5432
+                         :user "postgres" :password "secret"
+                         :database "test" :schema "public")
+                       'postgresql)))
+              ((symbol-function 'clutch--worker-submit)
+               (lambda (_conn work-fn callback &optional errback)
+                 (setq worker-called t)
+                 (should-not errback)
+                 (funcall callback (funcall work-fn))
+                 t))
+              ((symbol-function 'clutch-db-open-metadata-context)
+               (lambda (_conn params)
+                 (setq opened-params params)
+                 'pg-metadata))
+              ((symbol-function 'clutch-db-list-tables)
+               (lambda (context)
+                 (should (eq context 'pg-metadata))
+                 '("customers" "orders")))
+              ((symbol-function 'clutch-db-close-metadata-context)
+               (lambda (_conn context)
+                 (setq closed-context context))))
+      (should (clutch-db-refresh-schema-async
+               conn
+               (lambda (tables)
+                 (setq callback-result tables))))
+      (should worker-called)
+      (should (equal opened-params
+                     '(:host "127.0.0.1" :port 5432
+                       :user "postgres" :password "secret"
+                       :database "test" :schema "public")))
+      (should (eq closed-context 'pg-metadata))
+      (should (equal callback-result '("customers" "orders"))))))
+
+(ert-deftest clutch-db-test-mysql-list-columns-async-uses-metadata-context ()
+  "Native MySQL column-name preheat should run through a metadata context."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-wire-conn :host "127.0.0.1" :port 3306
+                                    :user "root" :database "mysql"))
+        callback-result
+        opened-params
+        closed-context
+        worker-called)
+    (cl-letf (((symbol-function 'clutch--connection-context)
+               (lambda (_conn)
+                 (list '(:host "127.0.0.1" :port 3306
+                         :user "root" :password "secret"
+                         :database "mysql")
+                       'mysql)))
+              ((symbol-function 'clutch--worker-submit)
+               (lambda (_conn work-fn callback &optional errback)
+                 (setq worker-called t)
+                 (should-not errback)
+                 (funcall callback (funcall work-fn))
+                 t))
+              ((symbol-function 'clutch-db-open-metadata-context)
+               (lambda (_conn params)
+                 (setq opened-params params)
+                 'mysql-metadata))
+              ((symbol-function 'clutch-db-list-columns)
+               (lambda (context table)
+                 (should (eq context 'mysql-metadata))
+                 (should (equal table "users"))
+                 '("id" "name")))
+              ((symbol-function 'clutch-db-close-metadata-context)
+               (lambda (_conn context)
+                 (setq closed-context context))))
+      (should (clutch-db-list-columns-async
+               conn "users"
+               (lambda (columns)
+                 (setq callback-result columns))))
+      (should worker-called)
+      (should (equal opened-params
+                     '(:host "127.0.0.1" :port 3306
+                       :user "root" :password "secret"
+                       :database "mysql")))
+      (should (eq closed-context 'mysql-metadata))
+      (should (equal callback-result '("id" "name"))))))
+
+(ert-deftest clutch-db-test-mysql-column-details-async-uses-metadata-context ()
+  "Native MySQL column-detail preheat should run through a metadata context."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-wire-conn :host "127.0.0.1" :port 3306
+                                    :user "root" :database "mysql"))
+        callback-result
+        closed-context)
+    (cl-letf (((symbol-function 'clutch--connection-context)
+               (lambda (_conn)
+                 (list '(:host "127.0.0.1" :port 3306
+                         :user "root" :password "secret"
+                         :database "mysql")
+                       'mysql)))
+              ((symbol-function 'clutch--worker-submit)
+               (lambda (_conn work-fn callback &optional _errback)
+                 (funcall callback (funcall work-fn))
+                 t))
+              ((symbol-function 'clutch-db-open-metadata-context)
+               (lambda (&rest _args) 'mysql-metadata))
+              ((symbol-function 'clutch-db-column-details)
+               (lambda (context table)
+                 (should (eq context 'mysql-metadata))
+                 (should (equal table "users"))
+                 '((:name "id" :type "bigint"))))
+              ((symbol-function 'clutch-db-close-metadata-context)
+               (lambda (_conn context)
+                 (setq closed-context context))))
+      (should (clutch-db-column-details-async
+               conn "users"
+               (lambda (details)
+                 (setq callback-result details))))
+      (should (eq closed-context 'mysql-metadata))
+      (should (equal callback-result
+                     '((:name "id" :type "bigint")))))))
+
+(ert-deftest clutch-db-test-mysql-table-comment-async-uses-metadata-context ()
+  "Native MySQL table-comment preheat should run through a metadata context."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-wire-conn :host "127.0.0.1" :port 3306
+                                    :user "root" :database "mysql"))
+        callback-result
+        closed-context)
+    (cl-letf (((symbol-function 'clutch--connection-context)
+               (lambda (_conn)
+                 (list '(:host "127.0.0.1" :port 3306
+                         :user "root" :password "secret"
+                         :database "mysql")
+                       'mysql)))
+              ((symbol-function 'clutch--worker-submit)
+               (lambda (_conn work-fn callback &optional _errback)
+                 (funcall callback (funcall work-fn))
+                 t))
+              ((symbol-function 'clutch-db-open-metadata-context)
+               (lambda (&rest _args) 'mysql-metadata))
+              ((symbol-function 'clutch-db-table-comment)
+               (lambda (context table)
+                 (should (eq context 'mysql-metadata))
+                 (should (equal table "users"))
+                 "Users table"))
+              ((symbol-function 'clutch-db-close-metadata-context)
+               (lambda (_conn context)
+                 (setq closed-context context))))
+      (should (clutch-db-table-comment-async
+               conn "users"
+               (lambda (comment)
+                 (setq callback-result comment))))
+      (should (eq closed-context 'mysql-metadata))
+      (should (equal callback-result "Users table")))))
+
+(ert-deftest clutch-db-test-mysql-list-objects-async-uses-metadata-context ()
+  "Native MySQL object warmup should run through a metadata context."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-wire-conn :host "127.0.0.1" :port 3306
+                                    :user "root" :database "mysql"))
+        callback-result
+        closed-context)
+    (cl-letf (((symbol-function 'clutch--connection-context)
+               (lambda (_conn)
+                 (list '(:host "127.0.0.1" :port 3306
+                         :user "root" :password "secret"
+                         :database "mysql")
+                       'mysql)))
+              ((symbol-function 'clutch--worker-submit)
+               (lambda (_conn work-fn callback &optional _errback)
+                 (funcall callback (funcall work-fn))
+                 t))
+              ((symbol-function 'clutch-db-open-metadata-context)
+               (lambda (&rest _args) 'mysql-metadata))
+              ((symbol-function 'clutch-db-list-objects)
+               (lambda (context category)
+                 (should (eq context 'mysql-metadata))
+                 (should (eq category 'indexes))
+                 '((:name "users_pkey" :type "INDEX"))))
+              ((symbol-function 'clutch-db-close-metadata-context)
+               (lambda (_conn context)
+                 (setq closed-context context))))
+      (should (clutch-db-list-objects-async
+               conn 'indexes
+               (lambda (entries)
+                 (setq callback-result entries))))
+      (should (eq closed-context 'mysql-metadata))
+      (should (equal callback-result
+                     '((:name "users_pkey" :type "INDEX")))))))
+
+(ert-deftest clutch-db-test-pg-list-columns-async-uses-metadata-context ()
+  "Native PostgreSQL column-name preheat should run through a metadata context."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                                          :user "postgres" :database "test"))
+        callback-result
+        closed-context)
+    (cl-letf (((symbol-function 'clutch--connection-context)
+               (lambda (_conn)
+                 (list '(:host "127.0.0.1" :port 5432
+                         :user "postgres" :password "secret"
+                         :database "test" :schema "public")
+                       'postgresql)))
+              ((symbol-function 'clutch--worker-submit)
+               (lambda (_conn work-fn callback &optional _errback)
+                 (funcall callback (funcall work-fn))
+                 t))
+              ((symbol-function 'clutch-db-open-metadata-context)
+               (lambda (&rest _args) 'pg-metadata))
+              ((symbol-function 'clutch-db-list-columns)
+               (lambda (context table)
+                 (should (eq context 'pg-metadata))
+                 (should (equal table "users"))
+                 '("id" "name")))
+              ((symbol-function 'clutch-db-close-metadata-context)
+               (lambda (_conn context)
+                 (setq closed-context context))))
+      (should (clutch-db-list-columns-async
+               conn "users"
+               (lambda (columns)
+                 (setq callback-result columns))))
+      (should (eq closed-context 'pg-metadata))
+      (should (equal callback-result '("id" "name"))))))
+
+(ert-deftest clutch-db-test-pg-column-details-async-uses-metadata-context ()
+  "Native PostgreSQL column-detail preheat should run through a metadata context."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                                          :user "postgres" :database "test"))
+        callback-result
+        closed-context)
+    (cl-letf (((symbol-function 'clutch--connection-context)
+               (lambda (_conn)
+                 (list '(:host "127.0.0.1" :port 5432
+                         :user "postgres" :password "secret"
+                         :database "test" :schema "public")
+                       'postgresql)))
+              ((symbol-function 'clutch--worker-submit)
+               (lambda (_conn work-fn callback &optional _errback)
+                 (funcall callback (funcall work-fn))
+                 t))
+              ((symbol-function 'clutch-db-open-metadata-context)
+               (lambda (&rest _args) 'pg-metadata))
+              ((symbol-function 'clutch-db-column-details)
+               (lambda (context table)
+                 (should (eq context 'pg-metadata))
+                 (should (equal table "users"))
+                 '((:name "id" :type "integer"))))
+              ((symbol-function 'clutch-db-close-metadata-context)
+               (lambda (_conn context)
+                 (setq closed-context context))))
+      (should (clutch-db-column-details-async
+               conn "users"
+               (lambda (details)
+                 (setq callback-result details))))
+      (should (eq closed-context 'pg-metadata))
+      (should (equal callback-result
+                     '((:name "id" :type "integer")))))))
+
+(ert-deftest clutch-db-test-pg-table-comment-async-uses-metadata-context ()
+  "Native PostgreSQL table-comment preheat should run through a metadata context."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                                          :user "postgres" :database "test"))
+        callback-result
+        closed-context)
+    (cl-letf (((symbol-function 'clutch--connection-context)
+               (lambda (_conn)
+                 (list '(:host "127.0.0.1" :port 5432
+                         :user "postgres" :password "secret"
+                         :database "test" :schema "public")
+                       'postgresql)))
+              ((symbol-function 'clutch--worker-submit)
+               (lambda (_conn work-fn callback &optional _errback)
+                 (funcall callback (funcall work-fn))
+                 t))
+              ((symbol-function 'clutch-db-open-metadata-context)
+               (lambda (&rest _args) 'pg-metadata))
+              ((symbol-function 'clutch-db-table-comment)
+               (lambda (context table)
+                 (should (eq context 'pg-metadata))
+                 (should (equal table "users"))
+                 "Users table"))
+              ((symbol-function 'clutch-db-close-metadata-context)
+               (lambda (_conn context)
+                 (setq closed-context context))))
+      (should (clutch-db-table-comment-async
+               conn "users"
+               (lambda (comment)
+                 (setq callback-result comment))))
+      (should (eq closed-context 'pg-metadata))
+      (should (equal callback-result "Users table")))))
+
+(ert-deftest clutch-db-test-pg-list-objects-async-uses-metadata-context ()
+  "Native PostgreSQL object warmup should run through a metadata context."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                                          :user "postgres" :database "test"))
+        callback-result
+        closed-context)
+    (cl-letf (((symbol-function 'clutch--connection-context)
+               (lambda (_conn)
+                 (list '(:host "127.0.0.1" :port 5432
+                         :user "postgres" :password "secret"
+                         :database "test" :schema "public")
+                       'postgresql)))
+              ((symbol-function 'clutch--worker-submit)
+               (lambda (_conn work-fn callback &optional _errback)
+                 (funcall callback (funcall work-fn))
+                 t))
+              ((symbol-function 'clutch-db-open-metadata-context)
+               (lambda (&rest _args) 'pg-metadata))
+              ((symbol-function 'clutch-db-list-objects)
+               (lambda (context category)
+                 (should (eq context 'pg-metadata))
+                 (should (eq category 'indexes))
+                 '((:name "users_pkey" :type "INDEX"))))
+              ((symbol-function 'clutch-db-close-metadata-context)
+               (lambda (_conn context)
+                 (setq closed-context context))))
+      (should (clutch-db-list-objects-async
+               conn 'indexes
+               (lambda (entries)
+                 (setq callback-result entries))))
+      (should (eq closed-context 'pg-metadata))
+      (should (equal callback-result
+                     '((:name "users_pkey" :type "INDEX")))))))
+
+(ert-deftest clutch-db-test-jdbc-list-columns-async-maps-column-names ()
+  "JDBC async column-name preheat should normalize the returned names."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                     :params '(:driver oracle :user "scott")))
+        callback-result)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
+               (lambda (_op _params callback &optional _errback _timeout _conn)
+                 (funcall callback
+                          '(:columns ((:name "ID" :type "NUMBER")
+                                      (:name "NAME" :type "VARCHAR2"))))
+                 42)))
+      (should (clutch-db-list-columns-async
+               conn "USERS"
+               (lambda (columns)
+                 (setq callback-result columns))))
+      (should (equal callback-result '("ID" "NAME"))))))
+
 ;;;; Unit tests — clutch-jdbc--collect-table-entries
 
 (ert-deftest clutch-db-test-jdbc-collect-table-entries-direct ()

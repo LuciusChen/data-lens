@@ -366,6 +366,21 @@ AUTO-COMMIT non-nil enables auto-commit; nil enables manual-commit.")
   "Most backends can synchronously load column metadata during completion."
   t)
 
+(cl-defgeneric clutch-db-open-metadata-context (conn params)
+  "Return a background metadata context for CONN built from PARAMS.
+Return nil when the backend does not support a separate metadata context.")
+
+(cl-defmethod clutch-db-open-metadata-context ((_conn t) _params)
+  "Backends without metadata-context support return nil."
+  nil)
+
+(cl-defgeneric clutch-db-close-metadata-context (conn context)
+  "Close background metadata CONTEXT associated with CONN.")
+
+(cl-defmethod clutch-db-close-metadata-context ((_conn t) _context)
+  "Backends without metadata-context support do nothing."
+  nil)
+
 (cl-defgeneric clutch-db-refresh-schema-async (conn callback &optional errback)
   "Start an asynchronous schema refresh for CONN.
 CALLBACK receives the table name list on success.  ERRBACK receives
@@ -385,6 +400,17 @@ fetch was started, nil when unsupported.")
 (cl-defmethod clutch-db-column-details-async ((_conn t) _table _callback
                                               &optional _errback)
   "Backends without asynchronous column detail support return nil."
+  nil)
+
+(cl-defgeneric clutch-db-list-columns-async (conn table callback &optional errback)
+  "Start an asynchronous column-name fetch for TABLE on CONN.
+CALLBACK receives the column name list on success.  ERRBACK receives an
+error message string on failure.  Return non-nil when async fetch was
+started, nil when unsupported.")
+
+(cl-defmethod clutch-db-list-columns-async ((_conn t) _table _callback
+                                            &optional _errback)
+  "Backends without asynchronous column-name support return nil."
   nil)
 
 ;; Query
@@ -536,6 +562,17 @@ other backend-specific keys as needed.")
 
 (cl-defgeneric clutch-db-table-comment (conn table)
   "Return the comment string for TABLE on CONN, or nil if none.")
+
+(cl-defgeneric clutch-db-table-comment-async (conn table callback &optional errback)
+  "Start an asynchronous table-comment fetch for TABLE on CONN.
+CALLBACK receives the comment string or nil on success.  ERRBACK receives an
+error message string on failure.  Return non-nil when async fetch was started,
+nil when unsupported.")
+
+(cl-defmethod clutch-db-table-comment-async ((_conn t) _table _callback
+                                             &optional _errback)
+  "Backends without asynchronous table-comment support return nil."
+  nil)
 
 (cl-defgeneric clutch-db-primary-key-columns (conn table)
   "Return a list of primary key column name strings for TABLE on CONN.")

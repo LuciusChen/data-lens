@@ -1295,6 +1295,25 @@ Call CALLBACK on success or ERRBACK on failure."
      conn)
     t))
 
+(cl-defmethod clutch-db-list-columns-async ((conn clutch-jdbc-conn) table callback
+                                            &optional errback)
+  "Fetch JDBC column names for TABLE on CONN asynchronously."
+  (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
+    (clutch-jdbc--rpc-async
+     "get-columns"
+     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+       (table . ,table)
+       ,@(clutch-jdbc--metadata-scope-params conn))
+     (lambda (result)
+       (when callback
+         (funcall callback
+                  (mapcar (lambda (col) (plist-get col :name))
+                          (plist-get result :columns)))))
+     errback
+     rpc-timeout
+     conn)
+    t))
+
 (cl-defmethod clutch-db-list-columns ((conn clutch-jdbc-conn) table)
   "Return column names for TABLE on JDBC CONN using DatabaseMetaData."
   (let* ((result  (clutch-jdbc--rpc

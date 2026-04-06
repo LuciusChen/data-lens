@@ -32,7 +32,10 @@
 
 (require 'cl-lib)
 (require 'clutch-db)
+(require 'clutch-worker)
 (require 'mysql-wire)
+
+(declare-function clutch--connection-context "clutch-connection" (conn))
 
 ;;;; Type-category mapping
 
@@ -148,6 +151,10 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
      (signal 'clutch-db-error
              (list (format "Init failed: %s" (error-message-string err)))))))
 
+(cl-defmethod clutch-db-eager-schema-refresh-p ((_conn mysql-wire-conn))
+  "MySQL schema refresh should not block connect."
+  nil)
+
 ;;;; Query methods
 
 (cl-defmethod clutch-db-query ((conn mysql-wire-conn) sql)
@@ -178,6 +185,97 @@ controls the optional sort clause."
   (mysql-wire-escape-literal value))
 
 ;;;; Schema methods
+
+(defun clutch-db-mysql--metadata-params (conn)
+  "Return reconnect PARAMS for MySQL metadata work on CONN."
+  (if-let* ((context (clutch--connection-context conn))
+            (params (car context)))
+      params
+    (signal 'clutch-db-error
+            (list "MySQL metadata refresh requires stored connection params"))))
+
+(cl-defmethod clutch-db-open-metadata-context ((_conn mysql-wire-conn) params)
+  "Return a dedicated MySQL metadata context built from PARAMS."
+  (let ((context (clutch-db-mysql-connect params)))
+    (clutch-db-init-connection context)
+    context))
+
+(cl-defmethod clutch-db-close-metadata-context ((_conn mysql-wire-conn)
+                                                (context mysql-wire-conn))
+  "Close dedicated MySQL metadata CONTEXT."
+  (clutch-db-disconnect context))
+
+(cl-defmethod clutch-db-refresh-schema-async ((conn mysql-wire-conn) callback
+                                              &optional errback)
+  "Refresh MySQL schema names for CONN on a background worker."
+  (clutch--worker-submit
+   conn
+   (lambda ()
+     (let (context)
+       (unwind-protect
+           (progn
+             (setq context
+                   (clutch-db-open-metadata-context
+                    conn (clutch-db-mysql--metadata-params conn)))
+             (clutch-db-list-tables context))
+         (when context
+           (clutch-db-close-metadata-context conn context)))))
+   callback
+   errback))
+
+(cl-defmethod clutch-db-list-columns-async ((conn mysql-wire-conn) table callback
+                                            &optional errback)
+  "Fetch MySQL column names for TABLE on CONN on a background worker."
+  (clutch--worker-submit
+   conn
+   (lambda ()
+     (let (context)
+       (unwind-protect
+           (progn
+             (setq context
+                   (clutch-db-open-metadata-context
+                    conn (clutch-db-mysql--metadata-params conn)))
+             (clutch-db-list-columns context table))
+         (when context
+           (clutch-db-close-metadata-context conn context)))))
+   callback
+   errback))
+
+(cl-defmethod clutch-db-column-details-async ((conn mysql-wire-conn) table callback
+                                              &optional errback)
+  "Fetch MySQL column details for TABLE on CONN on a background worker."
+  (clutch--worker-submit
+   conn
+   (lambda ()
+     (let (context)
+       (unwind-protect
+           (progn
+             (setq context
+                   (clutch-db-open-metadata-context
+                    conn (clutch-db-mysql--metadata-params conn)))
+             (clutch-db-column-details context table))
+         (when context
+           (clutch-db-close-metadata-context conn context)))))
+   callback
+   errback))
+
+(cl-defmethod clutch-db-table-comment-async ((conn mysql-wire-conn) table callback
+                                             &optional errback)
+  "Fetch the MySQL comment for TABLE on CONN on a background worker."
+  (clutch--worker-submit
+   conn
+   (lambda ()
+     (let (context)
+       (unwind-protect
+           (progn
+             (setq context
+                   (clutch-db-open-metadata-context
+                    conn (clutch-db-mysql--metadata-params conn)))
+             (clutch-db-table-comment context table))
+         (when context
+           (clutch-db-close-metadata-context conn context)))))
+   callback
+   errback))
 
 (cl-defmethod clutch-db-list-tables ((conn mysql-wire-conn))
   "Return table names for the current MySQL database on CONN."
@@ -318,6 +416,24 @@ ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME")))
     (mysql-wire-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-list-objects-async ((conn mysql-wire-conn) category callback
+                                            &optional errback)
+  "Fetch MySQL object entries for CATEGORY on CONN on a background worker."
+  (clutch--worker-submit
+   conn
+   (lambda ()
+     (let (context)
+       (unwind-protect
+           (progn
+             (setq context
+                   (clutch-db-open-metadata-context
+                    conn (clutch-db-mysql--metadata-params conn)))
+             (clutch-db-list-objects context category))
+         (when context
+           (clutch-db-close-metadata-context conn context)))))
+   callback
+   errback))
 
 (cl-defmethod clutch-db-object-details ((conn mysql-wire-conn) entry)
   "Return detail plists for MySQL object ENTRY on CONN."

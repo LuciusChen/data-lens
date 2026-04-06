@@ -33,6 +33,7 @@
 ;;; Code:
 
 (require 'clutch-db)
+(require 'clutch-worker)
 (require 'clutch-schema)
 (require 'clutch-ui)
 (require 'auth-source)
@@ -348,6 +349,7 @@ Returns non-nil on success, nil on failure."
     (condition-case err
         (let ((conn (clutch--build-conn params)))
           (clutch--clear-tx-dirty old-conn)
+          (clutch--worker-shutdown old-conn)
           (clutch--rebind-connection-buffers old-conn conn params product)
           (clutch--finalize-rebound-connection conn)
           (message "Reconnected to %s" (clutch--connection-key conn))
@@ -363,6 +365,7 @@ PRODUCT is the effective SQL product for the new logical session."
          (old-key (clutch--connection-key old-conn))
          (new-conn (clutch--build-conn params)))
     (clutch--clear-tx-dirty old-conn)
+    (clutch--worker-shutdown old-conn)
     (when (clutch--connection-alive-p old-conn)
       (clutch-db-disconnect old-conn))
     (unless (clutch--connection-alive-p new-conn)
@@ -883,6 +886,7 @@ state, and disconnects the underlying connection."
   (clutch--mark-dml-results-connection-closed conn)
   (clutch--invalidate-derived-buffers conn)
   (clutch--clear-tx-dirty conn)
+  (clutch--worker-shutdown conn)
   (when clutch-debug-mode
     (clutch--remember-debug-event
      :connection conn

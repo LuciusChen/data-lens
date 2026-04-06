@@ -61,7 +61,13 @@
 (defvar clutch--describe-object-entry)
 
 (declare-function clutch-db-browseable-object-entries "clutch-db" (conn))
+(declare-function clutch--cached-column-details "clutch-schema" (conn table))
+(declare-function clutch--cached-table-comment "clutch-schema" (conn table))
+(declare-function clutch--table-comment-cached-p "clutch-schema" (conn table))
+(declare-function clutch--ensure-column-details-async "clutch-schema" (conn table))
+(declare-function clutch--ensure-columns-async "clutch-schema" (conn schema table))
 (declare-function clutch--ensure-point-visible-horizontally "clutch-ui" ())
+(declare-function clutch--ensure-table-comment-async "clutch-schema" (conn table))
 (declare-function clutch--footer-mode-line-display "clutch-ui" ())
 (declare-function clutch--header-line-display "clutch-ui" ())
 (declare-function clutch--column-border-position "clutch-ui" (cidx))
@@ -1020,11 +1026,22 @@ Returns non-nil on success, nil on failure."
                                  (if err (format ": %s" err) "")))))
             ok)
         (let ((started (clutch--refresh-schema-cache-async conn)))
-          (unless quiet
-            (message (if started
-                         "Schema refresh started in background"
-                       "Schema refresh is unavailable for this backend")))
-          started)))))
+          (if started
+              (progn
+                (unless quiet
+                  (message "Schema refresh started in background"))
+                t)
+            (let* ((ok (clutch--refresh-schema-cache conn))
+                   (entry (clutch--schema-status-entry conn))
+                   (tables (plist-get entry :tables))
+                   (err (plist-get entry :error)))
+              (unless quiet
+                (message (if ok
+                             (format "Schema refreshed%s"
+                                     (if tables (format " (%d tables)" tables) ""))
+                           (format "Schema refresh failed%s"
+                                   (if err (format ": %s" err) "")))))
+              ok)))))))
 
 (defun clutch--schema-cache-guidance (conn)
   "Return a recovery hint for CONN schema cache state, or nil."
@@ -1263,23 +1280,28 @@ executed outside clutch that would otherwise leave stale completions."
 
 (defun clutch--eldoc-column-string (conn table col-name)
   "Format an eldoc string for COL-NAME in TABLE using CONN."
-  (when-let* ((details (clutch--ensure-column-details conn table))
-              (col (cl-find col-name details
+  (let* ((details (clutch--cached-column-details conn table))
+         (col (and details
+                   (cl-find col-name details
                             :key (lambda (d) (plist-get d :name))
                             :test #'string=)))
-    (let* ((type    (plist-get col :type))
-           (comment (plist-get col :comment))
-           (extras  (clutch--eldoc-column-extras col))
-           (header  (concat (propertize table    'face 'font-lock-type-face)
-                            "."
-                            (propertize col-name 'face 'font-lock-variable-name-face))))
-      (string-join
-       (delq nil (list header
-                       (propertize type 'face 'font-lock-type-face)
-                       (unless (string-empty-p extras) extras)
-                       (when comment
-                         (propertize (format "— %s" comment) 'face 'shadow))))
-       "  "))))
+         (header (concat (propertize table 'face 'font-lock-type-face)
+                         "."
+                         (propertize col-name 'face 'font-lock-variable-name-face))))
+    (unless details
+      (clutch--ensure-column-details-async conn table))
+    (if col
+        (let ((type (plist-get col :type))
+              (comment (plist-get col :comment))
+              (extras (clutch--eldoc-column-extras col)))
+          (string-join
+           (delq nil (list header
+                           (propertize type 'face 'font-lock-type-face)
+                           (unless (string-empty-p extras) extras)
+                           (when comment
+                             (propertize (format "— %s" comment) 'face 'shadow))))
+           "  "))
+      header)))
 
 (defun clutch--tables-in-buffer (schema)
   "Return table names from SCHEMA that appear in the current buffer."
@@ -2173,7 +2195,11 @@ when completion triggers during an in-flight query)."
                   (dolist (tbl context-tables)
                     (let ((cols
                            (if sync-columns-p
-                               (and schema (clutch--ensure-columns conn schema tbl))
+                               (or (clutch--cached-columns schema tbl)
+                                   (progn
+                                     (when schema
+                                       (clutch--ensure-columns-async conn schema tbl))
+                                     nil))
                              (or (clutch--cached-columns schema tbl)
                                  (clutch--safe-completion-call
                                   (lambda ()
@@ -2200,11 +2226,13 @@ Matches SYM as a table name first, then as a column in any visible table."
   (let ((sync-columns-p (clutch-db-completion-sync-columns-p conn)))
     (cond
      ((not (eq (gethash sym schema 'missing) 'missing))
-      (let* ((cols    (if sync-columns-p
-                          (clutch--ensure-columns conn schema sym)
-                        (clutch--cached-columns schema sym)))
-             (n       (length cols))
-             (comment (clutch--ensure-table-comment conn sym)))
+      (let* ((cols    (clutch--cached-columns schema sym))
+             (_       (when (and sync-columns-p (not cols))
+                        (clutch--ensure-columns-async conn schema sym)))
+             (comment (clutch--cached-table-comment conn sym))
+             (_       (when (not (clutch--table-comment-cached-p conn sym))
+                        (clutch--ensure-table-comment-async conn sym)))
+             (n       (length cols)))
         (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
                 (propertize sym 'face 'font-lock-type-face)
                 (when cols
@@ -2218,7 +2246,10 @@ Matches SYM as a table name first, then as a column in any visible table."
                    (<= (length tables) clutch--schema-inline-table-limit))
           (cl-loop for tbl in tables
                    for cols = (if sync-columns-p
-                                  (clutch--ensure-columns conn schema tbl)
+                                  (or (clutch--cached-columns schema tbl)
+                                      (progn
+                                        (clutch--ensure-columns-async conn schema tbl)
+                                        nil))
                                 (clutch--cached-columns schema tbl))
                    when (and cols (member sym cols))
                    return (clutch--eldoc-column-string conn tbl sym)))))

@@ -28,6 +28,8 @@
 Each value is a plist with at least :entries and :fetched-at.")
 (defvar clutch--object-warmup-timers (make-hash-table :test 'equal)
   "Idle timers warming object discovery caches keyed by connection key string.")
+(defvar clutch--object-warmup-generations (make-hash-table :test 'equal)
+  "Warmup generations keyed by object-cache key string.")
 (defvar clutch-connection)
 (defvar clutch-object-warmup-idle-delay-seconds)
 (defvar clutch-primary-object-types)
@@ -281,13 +283,28 @@ temporarily unavailable."
       (cancel-timer timer)
       (remhash key clutch--object-warmup-timers))))
 
+(defun clutch--object-warmup-generation (conn &optional key)
+  "Return the current warmup generation for CONN or explicit KEY."
+  (gethash (or key (clutch--object-cache-key conn))
+           clutch--object-warmup-generations
+           0))
+
+(defun clutch--invalidate-object-warmup (conn &optional key)
+  "Cancel pending warmup work and bump its generation for CONN or KEY."
+  (let ((key (or key (clutch--object-cache-key conn))))
+    (clutch--cancel-object-warmup conn key)
+    (puthash key
+             (1+ (clutch--object-warmup-generation conn key))
+             clutch--object-warmup-generations)))
+
 (defun clutch--schedule-object-warmup (conn)
   "Warm non-table object categories for CONN during idle time."
   (let* ((key (clutch--object-cache-key conn))
          (loaded (clutch--object-cache-loaded-categories conn))
          (next (seq-find (lambda (category)
                            (not (memq category loaded)))
-                         clutch--object-categories)))
+                         clutch--object-categories))
+         (generation (clutch--object-warmup-generation conn key)))
     (cond
      ((or (not conn)
           (not (clutch--object-connection-alive-p conn))
@@ -299,10 +316,12 @@ temporarily unavailable."
       (puthash
        key
        (run-with-idle-timer
-        clutch-object-warmup-idle-delay-seconds nil
+       clutch-object-warmup-idle-delay-seconds nil
         (lambda ()
           (remhash key clutch--object-warmup-timers)
-          (when (and conn (clutch--object-connection-alive-p conn))
+          (when (and conn
+                     (clutch--object-connection-alive-p conn)
+                     (= generation (clutch--object-warmup-generation conn key)))
             (condition-case err
                 (if (clutch-db-busy-p conn)
                     (clutch--schedule-object-warmup conn)
@@ -313,12 +332,16 @@ temporarily unavailable."
                               conn next
                               (lambda (entries)
                                 (when (and conn
-                                           (clutch--object-connection-alive-p conn))
+                                           (clutch--object-connection-alive-p conn)
+                                           (= generation
+                                              (clutch--object-warmup-generation conn key)))
                                   (clutch--store-object-cache-type-entries conn type entries)
                                   (clutch--schedule-object-warmup conn)))
                               (lambda (&rest _)
                                 (when (and conn
-                                           (clutch--object-connection-alive-p conn))
+                                           (clutch--object-connection-alive-p conn)
+                                           (= generation
+                                              (clutch--object-warmup-generation conn key)))
                                   (clutch--schedule-object-warmup conn)))))
                       (progn
                         (when type

@@ -43,6 +43,7 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "Full header-line string before hscroll adjustment.")
 (defvar-local clutch--last-window-width nil
   "Last known window body width for the current result buffer.")
+(defvar clutch--last-query)
 (defvar-local clutch--marked-rows nil
   "List of marked row indices.")
 (defvar-local clutch--order-by nil
@@ -113,6 +114,7 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--compute-column-widths "clutch-query" (col-names rows columns))
 (declare-function clutch--cached-column-details "clutch-schema" (conn table))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
+(declare-function clutch--ensure-column-details-async "clutch-schema" (conn table))
 (declare-function clutch--format-elapsed "clutch-query" (seconds))
 (declare-function clutch--format-value "clutch-query" (value))
 (declare-function clutch--numeric-type-p "clutch-query" (col-def))
@@ -128,6 +130,7 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch-result--extract-pk-vec "clutch-edit" (row pk-indices))
 (declare-function clutch-result--row-idx-at-line "clutch-edit" ())
 (declare-function clutch-result-mode "clutch" (&optional arg))
+(declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch-db-result-affected-rows "clutch-db" (result))
 (declare-function clutch-db-result-columns "clutch-db" (result))
 (declare-function clutch-db-result-connection "clutch-db" (result))
@@ -678,6 +681,43 @@ Returns a list of detail plists aligned with COL-NAMES, or nil."
                 (gethash (downcase name) by-name))
               col-names))))
 
+(defun clutch--cached-result-column-details (conn sql col-names)
+  "Return cached result column details for COL-NAMES, or nil when unavailable.
+Uses CONN and SQL to detect the source table, but does not trigger synchronous
+metadata loading."
+  (when-let* ((table (when sql
+                       (clutch-result--table-from-sql sql)))
+              (details (clutch--cached-column-details conn table)))
+    (let ((by-name (make-hash-table :test 'equal)))
+      (dolist (detail details)
+        (puthash (downcase (plist-get detail :name)) detail by-name))
+      (mapcar (lambda (name)
+                (gethash (downcase name) by-name))
+              col-names))))
+
+(defun clutch--queue-result-column-details-enrichment (conn sql)
+  "Start async result column-detail preheat for CONN and SQL when needed."
+  (when-let* ((table (when sql
+                       (clutch-result--table-from-sql sql)))
+              ((not (clutch--cached-column-details conn table))))
+    (clutch--ensure-column-details-async conn table)))
+
+(defun clutch--refresh-result-metadata-buffers (conn table)
+  "Refresh cached result column metadata for live result buffers on CONN/TABLE."
+  (when-let* ((conn-key (and conn (clutch--connection-key conn))))
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and (derived-mode-p 'clutch-result-mode)
+                     clutch-connection
+                     clutch--result-columns
+                     clutch--last-query
+                     (string= (clutch--connection-key clutch-connection) conn-key)
+                     (equal (clutch-result--table-from-sql clutch--last-query) table))
+            (setq-local clutch--result-column-details
+                        (clutch--cached-result-column-details
+                         clutch-connection clutch--last-query clutch--result-columns))))))))
+
 (defun clutch--header-cell (cidx widths &optional active-cidx)
   "Build a single header cell string for column CIDX.
 WIDTHS is the effective width vector.
@@ -1089,8 +1129,10 @@ If the result has columns, shows a table; otherwise shows DML summary."
           (progn
             (clutch--init-select-result-state col-names columns rows)
             (setq-local clutch--result-column-details
-                        (clutch--resolve-result-column-details
+                        (clutch--cached-result-column-details
                          (clutch-db-result-connection result) sql col-names))
+            (clutch--queue-result-column-details-enrichment
+             (clutch-db-result-connection result) sql)
             (clutch--display-select-result col-names rows columns))
         (clutch--display-dml-result result sql elapsed)))
     (clutch--show-result-buffer buf)))
