@@ -25,6 +25,8 @@
 (require 'clutch)
 
 (defvar mysql-wire-tls-verify-server)
+(defvar clutch-column-displayers)
+(defvar clutch--result-source-table)
 
 (declare-function make-clutch-jdbc-conn "clutch-db-jdbc" (&rest slot-value-pairs))
 (declare-function make-mysql-wire-conn "mysql-wire" (&rest args))
@@ -3845,6 +3847,104 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should (eq (get-text-property 2 'face cell) 'clutch-fk-face))
       (should (eq (get-text-property 4 'face cell) 'clutch-fk-face))
       (should-not (get-text-property 5 'face cell)))))
+
+(ert-deftest clutch-test-register-column-displayer-replaces-and-unregisters ()
+  "Column displayer registration should replace existing entries and unregister cleanly."
+  (let ((clutch-column-displayers nil)
+        (first (lambda (_value) "first"))
+        (second (lambda (_value) "second")))
+    (clutch-register-column-displayer "Orders" "Status" first)
+    (should (eq (clutch--lookup-column-displayer "orders" "status") first))
+    (clutch-register-column-displayer "orders" "status" second)
+    (should (= (length clutch-column-displayers) 1))
+    (should (= (length (cdar clutch-column-displayers)) 1))
+    (should (eq (clutch--lookup-column-displayer "ORDERS" "STATUS") second))
+    (clutch-unregister-column-displayer "ORDERS" "STATUS")
+    (should-not clutch-column-displayers)))
+
+(ert-deftest clutch-test-cell-display-content-uses-case-insensitive-column-displayer ()
+  "Custom column displayers should match table and column names case-insensitively."
+  (let ((clutch-column-displayers nil))
+    (clutch-register-column-displayer
+     "Orders" "Status"
+     (lambda (value)
+       (format "state:%s" value)))
+    (with-temp-buffer
+      (setq-local clutch--result-source-table "orders")
+      (should (equal
+               (clutch--cell-display-content
+                7 12 '(:name "STATUS" :type-category numeric) nil)
+               "state:7")))))
+
+(ert-deftest clutch-test-cell-display-content-falls-back-when-displayer-returns-nil ()
+  "Nil from a column displayer should fall back to the default renderer."
+  (let ((clutch-column-displayers nil))
+    (clutch-register-column-displayer
+     "orders" "status"
+     (lambda (_value) nil))
+    (with-temp-buffer
+      (setq-local clutch--result-source-table "orders")
+      (should (equal
+               (clutch--cell-display-content
+                "queued" 12 '(:name "status" :type-category text) nil)
+               "queued")))))
+
+(ert-deftest clutch-test-cell-display-content-falls-back-when-displayer-errors ()
+  "Errors from a column displayer should not escape the result renderer."
+  (let ((clutch-column-displayers nil)
+        logged)
+    (clutch-register-column-displayer
+     "orders" "status"
+     (lambda (_value)
+       (error "boom")))
+    (with-temp-buffer
+      (setq-local clutch--result-source-table "orders")
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq logged (apply #'format fmt args)))))
+        (should (equal
+                 (clutch--cell-display-content
+                  "queued" 12 '(:name "status" :type-category text) nil)
+                 "queued"))
+        (should (string-match-p "failed: boom" logged))))))
+
+(ert-deftest clutch-test-cell-display-content-truncates-custom-displayer-output ()
+  "Custom column displayer output should still be truncated to column width."
+  (let ((clutch-column-displayers nil))
+    (clutch-register-column-displayer
+     "orders" "status"
+     (lambda (_value)
+       "abcdef"))
+    (with-temp-buffer
+      (setq-local clutch--result-source-table "orders")
+      (should (equal
+               (clutch--cell-display-content
+                "queued" 4 '(:name "status" :type-category text) nil)
+               "abcd")))))
+
+(ert-deftest clutch-test-render-cell-custom-displayer-keeps-full-value-raw ()
+  "Custom cell display should keep `clutch-full-value' on the raw value."
+  (let ((clutch-column-displayers nil))
+    (clutch-register-column-displayer
+     "tasks" "status"
+     (lambda (_value)
+       "done"))
+    (with-temp-buffer
+      (setq-local clutch--result-source-table "tasks"
+                  clutch--result-column-defs
+                  '((:name "status" :type-category numeric)))
+      (let ((cell (clutch--render-cell '(2) 0 0 [6] nil)))
+        (should (string-match-p "done" cell))
+        (should (= (get-text-property 2 'clutch-full-value cell) 2))))))
+
+(ert-deftest clutch-test-display-select-result-records-source-table ()
+  "SELECT result rendering should cache the detected source table name."
+  (with-temp-buffer
+    (setq-local clutch--last-query "SELECT * FROM orders")
+    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
+      (clutch--display-select-result '("id") '((1))
+                                     '((:name "id" :type-category numeric)))
+      (should (equal clutch--result-source-table "orders")))))
 
 (ert-deftest clutch-test-result-column-info-works-on-cell-padding ()
   "Column info should resolve from padded whitespace inside a data cell."

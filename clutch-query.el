@@ -80,6 +80,7 @@
 (defvar clutch--query-elapsed)
 (defvar clutch--result-column-defs)
 (defvar clutch--result-columns)
+(defvar clutch--result-source-table)
 (defvar clutch--result-rows)
 (defvar clutch--sort-column)
 (defvar clutch--sort-descending)
@@ -443,6 +444,7 @@ COLUMN-DEFS, if provided, is used for long-field detection.
 Returns a string (with text properties)."
   (let* ((clutch--result-columns col-names)
          (clutch--result-column-defs column-defs)
+         (clutch--result-source-table nil)
          (clutch--pending-edits nil)
          (clutch--fk-info nil)
          (ncols (length col-names))

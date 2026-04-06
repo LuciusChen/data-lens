@@ -60,6 +60,8 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "List of field alists staged for insertion.")
 (defvar-local clutch--query-elapsed nil
   "Elapsed time in seconds for the last query execution.")
+(defvar-local clutch--result-source-table nil
+  "Detected source table name for the current result buffer, or nil.")
 (defvar-local clutch--result-column-defs nil
   "Full column definition plists from the last result.")
 (defvar-local clutch--result-columns nil
@@ -137,6 +139,121 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch-db-result-last-insert-id "clutch-db" (result))
 (declare-function clutch-db-result-rows "clutch-db" (result))
 (declare-function clutch-db-result-warnings "clutch-db" (result))
+
+(defcustom clutch-column-displayers nil
+  "Per-table/per-column display functions for result cells.
+Each entry is (TABLE-NAME . ((COLUMN-NAME . FUNCTION) ...)).
+TABLE-NAME and COLUMN-NAME are matched case-insensitively.
+FUNCTION receives the raw cell value and must return a string, which may
+include text properties.  Return nil to fall back to default rendering."
+  :type '(alist :key-type string
+                :value-type (alist :key-type string :value-type function))
+  :group 'clutch)
+
+(defun clutch--case-insensitive-string= (left right)
+  "Return non-nil when LEFT and RIGHT match case-insensitively."
+  (and (stringp left)
+       (stringp right)
+       (string= (downcase left) (downcase right))))
+
+(defun clutch--lookup-column-displayer (table column)
+  "Return registered displayer for TABLE and COLUMN, or nil."
+  (when-let* ((table-entry
+               (cl-assoc table clutch-column-displayers
+                         :test #'clutch--case-insensitive-string=))
+              (column-entry
+               (cl-assoc column (cdr table-entry)
+                         :test #'clutch--case-insensitive-string=)))
+    (cdr column-entry)))
+
+(defun clutch-register-column-displayer (table column function)
+  "Register FUNCTION as the renderer for COLUMN in TABLE.
+FUNCTION receives the raw cell value and should return a string.  Return
+nil from FUNCTION to fall back to default display.
+
+Examples:
+
+  ;; Show JSON column as a compact summary.
+  (clutch-register-column-displayer \"orders\" \"metadata\"
+    (lambda (value)
+      (when (stringp value)
+        (ignore-errors
+          (format \"{%d keys}\"
+                  (hash-table-count (json-parse-string value)))))))
+
+  ;; Show a URL as a clickable button.
+  (clutch-register-column-displayer \"bookmarks\" \"url\"
+    (lambda (value)
+      (when (stringp value)
+        (buttonize (truncate-string-to-width value 40 nil nil \"…\")
+                   (function browse-url) value))))
+
+  ;; Map numeric status codes to styled labels.
+  (clutch-register-column-displayer \"tasks\" \"status\"
+    (lambda (value)
+      (pcase value
+        (0 (propertize \"pending\" (quote face) (quote warning)))
+        (1 (propertize \"active\" (quote face) (quote success)))
+        (2 (propertize \"done\" (quote face) (quote shadow))))))"
+  (unless (stringp table)
+    (signal 'wrong-type-argument (list 'stringp table)))
+  (unless (stringp column)
+    (signal 'wrong-type-argument (list 'stringp column)))
+  (unless (functionp function)
+    (signal 'wrong-type-argument (list 'functionp function)))
+  (if-let* ((table-entry
+             (cl-assoc table clutch-column-displayers
+                       :test #'clutch--case-insensitive-string=)))
+      (progn
+        (setcar table-entry table)
+        (if-let* ((column-entry
+                   (cl-assoc column (cdr table-entry)
+                             :test #'clutch--case-insensitive-string=)))
+            (progn
+              (setcar column-entry column)
+              (setcdr column-entry function))
+          (setcdr table-entry (cons (cons column function) (cdr table-entry)))))
+    (push (cons table (list (cons column function))) clutch-column-displayers))
+  function)
+
+(defun clutch-unregister-column-displayer (table column)
+  "Remove any custom displayer for COLUMN in TABLE."
+  (unless (stringp table)
+    (signal 'wrong-type-argument (list 'stringp table)))
+  (unless (stringp column)
+    (signal 'wrong-type-argument (list 'stringp column)))
+  (when-let* ((table-entry
+               (cl-assoc table clutch-column-displayers
+                         :test #'clutch--case-insensitive-string=)))
+    (setcdr table-entry
+            (cl-remove-if
+             (lambda (column-entry)
+               (clutch--case-insensitive-string=
+                (car-safe column-entry) column))
+             (cdr table-entry)))
+    (when (null (cdr table-entry))
+      (setq clutch-column-displayers
+            (delq table-entry clutch-column-displayers))))
+  nil)
+
+(defun clutch--cell-custom-display (value col-def)
+  "Return custom display string for VALUE in COL-DEF, or nil."
+  (when-let* ((table clutch--result-source-table)
+              (column (plist-get col-def :name))
+              (displayer (clutch--lookup-column-displayer table column)))
+    (condition-case err
+        (let ((display (funcall displayer value)))
+          (cond
+           ((null display) nil)
+           ((stringp display) display)
+           (t
+            (message "clutch column displayer %s.%s returned %S, falling back"
+                     table column display)
+            nil)))
+      (error
+       (message "clutch column displayer %s.%s failed: %s"
+                table column (error-message-string err))
+       nil))))
 
 (defun clutch--nerd-icons-available-p ()
   "Return non-nil when nerd-icons is loaded and usable."
@@ -332,16 +449,20 @@ column-local commands still work from padded whitespace."
   "Return the unpadded display string for a cell value VAL in width W.
 COL-DEF is the column definition plist, EDITED is the pending edit cons or nil."
   (let* ((display-val (if edited (cdr edited) val))
-         (special-placeholder (and (not edited)
+         (custom (clutch--cell-custom-display display-val col-def))
+         (special-placeholder (and (not custom)
+                                   (not edited)
                                    (clutch--cell-placeholder-value display-val)))
-         (s (or special-placeholder
-                (replace-regexp-in-string "\n" "↵"
-                                          (clutch--format-value display-val))))
-         (placeholder (and (not edited)
+         (s (and (not custom)
+                 (or special-placeholder
+                     (replace-regexp-in-string "\n" "↵"
+                                               (clutch--format-value display-val)))))
+         (placeholder (and (not custom)
+                           (not edited)
                            (not special-placeholder)
                            (> (string-width s) w)
                            (clutch--value-placeholder display-val col-def)))
-         (formatted (or placeholder s)))
+         (formatted (or custom placeholder s)))
     (if (> (string-width formatted) w)
         (truncate-string-to-width formatted w)
       formatted)))
@@ -1062,6 +1183,7 @@ IGNORE-BUFFER is excluded from liveness checks."
 (defun clutch--display-select-result (col-names rows columns)
   "Render a SELECT result with COL-NAMES, ROWS, and COLUMNS metadata."
   (let ((inhibit-read-only t))
+    (setq-local clutch--result-source-table (clutch-result--detect-table))
     (setq-local clutch--column-widths
                 (clutch--compute-column-widths
                  col-names rows columns))
@@ -1072,6 +1194,7 @@ IGNORE-BUFFER is excluded from liveness checks."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (setq-local clutch--dml-result t)
+    (setq-local clutch--result-source-table nil)
     (setq-local clutch--column-widths nil)
     (insert (propertize (format "-- %s\n" (string-trim sql))
                         'face 'font-lock-comment-face))
