@@ -1,7 +1,8 @@
-;;; clutch-test.el --- ERT tests for the clutch database client -*- lexical-binding: t; -*-
+;;; clutch-test.el --- ERT tests for database workflows -*- lexical-binding: t; -*-
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
 ;; URL: https://github.com/LuciusChen/clutch
 
 ;;; Commentary:
@@ -13,7 +14,7 @@
 ;;   docker run -d -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql:8
 ;;
 ;; Run unit tests:
-;;   emacs -batch -L .. -l ert -l clutch-test \
+;;   Emacs -batch -L .. -l ert -l clutch-test \
 ;;     -f ert-run-tests-batch-and-exit
 
 ;;; Code:
@@ -215,7 +216,7 @@ crashing the UI layer."
 
 (ert-deftest clutch-test-dispatch-view-json-string-bypasses-serialize ()
   "String vals should be passed directly to the JSON viewer without re-serialization.
-This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
+This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   (let ((seen nil)
         (serialize-called nil))
     (cl-letf (((symbol-function 'clutch--view-json-value)
@@ -518,7 +519,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                  (lambda (_conn) t))
                 ((symbol-function 'clutch--build-paged-sql)
                  (lambda (&rest _args)
-                   (error "should not paginate")))
+                   (error "Should not paginate")))
                 ((symbol-function 'clutch-db-query)
                  (lambda (_conn _sql)
                    (cl-incf calls)
@@ -921,7 +922,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should (string-prefix-p "│I I1 " (buffer-string))))))
 
 (ert-deftest clutch-test-insert-fill-current-time-respects-column-type ()
-  "C-c . should replace temporal fields with now using result column metadata."
+  "The insert buffer time-filling helper should use result column metadata."
   (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
     (unwind-protect
         (progn
@@ -1129,10 +1130,10 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-edit-set-current-time-replaces-existing-value ()
-  "C-c . in edit buffers should replace the current value with now."
+  "The edit-buffer current-time helper should replace the current value with now."
   (with-temp-buffer
     (insert "2020-01-01 00:00:00")
-    (clutch-result-edit-mode 1)
+    (clutch--result-edit-mode 1)
     (setq-local clutch-result-edit--column-name "opened_at"
                 clutch-result-edit--column-def '(:name "opened_at" :type-category datetime)
                 clutch-result-edit--column-detail '(:name "opened_at" :type "datetime"))
@@ -1145,7 +1146,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   "Edit buffers should surface a compact live-validation token."
   (with-temp-buffer
     (insert "xx")
-    (clutch-result-edit-mode 1)
+    (clutch--result-edit-mode 1)
     (setq-local clutch-result-edit--row-idx 0
                 clutch-result-edit--column-name "impact_score"
                 clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
@@ -1161,7 +1162,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   "Fixing an invalid edit value should clear the live-validation token."
   (with-temp-buffer
     (insert "xx")
-    (clutch-result-edit-mode 1)
+    (clutch--result-edit-mode 1)
     (setq-local clutch-result-edit--row-idx 0
                 clutch-result-edit--column-name "impact_score"
                 clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
@@ -1179,7 +1180,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   "JSON edit buffers should defer live validation until the user goes idle."
   (with-temp-buffer
     (let (scheduled)
-      (clutch-result-edit-mode 1)
+      (clutch--result-edit-mode 1)
       (setq-local clutch-result-edit--row-idx 0
                   clutch-result-edit--column-name "payload"
                   clutch-result-edit--column-def '(:name "payload" :type-category json)
@@ -1202,7 +1203,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (unwind-protect
         (with-current-buffer edit-buf
           (insert "xx")
-          (clutch-result-edit-mode 1)
+          (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name "impact_score"
                       clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
                       clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)")
@@ -1226,7 +1227,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (unwind-protect
         (with-current-buffer edit-buf
           (insert "urgent")
-          (clutch-result-edit-mode 1)
+          (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name "severity"
                       clutch-result-edit--column-def '(:name "severity" :type-category text)
                       clutch-result-edit--column-detail
@@ -1247,7 +1248,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (unwind-protect
         (with-current-buffer edit-buf
           (insert "{oops}")
-          (clutch-result-edit-mode 1)
+          (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name "payload"
                       clutch-result-edit--column-def '(:name "payload" :type-category json)
                       clutch-result-edit--column-detail '(:name "payload" :type "json")
@@ -1267,7 +1268,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (unwind-protect
         (with-current-buffer edit-buf
           (insert "NULL")
-          (clutch-result-edit-mode 1)
+          (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name "impact_score"
                       clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
                       clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)")
@@ -1319,7 +1320,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (unwind-protect
         (with-current-buffer parent-buf
           (insert "{\"a\":1}")
-          (clutch-result-edit-mode 1)
+          (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name "payload"
                       clutch-result-edit--column-def '(:name "payload" :type-category json)
                       clutch-result-edit--column-detail '(:name "payload" :type "json"))
@@ -1358,7 +1359,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
             (clutch-result-insert-edit-json-field))
           (with-current-buffer edit-parent
             (insert "{\"b\":2}")
-            (clutch-result-edit-mode 1)
+            (clutch--result-edit-mode 1)
             (setq-local clutch-result-edit--column-name "payload"
                         clutch-result-edit--column-def '(:name "payload" :type-category json)
                         clutch-result-edit--column-detail '(:name "payload" :type "json"))
@@ -1874,10 +1875,10 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   "Edit completion should not swallow `completion-at-point' failures."
   (with-temp-buffer
     (setq-local clutch-result-edit--column-name "severity")
-    (clutch-result-edit-mode 1)
+    (clutch--result-edit-mode 1)
     (cl-letf (((symbol-function 'completion-at-point)
                (lambda ()
-                 (error "capf boom"))))
+                 (error "CAPF boom"))))
       (should-error (clutch-result-edit-complete-field) :type 'error))))
 
 (ert-deftest clutch-test-insert-complete-field-propagates-capf-errors ()
@@ -1887,7 +1888,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (clutch-result-insert-mode 1)
     (cl-letf (((symbol-function 'completion-at-point)
                (lambda ()
-                 (error "capf boom"))))
+                 (error "CAPF boom"))))
       (goto-char (point-min))
       (goto-char (clutch-result-insert--current-field-value-start))
       (should-error (clutch-result-insert-complete-field) :type 'error))))
@@ -2133,7 +2134,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
             (lambda (_context)
               (cl-incf closes))
             (lambda (_context)
-              (error "metadata boom"))
+              (error "Metadata boom"))
             #'ignore
             (lambda (message)
               (setq error-message message))))
@@ -2297,7 +2298,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           (should (eq (get-text-property 0 'face seg) 'error)))))))
 
 (ert-deftest clutch-test-update-mode-line-shows-spinner-when-executing ()
-  "Busy buffers should show the current spinner frame in mode-name."
+  "Busy buffers should show the current spinner frame in `mode-name'."
   (with-temp-buffer
     (clutch-mode)
     (let ((clutch--executing-p t)
@@ -2895,7 +2896,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           (should (string-match-p "\\[rows=2 cells=2 skipped=0\\]" summary)))))))
 
 (ert-deftest clutch-test-aggregate-with-prefix-refines-region ()
-  "C-u aggregate should use refined rectangle selection."
+  "Prefix-arg aggregate should use refined rectangle selection."
   (with-temp-buffer
     (let (kill-ring kill-ring-yank-pointer)
       (setq-local clutch--result-columns '("id" "score"))
@@ -3260,7 +3261,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
         (should (eq captured-conn 'new-conn))))))
 
 (ert-deftest clutch-test-execute-page-remembers-error-details-and-debug-event ()
-  "Paging failures should populate current-buffer error details and trace."
+  "Paging failures should populate `current-buffer' error details and trace."
   (with-temp-buffer
     (let ((clutch-debug-mode t)
           (raw-message "Connection refused (host=db.example.com, port=3306)"))
@@ -3304,7 +3305,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
           rendered)
       (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
                  (lambda (_conn)
-                   (error "debug-disabled path should not resolve backend key")))
+                   (error "Debug-disabled path should not resolve backend key")))
                 ((symbol-function 'clutch--run-db-query)
                  (lambda (_conn _sql)
                    (make-clutch-db-result :affected-rows 1)))
@@ -3896,7 +3897,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     (clutch-register-column-displayer
      "orders" "status"
      (lambda (_value)
-       (error "boom")))
+       (error "Boom")))
     (with-temp-buffer
       (setq-local clutch--result-source-table "orders")
       (cl-letf (((symbol-function 'message)
@@ -4121,7 +4122,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                                (cadr err)))))))
 
 (ert-deftest clutch-test-build-conn-enriches-buffer-error-details ()
-  "Connect failures should keep enriched current-buffer error details."
+  "Connect failures should keep enriched `current-buffer' error details."
   (with-temp-buffer
     (let ((raw-message "Connection refused (host=db.example.com, port=3306)"))
       (cl-letf (((symbol-function 'clutch--resolve-password)
@@ -5028,14 +5029,14 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should (clutch--tx-dirty-p clutch-connection)))))
 
 (ert-deftest clutch-test-commit-errors-in-autocommit-mode ()
-  "clutch-commit should signal user-error when connection is not in manual-commit mode."
+  "Clutch-commit should signal user-error when the connection is not in manual-commit mode."
   (let ((clutch-connection 'fake-conn))
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
               ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) nil)))
       (should-error (clutch-commit) :type 'user-error))))
 
 (ert-deftest clutch-test-commit-calls-rpc-and-clears-dirty ()
-  "clutch-commit should fire RPC and clear dirty cache."
+  "Clutch-commit should fire the RPC and clear the dirty cache."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
         (clutch-connection 'fake-conn)
         committed)
@@ -5050,14 +5051,14 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (should-not (clutch--tx-dirty-p clutch-connection)))))
 
 (ert-deftest clutch-test-rollback-errors-in-autocommit-mode ()
-  "clutch-rollback should signal user-error when connection is not in manual-commit mode."
+  "Clutch-rollback should signal user-error when the connection is not in manual-commit mode."
   (let ((clutch-connection 'fake-conn))
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
               ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) nil)))
       (should-error (clutch-rollback) :type 'user-error))))
 
 (ert-deftest clutch-test-rollback-calls-rpc-and-clears-dirty ()
-  "clutch-rollback should fire RPC and clear dirty cache."
+  "Clutch-rollback should fire the RPC and clear the dirty cache."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
         (clutch-connection 'fake-conn)
         rolled-back)
@@ -5082,7 +5083,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
     buf))
 
 (ert-deftest clutch-test-rollback-marks-dml-result-buffers ()
-  "clutch-rollback should add a warning banner to open DML result buffers."
+  "Clutch-rollback should add a warning banner to open DML result buffers."
   (let* ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
          (clutch-connection 'fake-conn)
          (buf (clutch-test--make-dml-result-buf 'fake-conn)))
@@ -5100,7 +5101,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (kill-buffer buf))))
 
 (ert-deftest clutch-test-commit-marks-dml-result-buffers ()
-  "clutch-commit should add a committed banner to open DML result buffers."
+  "Clutch-commit should add a committed banner to open DML result buffers."
   (let* ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
          (clutch-connection 'fake-conn)
          (buf (clutch-test--make-dml-result-buf 'fake-conn)))
@@ -5116,7 +5117,7 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
       (kill-buffer buf))))
 
 (ert-deftest clutch-test-disconnect-marks-dml-result-buffers ()
-  "clutch-disconnect should add a connection-closed notice to open DML result buffers."
+  "Clutch-disconnect should add a connection-closed notice to open DML result buffers."
   (let* ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
          (clutch-connection 'fake-conn)
          worker-shutdown
@@ -5173,15 +5174,15 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                   ((symbol-function 'clutch--save-console) #'ignore))
           (with-current-buffer buf
             (clutch-mode)
-            (clutch-indirect-mode 1)
+            (clutch--indirect-mode 1)
             (setq clutch-connection 'fake-conn))
           (kill-buffer buf))
       (when (buffer-live-p buf) (kill-buffer buf)))
     (should-not disconnected)))
 
 (ert-deftest clutch-test-kill-plain-sql-buffer-disconnects ()
-  "Killing a plain clutch-mode buffer (no console-name) that owns a
-connection should still disconnect."
+  "Killing a plain `clutch-mode' buffer with no console-name should still disconnect.
+This applies when the buffer owns the connection."
   (let ((disconnected nil)
         (buf (generate-new-buffer " *clutch-plain-sql*")))
     (unwind-protect
@@ -5194,7 +5195,7 @@ connection should still disconnect."
                   ((symbol-function 'clutch--save-console) #'ignore))
           (with-current-buffer buf
             (clutch-mode)
-            ;; No clutch--console-name, no clutch-indirect-mode.
+            ;; No clutch--console-name, no clutch--indirect-mode.
             (setq clutch-connection 'fake-conn))
           (kill-buffer buf))
       (when (buffer-live-p buf) (kill-buffer buf)))
@@ -5591,7 +5592,7 @@ Otherwise the scanner skips past the JOIN token and misses the joined table."
                  (lambda (_conn) nil))
                 ((symbol-function 'clutch--ensure-columns)
                  (lambda (&rest _args)
-                   (error "should not synchronously load columns")))
+                   (error "Should not synchronously load columns")))
                 ((symbol-function 'clutch-db-complete-columns)
                  (lambda (_conn table prefix)
                    (should (equal table "ZJ_SYS_PARA"))
@@ -5622,7 +5623,7 @@ Otherwise the scanner skips past the JOIN token and misses the joined table."
                  (lambda (_conn) nil))
                 ((symbol-function 'clutch--ensure-columns)
                  (lambda (&rest _args)
-                   (error "should not synchronously load columns")))
+                   (error "Should not synchronously load columns")))
                 ((symbol-function 'clutch-db-complete-columns)
                  (lambda (_conn table prefix)
                    (push table seen)
@@ -5642,8 +5643,8 @@ Otherwise the scanner skips past the JOIN token and misses the joined table."
           (should-not (member "ZJ_LOG" candidates)))))))
 
 (ert-deftest clutch-test-union-all-alias-scoped-to-branch ()
-  "Same alias in different UNION ALL branches should resolve to the
-branch-local table, not always the first occurrence."
+  "The same alias in different UNION ALL branches should resolve branch-locally.
+It should not always resolve to the first occurrence."
   ;; Cursor in the second branch: t. should complete with posts columns.
   (with-temp-buffer
     (insert "select t.id from users t\nunion all\nselect t.ti from posts t")
@@ -5700,8 +5701,8 @@ branch-local table, not always the first occurrence."
           (should-not (member "name" candidates)))))))
 
 (ert-deftest clutch-test-extract-tables-and-aliases ()
-  "clutch--extract-tables-and-aliases should return tables and aliases
-preserving order, with duplicates retained (caller deduplicates)."
+  "Clutch--extract-tables-and-aliases should preserve table and alias order.
+It should retain duplicates for callers that deduplicate later."
   (let* ((sql "SELECT a.id FROM users a JOIN orders b ON a.id = b.uid JOIN users c")
          (result (clutch--extract-tables-and-aliases sql 0 (length sql)))
          (tables (car result))
@@ -5721,8 +5722,8 @@ preserving order, with duplicates retained (caller deduplicates)."
     (should-not (cdr result))))
 
 (ert-deftest clutch-test-normalize-table-token-strips-quotes-from-schema-qualified ()
-  "Quoted schema-qualified names like \"HR\".\"EMPLOYEES\" should normalize
-to bare table name."
+  "Quoted schema-qualified names like \"HR\".\"EMPLOYEES\" should normalize cleanly.
+They should become a bare table name."
   (should (equal (clutch--normalize-statement-table-token "\"HR\".\"EMPLOYEES\"")
                  "EMPLOYEES"))
   (should (equal (clutch--normalize-statement-table-token "`db`.`table`")
@@ -5737,7 +5738,7 @@ to bare table name."
 ;; --- xref alias jump-to-definition tests ---
 
 (ert-deftest clutch-test-xref-alias-jump-basic ()
-  "M-. on alias `u' in WHERE should jump to `u' definition in FROM clause."
+  "Alias `u' in a WHERE clause should jump to its FROM-clause definition."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -5764,7 +5765,7 @@ to bare table name."
           (should (looking-back "users " (- pos 10))))))))
 
 (ert-deftest clutch-test-xref-alias-jump-qualified ()
-  "M-. on `name' in `u.name' should resolve qualifier `u' as the alias."
+  "Qualified reference `u.name' should resolve qualifier `u' as the alias."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -5791,7 +5792,7 @@ to bare table name."
           (should (looking-back "users " (- pos 10))))))))
 
 (ert-deftest clutch-test-xref-alias-join ()
-  "M-. on `o' should jump to JOIN alias definition, not FROM alias."
+  "Alias `o' should jump to the JOIN definition, not the FROM alias."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -5817,7 +5818,7 @@ to bare table name."
           (should (looking-back "orders " (- pos 10))))))))
 
 (ert-deftest clutch-test-xref-non-alias-returns-no-definitions ()
-  "M-. on a non-alias symbol should return the symbol but no definitions."
+  "A non-alias symbol should return the symbol but no definitions."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -5866,7 +5867,7 @@ to bare table name."
           (should (looking-back "orders " (- pos 10))))))))
 
 (ert-deftest clutch-test-xref-alias-inside-parens ()
-  "M-. on alias inside SUM(...) or CASE expression should still find FROM def."
+  "An alias inside SUM(...) or CASE should still find the FROM definition."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -5887,7 +5888,7 @@ to bare table name."
           (should (looking-back "ffp_order_plan_detail " (- pos 30))))))))
 
 (ert-deftest clutch-test-xref-alias-multiline-from ()
-  "M-. should find alias when FROM and table name are on separate lines."
+  "Alias lookup should work when FROM and table name are on separate lines."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -5909,7 +5910,7 @@ to bare table name."
           (should (looking-back "ffp_order_plan_detail " (- pos 30))))))))
 
 (ert-deftest clutch-test-xref-alias-no-schema-cache ()
-  "M-. should work even when schema cache is not warmed (no live connection)."
+  "Alias lookup should work even when the schema cache is not warmed."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -5953,7 +5954,7 @@ to bare table name."
           (should (looking-back "orders " (- pos 10))))))))
 
 (ert-deftest clutch-test-xref-alias-quoted ()
-  "M-. should handle quoted alias identifiers like `\"u\"'."
+  "Alias lookup should handle quoted alias identifiers like `\"u\"'."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -5972,7 +5973,7 @@ to bare table name."
           (should (eq (char-after pos) ?\")))))))
 
 (ert-deftest clutch-test-xref-ignores-alias-in-comment ()
-  "M-. should not jump when point is on alias-like text inside a comment."
+  "Alias lookup should not jump on alias-like text inside a comment."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -5988,7 +5989,7 @@ to bare table name."
         (xref-backend-identifier-at-point 'clutch))))))
 
 (ert-deftest clutch-test-xref-ignores-alias-in-string ()
-  "M-. should not jump when point is on alias-like text inside a string."
+  "Alias lookup should not jump on alias-like text inside a string."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -6004,7 +6005,7 @@ to bare table name."
         (xref-backend-identifier-at-point 'clutch))))))
 
 (ert-deftest clutch-test-xref-alias-quoted-multiword ()
-  "M-. should handle double-quoted multi-word alias identifiers."
+  "Alias lookup should handle double-quoted multi-word identifiers."
   (with-temp-buffer
     (clutch-mode)
     (setq-local clutch-connection 'fake-conn)
@@ -6314,7 +6315,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
       (cl-letf (((symbol-function 'clutch-repl--output)
                  (lambda (text) (push text output)))
                 ((symbol-function 'clutch-repl--execute-and-print)
-                 (lambda (_sql) (error "should not execute"))))
+                 (lambda (_sql) (error "Should not execute"))))
         (clutch-repl--input-sender nil "SELECT 1")
         (should (equal clutch-repl--pending-input "SELECT 1"))
         (should (equal (car output) "    -> "))))))
@@ -6327,7 +6328,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
       (cl-letf (((symbol-function 'clutch-repl--execute-and-print)
                  (lambda (sql) (setq sent sql)))
                 ((symbol-function 'clutch-repl--output)
-                 (lambda (_text) (error "should not output continuation"))))
+                 (lambda (_text) (error "Should not output continuation"))))
         (clutch-repl--input-sender nil " 1;")
         (should (equal sent "SELECT\n 1;"))
         (should (equal clutch-repl--pending-input ""))))))
@@ -7229,7 +7230,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                  nil))
               ((symbol-function 'clutch--object-type-entries)
                (lambda (&rest _args)
-                 (error "warmup boom"))))
+                 (error "Warmup boom"))))
       (clutch--schedule-object-warmup 'fake-conn)
       (should timer-fn)
       (should-error (funcall timer-fn) :type 'error))))
@@ -7766,7 +7767,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                    "system@127.0.0.1:54321"))))
 
 (ert-deftest clutch-test-object-resolve-prefers-definition-buffer-object-over-symbol-at-point ()
-  "Definition buffers should use the displayed object before symbol-at-point."
+  "Definition buffers should use the displayed object before `symbol-at-point'."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
                 clutch-browser-current-object '(:name "BQS_BERTH" :type "TABLE"))
@@ -8179,7 +8180,7 @@ Skips if `clutch-test-password' is nil."
         (should (equal (cdar stmts) '("carol" 7)))))))
 
 (ert-deftest clutch-test-discard-delete-removes-pk-entry ()
-  "C-c C-k removes the matching pk-vec from pending-deletes."
+  "Discarding a delete should remove the matching pk-vec from pending-deletes."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name"))
     (setq-local clutch--result-rows (list (list 42 "alice")))
@@ -8194,7 +8195,7 @@ Skips if `clutch-test-password' is nil."
       (should (null clutch--pending-deletes)))))
 
 (ert-deftest clutch-test-discard-insert-removes-entry ()
-  "C-c C-k on a ghost insert row removes it from pending-inserts."
+  "Discarding a ghost insert row should remove it from pending-inserts."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name"))
     (setq-local clutch--result-rows (list (list 1 "x")))
@@ -8208,7 +8209,7 @@ Skips if `clutch-test-password' is nil."
       (should (null clutch--pending-inserts)))))
 
 (ert-deftest clutch-test-discard-edit-removes-cell-entry ()
-  "C-c C-k on an edited cell removes the matching pending edit."
+  "Discarding an edited cell should remove the matching pending edit."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name")
                 clutch--result-rows (list (list 42 "alice"))
@@ -8224,7 +8225,7 @@ Skips if `clutch-test-password' is nil."
       (should (null clutch--pending-edits)))))
 
 (ert-deftest clutch-test-check-pending-changes-blocks-when-deletes-pending ()
-  "clutch--check-pending-changes signals user-error when user declines to discard."
+  "Clutch--check-pending-changes should signal user-error when the user declines to discard."
   (let ((buf (generate-new-buffer "*clutch-result*")))
     (unwind-protect
         (with-current-buffer buf
@@ -8277,37 +8278,37 @@ Skips if `clutch-test-password' is nil."
 ;;; Fix 1 — pg-oid-bool type-category
 
 (ert-deftest clutch-test-pg-bool-type-category ()
-  "pg-oid-bool should map to text, not numeric."
+  "Pg-oid-bool should map to text, not numeric."
   (require 'clutch-db-pg)
   (should (eq (clutch-db-pg--type-category 16) 'text)))
 
 ;;; Fix 3 — clutch-db-format-temporal
 
 (ert-deftest clutch-test-format-temporal-datetime ()
-  "clutch-db-format-temporal formats datetime plists."
+  "Clutch-db-format-temporal should format datetime plists."
   (should (equal (clutch-db-format-temporal
                   '(:year 2024 :month 1 :day 15 :hours 13 :minutes 45 :seconds 30))
                  "2024-01-15 13:45:30")))
 
 (ert-deftest clutch-test-format-temporal-date-only ()
-  "clutch-db-format-temporal formats date-only plists."
+  "Clutch-db-format-temporal should format date-only plists."
   (should (equal (clutch-db-format-temporal '(:year 2024 :month 6 :day 1))
                  "2024-06-01")))
 
 (ert-deftest clutch-test-format-temporal-time-only ()
-  "clutch-db-format-temporal formats time-only plists."
+  "Clutch-db-format-temporal should format time-only plists."
   (should (equal (clutch-db-format-temporal
                   '(:hours 13 :minutes 5 :seconds 0 :negative nil))
                  "13:05:00")))
 
 (ert-deftest clutch-test-format-temporal-time-negative ()
-  "clutch-db-format-temporal formats negative time plists."
+  "Clutch-db-format-temporal should format negative time plists."
   (should (equal (clutch-db-format-temporal
                   '(:hours 1 :minutes 0 :seconds 0 :negative t))
                  "-01:00:00")))
 
 (ert-deftest clutch-test-format-temporal-non-temporal ()
-  "clutch-db-format-temporal returns nil for non-temporal plists."
+  "Clutch-db-format-temporal should return nil for non-temporal plists."
   (should (null (clutch-db-format-temporal '(:foo 1 :bar 2)))))
 
 ;;; Fix 2 — reconnect preserves pending state
@@ -9269,7 +9270,7 @@ database.  Only a query re-execution should discard them."
       (cl-letf (((symbol-function 'make-directory) #'ignore)
                 ((symbol-function 'write-region)
                  (lambda (&rest _args)
-                   (error "disk full")))
+                   (error "Disk full")))
                 ((symbol-function 'message)
                  (lambda (fmt &rest args)
                    (setq reported (apply #'format fmt args)))))

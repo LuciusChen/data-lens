@@ -35,7 +35,6 @@
 (require 'clutch-db)
 (require 'clutch-worker)
 (require 'clutch-schema)
-(require 'clutch-ui)
 (require 'auth-source)
 (require 'cl-lib)
 
@@ -69,7 +68,6 @@
 (declare-function clutch--effective-sql-product "clutch" (params))
 (declare-function clutch--clear-connection-problem-capture "clutch" (connection))
 (declare-function clutch--forget-problem-record "clutch" (&optional buffer connection))
-(declare-function clutch--forget-problem-records-for-connection "clutch" (connection))
 (declare-function clutch--remember-debug-event "clutch" (&rest event))
 (declare-function clutch--remember-problem-record "clutch" (&rest args))
 (declare-function clutch--update-console-buffer-name "clutch" ())
@@ -85,9 +83,10 @@
 ;; Forward declarations — functions defined in other modules
 (declare-function clutch-jdbc-conn-p "clutch-db-jdbc" (conn))
 (declare-function clutch-jdbc-conn-params "clutch-db-jdbc" (conn))
-(declare-function clutch--render-object-describe "clutch-object"
-                  (conn entry &optional params product))
-(declare-function nerd-icons--function-name "nerd-icons" (name))
+(declare-function clutch--icon "clutch-ui" (name &optional fallback &rest icon-args))
+(declare-function clutch--icon-with-face "clutch-ui"
+                  (name fallback face &rest icon-args))
+(declare-function clutch--nerd-icons-available-p "clutch-ui" ())
 
 ;;;; Connection identity
 
@@ -904,8 +903,8 @@ state, and disconnects the underlying connection."
 (defun clutch--disconnect-on-kill ()
   "Disconnect the connection owned by this buffer.
 Invalidates all derived buffers that share the same connection.
-Does nothing in indirect SQL buffers (`clutch-indirect-mode')."
-  (when (and (not (bound-and-true-p clutch-indirect-mode))
+Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
+  (when (and (not (bound-and-true-p clutch--indirect-mode))
              (clutch--connection-alive-p clutch-connection))
     (clutch--confirm-disconnect-transaction-loss
      clutch-connection

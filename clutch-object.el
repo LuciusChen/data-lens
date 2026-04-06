@@ -1316,6 +1316,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
 (defvar-local clutch-describe--header-base nil
   "Cached describe header string, set during render.")
 
+;;;###autoload
 (define-derived-mode clutch-describe-mode special-mode "clutch-describe"
   "Major mode for clutch object describe buffers.")
 

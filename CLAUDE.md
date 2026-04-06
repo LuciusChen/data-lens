@@ -137,7 +137,7 @@ These rules keep the package compatible with MELPA submission requirements
 
 ### Naming
 
-- Public symbols use `clutch-` prefix (or `mysql-` / `pg-` for protocol).
+- Public symbols use `clutch-` prefix (or `mysql-wire-` / `pg-` for protocol).
 - Internal mode names, maps, and hooks that are not part of the user-facing API should use double-dash `clutch--` to avoid `package-lint` "not prefixed" warnings.
 - Every `define-derived-mode` and `define-minor-mode` that is **not** user-facing should be private (`clutch--foo-mode`), or have `;;;###autoload` if it is user-facing.
 - `defcustom` `:type` must be specified.
@@ -177,12 +177,12 @@ Read every changed line before committing.
 # Ensure external package dependencies (`mysql-wire` and `pg`) are installed or on load-path.
 
 # Main UI/logic tests
-emacs -batch -L . -l ert -l clutch \
+emacs -batch -L . -L ../mysql.el -L ../pg-el -l ert -l clutch \
   -l test/clutch-test.el \
   --eval '(ert-run-tests-batch-and-exit)'
 
 # JDBC backend tests
-emacs -batch -L . -l ert -l clutch-db-jdbc \
+emacs -batch -L . -L ../mysql.el -L ../pg-el -l ert -l clutch-db-jdbc \
   -l test/clutch-db-test.el \
   --eval '(ert-run-tests-batch-and-exit "clutch-db-test-jdbc")'
 ```
@@ -190,8 +190,8 @@ emacs -batch -L . -l ert -l clutch-db-jdbc \
 ### 3. Byte-compile with zero warnings
 
 ```bash
-emacs -batch -L . -f batch-byte-compile \
-  clutch.el clutch-ui.el clutch-object.el clutch-edit.el
+emacs -batch -L . -L ../mysql.el -L ../pg-el \
+  -f batch-byte-compile *.el
 ```
 
 ### 4. Update tests when behavior changes

@@ -46,7 +46,6 @@
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch-result--selected-row-indices "clutch" ())
 (declare-function clutch-db-escape-identifier "clutch-db" (conn name))
-(declare-function clutch-db-escape-literal "clutch-db" (conn value))
 (declare-function clutch-db-substitute-params "clutch-db" (sql params render-fn))
 (declare-function clutch-db-foreign-keys "clutch-db" (conn table))
 (declare-function clutch-db-primary-key-columns "clutch-db" (conn table))
@@ -119,7 +118,7 @@ Scans text properties across the line."
 (defvar-local clutch-result-edit-json--field-name nil
   "Field name for the current JSON sub-editor.")
 
-(defvar clutch-result-edit-mode-map
+(defvar clutch--result-edit-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'clutch-result-edit-finish)
     (define-key map (kbd "C-c C-k") #'clutch-result-edit-cancel)
@@ -130,18 +129,17 @@ Scans text properties across the line."
     map)
   "Keymap for the cell edit buffer.")
 
-;;;###autoload
-(define-minor-mode clutch-result-edit-mode
+(define-minor-mode clutch--result-edit-mode
   "Minor mode for editing a database cell value.
-\\<clutch-result-edit-mode-map>
+\\<clutch--result-edit-mode-map>
 \\[clutch-result-edit-finish]  Accept edit
 \\[clutch-result-edit-cancel]  Cancel
 \\[clutch-result-edit-complete-field]  Complete enum/bool-like values
 \\[clutch-result-edit-set-current-time]  Set temporal field to now
 \\[clutch-result-edit-json-field]  Open JSON editor"
   :lighter " DB-Edit"
-  :keymap clutch-result-edit-mode-map
-  (if clutch-result-edit-mode
+  :keymap clutch--result-edit-mode-map
+  (if clutch--result-edit-mode
       (add-hook 'after-change-functions #'clutch-result-edit--after-change nil t)
     (remove-hook 'after-change-functions #'clutch-result-edit--after-change t)
     (clutch-result-edit--cancel-validation-timer)
@@ -434,7 +432,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
           (erase-buffer)
           (insert (clutch-result--editable-field-string val col-def detail))
           (goto-char (point-min))
-          (clutch-result-edit-mode 1)
+          (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name col-name
                       clutch-result-edit--column-def col-def
                       clutch-result-edit--column-detail detail
@@ -781,26 +779,25 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 (defvar clutch-result-insert-mode-hook nil
   "Hook run after `clutch-result-insert-mode' is enabled.")
 
-(defvar clutch-result-insert-major-mode-map clutch-result-insert-mode-map
-  "Keymap used internally by `clutch-result-insert-major-mode'.")
+(defvar clutch--result-insert-major-mode-map clutch-result-insert-mode-map
+  "Keymap used internally by `clutch--result-insert-major-mode'.")
 
-(defvar clutch-result-insert-major-mode-hook nil
-  "Internal hook run after `clutch-result-insert-major-mode' is enabled.")
+(defvar clutch--result-insert-major-mode-hook nil
+  "Internal hook run after `clutch--result-insert-major-mode' is enabled.")
 
-(defvar clutch-result-insert-json-mode-map
+(defvar clutch--result-insert-json-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'clutch-result-insert-json-finish)
     (define-key map (kbd "C-c C-k") #'clutch-result-insert-json-cancel)
     map)
   "Keymap for the `insert-buffer' JSON editor.")
 
-;;;###autoload
-(define-minor-mode clutch-result-insert-json-mode
+(define-minor-mode clutch--result-insert-json-mode
   "Minor mode for editing JSON values from the insert buffer."
   :lighter " DB-Insert-JSON"
-  :keymap clutch-result-insert-json-mode-map)
+  :keymap clutch--result-insert-json-mode-map)
 
-(define-derived-mode clutch-result-insert-major-mode text-mode "clutch-insert"
+(define-derived-mode clutch--result-insert-major-mode text-mode "clutch-insert"
   "Major mode for editing a new row to INSERT.
 \\<clutch-result-insert-mode-map>
 \\[clutch-result-insert-commit]	stage row insertion
@@ -813,9 +810,9 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 ;;;###autoload
 (defun clutch-result-insert-mode (&optional _arg)
-  "Activate `clutch-result-insert-major-mode', ignoring optional ARG."
+  "Activate `clutch--result-insert-major-mode', ignoring optional ARG."
   (interactive)
-  (clutch-result-insert-major-mode)
+  (clutch--result-insert-major-mode)
   (run-hooks 'clutch-result-insert-mode-hook))
 
 (defvar-local clutch-result-insert--result-buffer nil
@@ -1363,14 +1360,14 @@ TIME defaults to `current-time'."
           fallback))))
 
 (defun clutch-result-insert--header-line ()
-  "Return the insert-buffer header line."
+  "Return the insert form header line."
   (format " INSERT into %s [%s]  |  TAB/S-TAB: field  M-TAB: complete  C-c .: now  C-c C-a: %s  C-c C-y: import TSV/CSV  C-c C-c: stage  C-c C-k: cancel"
           clutch-result-insert--table
           (if clutch-result-insert--show-all-fields "all columns" "sparse")
           (if clutch-result-insert--show-all-fields "sparse fields" "all fields")))
 
 (defun clutch-result-insert--refresh-header-line ()
-  "Refresh the insert-buffer header line."
+  "Refresh the insert form header line."
   (setq-local header-line-format (clutch-result-insert--header-line)))
 
 (defun clutch-result-insert--line-prefix-end ()
@@ -1499,7 +1496,7 @@ If nothing handles the completion, fall back to `completing-read'."
                 #'clutch-result-insert-json-finish
                 #'clutch-result-insert-json-cancel)))
       (with-current-buffer buf
-        (clutch-result-insert-json-mode 1)
+        (clutch--result-insert-json-mode 1)
         (setq-local clutch-result-insert-json--parent-buffer parent-buf
                     clutch-result-insert-json--field-name field-name))
       buf)))
@@ -1858,7 +1855,8 @@ ROWS is a list of string lists."
 ;;;###autoload
 (defun clutch-result-insert-import-delimited (&optional text)
   "Import TSV or CSV into the current insert buffer.
-Uses the active region when present; otherwise reads from the current kill.
+Uses TEXT when non-nil.
+Otherwise reads from the active region or the current kill.
 Single-row imports prefill the current form.  Multi-row imports stage pending
 inserts immediately."
   (interactive)

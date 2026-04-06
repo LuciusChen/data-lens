@@ -413,6 +413,18 @@ started, nil when unsupported.")
   "Backends without asynchronous column-name support return nil."
   nil)
 
+(defun clutch-db--submit-metadata-call (submit-fn conn callback errback fn
+                                                  &rest args)
+  "Queue metadata FN for CONN through SUBMIT-FN.
+SUBMIT-FN accepts CONN, a worker function, CALLBACK, and optional ERRBACK.
+FN runs with the backend metadata context followed by ARGS."
+  (funcall submit-fn
+           conn
+           (lambda (context)
+             (apply fn context args))
+           callback
+           errback))
+
 ;; Query
 
 (cl-defgeneric clutch-db-query (conn sql)
@@ -424,7 +436,8 @@ SQL uses `?' placeholders.  PARAMS is a list of Elisp values.
 Return the same shape as `clutch-db-query'.")
 
 (cl-defmethod clutch-db-execute-params ((conn t) sql params)
-  "Fallback parameter execution for CONN by literal substitution."
+  "Fallback parameter execution for CONN by literal substitution.
+Substitute PARAMS into SQL before calling `clutch-db-query'."
   (clutch-db-query conn (clutch-db-render-sql-params conn sql params)))
 
 (cl-defgeneric clutch-db-interrupt-query (conn)

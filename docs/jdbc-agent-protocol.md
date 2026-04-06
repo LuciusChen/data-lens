@@ -89,7 +89,6 @@ Rules:
 
 Connection lifecycle:
 
-- `ping`
 - `connect`
 - `disconnect`
 - `commit`
@@ -102,7 +101,6 @@ Execution and cursor flow:
 - `cancel`
 - `execute`
 - `fetch`
-- `close-cursor`
 
 Schema and object metadata:
 
@@ -164,6 +162,10 @@ The cancelled `execute`/`fetch` request may still produce a late response after
 the client has already committed to the interrupt path.  The Elisp side tracks
 request ids explicitly so those late responses can be dropped instead of
 polluting the next request.
+
+The current Elisp client closes cursor state implicitly by fetching until the
+agent replies with `done=true`; it does not issue a separate `close-cursor`
+RPC.
 
 ## Error semantics
 

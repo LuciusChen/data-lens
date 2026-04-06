@@ -1,9 +1,10 @@
-;;; clutch-bench.el --- Performance benchmarks for clutch -*- lexical-binding: t; -*-
+;;; clutch-bench.el --- Performance benchmark suite -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Free Software Foundation, Inc.
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
 ;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
@@ -13,7 +14,7 @@
 ;; Run live backend benchmarks against local Docker/OrbStack databases.
 ;;
 ;; Example:
-;;   emacs -Q --batch \
+;;   Emacs -Q --batch \
 ;;     --eval '(setq load-prefer-newer t)' \
 ;;     -L . -L test \
 ;;     -l test/clutch-bench.el \
@@ -30,7 +31,7 @@
 (defvar clutch-bench-mysql-params
   '(:host "127.0.0.1" :port 3306 :user "root" :password "test" :database "mysql")
   "MySQL benchmark connection parameters.
-Uses the built-in `mysql' database so the benchmark does not imply a
+Uses the built-in `mysql` database so the benchmark does not imply a
 project-shipped demo schema.")
 
 (defvar clutch-bench-pg-params
@@ -82,7 +83,7 @@ project-shipped demo schema.")
       (list :avg avg :min min :max max :p95 p95 :rows rows :gcs gc-delta))))
 
 (defun clutch-bench--one-backend (backend params medium-sql)
-  "Run connection and query benchmarks for BACKEND."
+  "Run connection and query benchmarks for BACKEND using PARAMS and MEDIUM-SQL."
   (condition-case err
       (let* ((connect-start (float-time))
              (conn (clutch-db-connect backend params))

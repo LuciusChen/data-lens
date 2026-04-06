@@ -4,7 +4,7 @@
 
 - `mysql-wire` — external pure Emacs Lisp MySQL wire protocol client
 - `pg` — external PostgreSQL client from `pg-el`
-- `clutch-db-sqlite.el` — SQLite adapter over Emacs 29+ built-in `sqlite-*`
+- `clutch-db-sqlite.el` — SQLite adapter over Emacs 29.1+ built-in `sqlite-*`
 
 Use this document for backend-specific connection, protocol, TLS, timeout, and
 usage notes for the native backends.  The JDBC sidecar has its own document in
@@ -57,7 +57,7 @@ Relevant variables:
 
 For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS
 for authentication.  For self-signed local dev certificates, either trust the
-CA or set `mysql-tls-verify-server` to `nil` explicitly.
+CA or set `mysql-wire-tls-verify-server` to `nil` explicitly.
 
 ### Convenience API
 
@@ -150,7 +150,7 @@ Relevant variables:
 
 ### Scope
 
-- Uses Emacs 29+ built-in `sqlite-*` functions
+- Uses Emacs 29.1+ built-in `sqlite-*` functions
 - No network stack, no TLS, no sidecar process
 - Connection identity is the database file path
 
@@ -192,6 +192,14 @@ Relevant variables:
   them lazily during idle time
 - If Emacs lacks native thread primitives, clutch falls back to the older
   synchronous native metadata path rather than disabling metadata loading
+
+### Parameterized DML
+
+- clutch preview buffers still show fully rendered SQL text for readability
+- Native MySQL/PostgreSQL/SQLite staged `INSERT` / `UPDATE` / `DELETE` execute
+  through backend parameter binding instead of literal SQL interpolation
+- JDBC currently keeps its literal-SQL fallback until the sidecar grows a
+  prepared-execute operation
 
 ### UI Layer
 

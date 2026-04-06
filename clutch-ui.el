@@ -185,8 +185,9 @@ Examples:
   (clutch-register-column-displayer \"bookmarks\" \"url\"
     (lambda (value)
       (when (stringp value)
-        (buttonize (truncate-string-to-width value 40 nil nil \"…\")
-                   (function browse-url) value))))
+        (propertize (truncate-string-to-width value 40 nil nil \"…\")
+                    (quote face) (quote link)
+                    (quote help-echo) value))))
 
   ;; Map numeric status codes to styled labels.
   (clutch-register-column-displayer \"tasks\" \"status\"

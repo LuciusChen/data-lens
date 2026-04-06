@@ -72,7 +72,6 @@
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
 (declare-function clutch--connection-key "clutch-connection" (conn))
-(declare-function clutch--cancel-object-warmup "clutch-object" (conn &optional key))
 (declare-function clutch--humanize-db-error "clutch-query" (msg))
 (declare-function clutch--invalidate-object-warmup "clutch-object" (conn &optional key))
 (declare-function clutch--remember-debug-event "clutch" (&rest event))

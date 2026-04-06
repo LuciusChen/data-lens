@@ -1,16 +1,12 @@
 ;;; clutch.el --- Interactive database client -*- lexical-binding: t; -*-
-
 ;; Copyright (C) 2025-2026 Lucius Chen
-
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1") (mysql-wire "0.1") (pg "0.40"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
-
 ;; This file is part of clutch.
-
 ;; clutch is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
 ;; the Free Software Foundation, either version 3 of the License, or
@@ -60,7 +56,6 @@
 
 (defvar clutch--describe-object-entry)
 
-(declare-function clutch-db-browseable-object-entries "clutch-db" (conn))
 (declare-function clutch--cached-column-details "clutch-schema" (conn table))
 (declare-function clutch--cached-table-comment "clutch-schema" (conn table))
 (declare-function clutch--table-comment-cached-p "clutch-schema" (conn table))
@@ -68,7 +63,6 @@
 (declare-function clutch--ensure-columns-async "clutch-schema" (conn schema table))
 (declare-function clutch--ensure-point-visible-horizontally "clutch-ui" ())
 (declare-function clutch--ensure-table-comment-async "clutch-schema" (conn table))
-(declare-function clutch--footer-mode-line-display "clutch-ui" ())
 (declare-function clutch--header-line-display "clutch-ui" ())
 (declare-function clutch--column-border-position "clutch-ui" (cidx))
 (declare-function clutch--column-info-string "clutch-ui" (cidx))
@@ -395,7 +389,7 @@ Only recorded while `clutch-debug-mode' is enabled."
 
 (defcustom clutch-console-yank-cleanup t
   "When non-nil, clean whitespace in pasted text in query consoles.
-After yank, yank-pop, or clipboard-yank in a query console buffer,
+After `yank', `yank-pop', or `clipboard-yank' in a query console buffer,
 trailing whitespace, mixed indentation, and CRLF line endings are
 cleaned up in the pasted region only."
   :type 'boolean
@@ -578,7 +572,7 @@ Dynamically bound by `clutch--execute-and-mark'.")
       (insert (format "%s: %s\n" label rendered)))))
 
 (defun clutch--debug-insert-section (title value)
-  "Insert titled VALUE block into the current debug output buffer."
+  "Insert a TITLE section containing VALUE into the current debug buffer."
   (when-let* ((rendered (clutch--debug-format-data value)))
     (insert "\n" title "\n")
     (insert (clutch--debug-indent-block rendered 2) "\n")))
@@ -2575,7 +2569,7 @@ Rebuilds `header-line-format' with the active column highlighted."
           (setq header-line-format
                 '(:eval (clutch--header-line-display))))))))
 
-
+;;;###autoload
 (define-derived-mode clutch-result-mode special-mode "clutch-result"
   "Mode for displaying database query results as one scrollable table.
 
@@ -4180,7 +4174,7 @@ previous window layout."
     (define-key map (kbd "C-c ?") #'clutch-record-dispatch)
     map)
   "Keymap for `clutch-record-mode'.")
-
+;;;###autoload
 (define-derived-mode clutch-record-mode special-mode "clutch-record"
   "Mode for displaying a single database row in detail.
 
@@ -4375,7 +4369,7 @@ Selects JSON, XML, or binary string view based on column type and content."
 
 (defvar-local clutch-repl--pending-input ""
   "Accumulated partial SQL input waiting for a semicolon.")
-
+;;;###autoload
 (define-derived-mode clutch-repl-mode comint-mode "clutch-repl"
   "Major mode for database REPL.
 

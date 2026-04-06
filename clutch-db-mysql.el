@@ -36,6 +36,8 @@
 (require 'mysql-wire)
 
 (declare-function clutch--connection-context "clutch-connection" (conn))
+(declare-function clutch-db--submit-metadata-call "clutch-db"
+                  (submit-fn conn callback errback fn &rest args))
 
 ;;;; Type-category mapping
 
@@ -90,7 +92,7 @@ Each output plist has :name and :type-category."
           mysql-columns))
 
 (defun clutch-db-mysql--wrap-result (mysql-wire-result)
-  "Convert MYSQL-RESULT to a `clutch-db-result'."
+  "Convert MYSQL-WIRE-RESULT to a `clutch-db-result'."
   (let ((cols (mysql-wire-result-columns mysql-wire-result)))
     (make-clutch-db-result
      :connection (mysql-wire-result-connection mysql-wire-result)
@@ -247,43 +249,39 @@ main thread."
 
 (cl-defmethod clutch-db-refresh-schema-async ((conn mysql-wire-conn) callback
                                               &optional errback)
-  "Refresh MySQL schema names for CONN on a background worker."
-  (clutch-db-mysql--submit-metadata-task
-   conn
-   (lambda (context)
-     (clutch-db-list-tables context))
-   callback
-   errback))
+  "Refresh MySQL schema names for CONN and pass them to CALLBACK.
+Use ERRBACK for failures."
+  (clutch-db--submit-metadata-call
+   #'clutch-db-mysql--submit-metadata-task
+   conn callback errback
+   #'clutch-db-list-tables))
 
 (cl-defmethod clutch-db-list-columns-async ((conn mysql-wire-conn) table callback
                                             &optional errback)
-  "Fetch MySQL column names for TABLE on CONN on a background worker."
-  (clutch-db-mysql--submit-metadata-task
-   conn
-   (lambda (context)
-     (clutch-db-list-columns context table))
-   callback
-   errback))
+  "Fetch MySQL column names for TABLE on CONN and pass them to CALLBACK."
+  (clutch-db--submit-metadata-call
+   #'clutch-db-mysql--submit-metadata-task
+   conn callback errback
+   #'clutch-db-list-columns
+   table))
 
 (cl-defmethod clutch-db-column-details-async ((conn mysql-wire-conn) table callback
                                               &optional errback)
-  "Fetch MySQL column details for TABLE on CONN on a background worker."
-  (clutch-db-mysql--submit-metadata-task
-   conn
-   (lambda (context)
-     (clutch-db-column-details context table))
-   callback
-   errback))
+  "Fetch MySQL column details for TABLE on CONN and pass them to CALLBACK."
+  (clutch-db--submit-metadata-call
+   #'clutch-db-mysql--submit-metadata-task
+   conn callback errback
+   #'clutch-db-column-details
+   table))
 
 (cl-defmethod clutch-db-table-comment-async ((conn mysql-wire-conn) table callback
                                              &optional errback)
-  "Fetch the MySQL comment for TABLE on CONN on a background worker."
-  (clutch-db-mysql--submit-metadata-task
-   conn
-   (lambda (context)
-     (clutch-db-table-comment context table))
-   callback
-   errback))
+  "Fetch the MySQL comment for TABLE on CONN and pass it to CALLBACK."
+  (clutch-db--submit-metadata-call
+   #'clutch-db-mysql--submit-metadata-task
+   conn callback errback
+   #'clutch-db-table-comment
+   table))
 
 (cl-defmethod clutch-db-list-tables ((conn mysql-wire-conn))
   "Return table names for the current MySQL database on CONN."
@@ -427,13 +425,12 @@ ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME")))
 
 (cl-defmethod clutch-db-list-objects-async ((conn mysql-wire-conn) category callback
                                             &optional errback)
-  "Fetch MySQL object entries for CATEGORY on CONN on a background worker."
-  (clutch-db-mysql--submit-metadata-task
-   conn
-   (lambda (context)
-     (clutch-db-list-objects context category))
-   callback
-   errback))
+  "Fetch MySQL object entries for CATEGORY on CONN and pass them to CALLBACK."
+  (clutch-db--submit-metadata-call
+   #'clutch-db-mysql--submit-metadata-task
+   conn callback errback
+   #'clutch-db-list-objects
+   category))
 
 (cl-defmethod clutch-db-object-details ((conn mysql-wire-conn) entry)
   "Return detail plists for MySQL object ENTRY on CONN."

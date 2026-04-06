@@ -11,7 +11,7 @@ sidecar (=clutch-jdbc-agent=, Java 17+).
 - =clutch-db.el= — generic database interface (=cl-defgeneric= dispatch)
 - =clutch-db-mysql.el= — MySQL backend adapter
 - =clutch-db-pg.el= — PostgreSQL backend adapter
-- =clutch-db-sqlite.el= — SQLite backend adapter (uses Emacs 29+ built-in sqlite)
+- =clutch-db-sqlite.el= — SQLite backend adapter (uses Emacs 29.1+ built-in sqlite)
 - =clutch-db-jdbc.el= — JDBC backend adapter (Oracle, SQL Server, DB2, Snowflake, Redshift, and any JDBC-compatible database)
 - =clutch.el= — interactive UI layer: single-page result browser, record view, FK navigation, editing, transient menus, REPL
 - External native protocol dependencies:
@@ -28,7 +28,7 @@ Native MySQL support has been live-validated against MySQL 5.6, 8.0, and
 MariaDB 10.11 through the same =mysql= backend.  PostgreSQL support is
 functional and compatible, but has not been tested as extensively in daily
 use.
-SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external dependencies.
+SQLite support requires Emacs 29.1+ (built-in =sqlite-*= functions); no external dependencies.
 The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar=
 (install via =M-x clutch-jdbc-ensure-agent=).
 For backend-specific implementation notes, see
@@ -41,7 +41,7 @@ For backend-specific implementation notes, see
 
 - MySQL, PostgreSQL, and SQLite are supported without a sidecar process
 - MySQL and PostgreSQL use pure Elisp protocol implementations
-- SQLite uses Emacs 29+ built-in =sqlite-*= functions
+- SQLite uses Emacs 29.1+ built-in =sqlite-*= functions
 - For native backend protocol, TLS, timeout, and connection examples, see
   [[file:docs/native-backends.md][docs/native-backends.md]]
 
@@ -57,11 +57,11 @@ For backend-specific implementation notes, see
 - Right-aligned numeric columns
 - Record buffer for single-row detail view
 - Foreign key detection and navigation
-- Inline cell editing with UPDATE generation
-- Inline INSERT (=o=) and DELETE (=d=) rows with confirmation
+- Inline cell editing with staged UPDATE generation
+- Staged INSERT (=i=), DELETE (=d=), and pending-batch preview/commit
 - WHERE filtering (=W=), client-side fuzzy filter (=/=), SQL =ORDER BY= sorting (=s=)
 - Column-aligned horizontal paging via =[= / =]=, plus column width adjustment via =-= / ===
-- CSV/Org export, copy as INSERT
+- CSV / INSERT / UPDATE export, plus TSV / CSV / INSERT / UPDATE copy
 - Object picker and actions for =Tables= / =Views= / =Synonyms= / =Indexes= / =Sequences= / =Procedures= / =Functions= / =Triggers=, with annotated minibuffer candidates, type-grouped completion, optional prefix filtering, and a no-Embark transient fallback
 - SQL completion: table/column names scoped to the current statement, with native MySQL/PostgreSQL hot paths staying cache-first and queueing background column preheat on cache miss instead of blocking typing; JDBC backends keep their direct metadata path; completion case can be customized via =clutch-sql-completion-case-style=
 - Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; schema metadata is cache-first and quietly preheated in the background on cache miss, so point motion does not block; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
@@ -73,7 +73,7 @@ For backend-specific implementation notes, see
 - Cache-backed schema actions also warn when the schema cache is stale, failed, or still refreshing, so completion / table prompts do not silently pretend cached metadata is current
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
 - Value viewer (=v=): auto-detects JSON (pretty-printed with =json-ts-mode=), XML (formatted via =xmllint= if available, rendered with =nxml-mode=), or BLOB (concise text/hex preview); XML/BLOB size is shown in viewer header-line (without polluting content highlighting)
-- Per-table/per-column result displayers can override cell text via =clutch-register-column-displayer= while keeping the raw cell value, value viewer (=v=), and cell face logic unchanged
+- Per-table/per-column result displayers can override cell text via =clutch-register-column-displayer= or =clutch-column-displayers= while keeping the raw cell value, value viewer (=v=), and cell face logic unchanged
 - REPL mode (comint-based)
 
 * Requirements
@@ -293,8 +293,10 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-u=   | Roll back transaction (manual-commit connections only) |
 | =C-c C-a=   | Toggle auto-commit on/off for the current connection |
 | =C-c ?=     | Transient menu             |
-| =M-.=       | Jump to table alias definition in FROM/JOIN clause |
-| =TAB=       | Complete table/column name |
+
+Standard editing integrations still apply in =clutch-mode=: xref lookup uses
+=M-.= through the buffer-local xref backend, and completion stays on normal
+CAPF keys such as =TAB= / =M-TAB= inherited from Emacs.
 
 ** Result Browser (clutch-result-mode) Key Bindings
 
@@ -327,6 +329,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-p=      | Preview execution (pending batch if any; otherwise effective query) |
 | =c=            | Open copy transient menu (choose TSV / CSV / INSERT / UPDATE; toggle =-r= to refine) |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
+| =|=            | Pipe the current cell through a shell command |
 | =e=            | Export all rows (CSV / INSERT / UPDATE copy/file) |
 | =f=            | Toggle fullscreen                             |
 | =C-c ?=        | Transient menu                                |
@@ -346,6 +349,32 @@ result transient as the exact staged SQL batch.
 
 #+CAPTION: Result browser with staged edit and delete markers, compact commit/discard icons, sort state, and query timing.
 [[file:docs/screenshots/ghost-in-the-shell-result-browser.png]]
+
+*** Per-column displayers
+
+Result buffers can replace the visible text for a specific table/column pair
+without changing the raw cell value.  The displayer receives the raw Elisp
+value stored in =clutch-full-value= and may return a propertized string.  A
+=nil= return falls back to the default renderer.  Truncation, padding, cell
+faces, and the value viewer (=v=) still use the normal clutch pipeline.
+
+#+begin_src emacs-lisp
+;; Simple registration API
+(clutch-register-column-displayer
+ "tasks" "status"
+ (lambda (value)
+   (pcase value
+     (0 (propertize "pending" 'face 'warning))
+     (1 (propertize "active" 'face 'success))
+     (2 (propertize "done" 'face 'shadow)))))
+
+;; Or customize the full registry directly
+(setq clutch-column-displayers
+      '(("bookmarks" . (("url" . my-bookmark-url-displayer)))))
+#+end_src
+
+Table and column names are matched case-insensitively.  Use
+=clutch-unregister-column-displayer= to remove one registration.
 
 *** Insert Buffer Keys
 
@@ -514,6 +543,11 @@ Typical flow:
                                edited rows show =E= in the left marker column and =E-<n>= in the status line
 #+end_src
 
+The confirmation preview always shows fully rendered SQL text.  Native MySQL,
+PostgreSQL, and SQLite backends still execute staged DML through parameterized
+prepared/bound values under the hood; JDBC keeps the current literal-SQL
+fallback until the sidecar grows a dedicated prepared-execute op.
+
 ** REPL Mode
 
 #+begin_src
@@ -522,6 +556,26 @@ C-c C-e                     ;; Connect to database
 db> SELECT * FROM users;     ;; Type SQL, auto-executes on ;
                              ;; Multi-line input supported (continuation prompt     ->)
 #+end_src
+
+| Key         | Action                        |
+|-------------+-------------------------------|
+| =C-c C-e=   | Connect                       |
+| =C-c C-m=   | Commit transaction            |
+| =C-c C-u=   | Roll back transaction         |
+| =C-c C-a=   | Toggle auto-commit            |
+| =C-c C-j=   | Jump to object                |
+| =C-c C-d=   | Describe object               |
+| =C-c C-o=   | Object actions                |
+| =C-c C-l=   | Switch current schema/database |
+
+Useful =M-x= entry points outside the main keymaps:
+
+- =clutch-switch-database= — ClickHouse-only reconnect-based database switch
+- =clutch-describe-refresh= — refresh the current describe buffer
+- =clutch-object-show-ddl-or-source= — show object DDL/source directly
+- =clutch-browse-table= — insert =SELECT *= for a table-like object into a live console
+- =clutch-describe-table= / =clutch-describe-table-at-point= — describe a table explicitly
+- =clutch-result-copy-pending-sql= / =clutch-result-save-pending-sql= — export the exact staged DML batch
 
 ** Query Console
 
@@ -889,6 +943,25 @@ Press =C-c ?= to open the transient menu.  The *Objects* group contains =Jump to
 
 In the result buffer, the *Edit* group in the transient menu provides the unified staged-commit workflow: =i= stages an insert, =d= stages a deletion, =C-c C-k= discards a pending change at point, and =C-c C-c= commits all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
 
+** Faces
+
+Customize these through =M-x customize-group RET clutch RET=:
+
+| Face | Purpose |
+|------+---------|
+| =clutch-header-face= / =clutch-header-active-face= | Result-table headers and the active header cell |
+| =clutch-border-face= | Table borders and separators |
+| =clutch-null-face= | NULL cell values |
+| =clutch-modified-face= / =clutch-pending-delete-face= / =clutch-pending-insert-face= | Staged edit/delete/insert markers in result buffers |
+| =clutch-fk-face= | Foreign-key cell values |
+| =clutch-executed-sql-marker-face= | Last executed SQL marker in SQL buffers |
+| =clutch-error-position-face= / =clutch-error-banner-face= | SQL execution error highlights |
+| =clutch-object-type-face= | Object type labels in describe/object UIs |
+| =clutch-object-source-face= / =clutch-object-public-source-face= | Object source/schema annotations |
+| =clutch-insert-field-name-face= / =clutch-insert-field-tag-face= | Insert-form labels and metadata tags |
+| =clutch-insert-field-error-face= / =clutch-insert-inline-error-face= | Insert/edit validation feedback |
+| =clutch-insert-active-field-face= / =clutch-insert-active-field-name-face= | Active field highlighting in insert buffers |
+
 ** Org-Babel Integration
 
 Execute SQL directly in org files via the separate =ob-clutch= package.  It
@@ -985,14 +1058,6 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
 - =clutch-read-idle-timeout-seconds= controls query I/O idle timeout (default: 30s).
 - =clutch-query-timeout-seconds= controls database-side statement timeout for JDBC and native PostgreSQL queries (default: 30s).
 - =clutch-jdbc-rpc-timeout-seconds= controls Emacs <-> JDBC agent RPC timeout (default: 30s).
-- =clutch-jdbc-cancel-timeout-seconds= controls how long clutch waits for a JDBC
-  =cancel= acknowledgement (default: 5s).  This is intentionally shorter than
-  the normal JDBC RPC timeout; if cancel does not finish in time, clutch
-  degrades to disconnecting the current connection instead of blocking longer or
-  killing the agent.
-- =clutch-jdbc-disconnect-timeout-seconds= controls how long clutch waits for a
-  JDBC =disconnect= acknowledgement (default: 5s).  A stuck disconnect detaches
-  the local connection state without killing the shared JDBC agent.
 - MySQL connections can override via =:connect-timeout= and =:read-idle-timeout=.
 - PostgreSQL connections can override via =:connect-timeout=, =:read-idle-timeout=, and =:query-timeout=.
 - JDBC connections can override via =:connect-timeout=, =:read-idle-timeout=, =:query-timeout=, and =:rpc-timeout=.
@@ -1013,6 +1078,7 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
   connect/query/interrupt/object/metadata events in =*clutch-debug*=, and JDBC
   also requests an additional redacted backend debug payload (currently stack
   trace + request context).  Turning the mode on starts a fresh capture window.
+  Use =clutch-debug-event-limit= to change how many recent events are retained.
 - The supported troubleshooting workflow is:
   1. enable =M-x clutch-debug-mode=
   2. reproduce the failure
@@ -1025,6 +1091,16 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
   backend debug payload.
 - High-risk DML (=UPDATE/DELETE= without top-level =WHERE=) requires typed
   confirmation (=YES=) before execution.
+
+*** Additional Customization
+
+- =clutch-column-displayers= controls the per-table/per-column result displayer registry.
+- =clutch-object-warmup-idle-delay-seconds= delays background object warmup after schema refresh.
+- =clutch-schema-cache-install-batch-size= controls how many schema entries are installed per idle batch.
+- =clutch-csv-export-default-coding-system= sets the default CSV encoding (UTF-8 with BOM by default for Excel compatibility).
+- =clutch-jdbc-fetch-size= controls JDBC cursor batch size.
+- =clutch-primary-object-types= chooses which object types =C-c C-j= treats as the primary jump set.
+- =clutch-sql-completion-case-style= controls whether SQL completion preserves, lowercases, or uppercases inserted identifiers/keywords.
 
 * Native Backend Usage
 

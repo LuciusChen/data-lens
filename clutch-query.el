@@ -1407,17 +1407,16 @@ Go, Ruby, etc.)."
           (forward-sexp 1)
           (buffer-substring-no-properties (1+ str-start) (1- (point))))))))
 
-(defvar clutch-indirect-mode-map
+(defvar clutch--indirect-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c '") #'clutch-indirect-execute)
     (define-key map (kbd "C-c C-k") #'clutch-indirect-abort)
     map)
-  "Keymap for `clutch-indirect-mode'.")
+  "Keymap for `clutch--indirect-mode'.")
 
-;;;###autoload
-(define-minor-mode clutch-indirect-mode
+(define-minor-mode clutch--indirect-mode
   "Minor mode active in indirect SQL edit buffers.
-\\<clutch-indirect-mode-map>
+\\<clutch--indirect-mode-map>
 Key bindings:
   \\[clutch-indirect-execute]	Execute and close
   \\[clutch-indirect-abort]	Abort and close"
@@ -1471,7 +1470,7 @@ Otherwise use the current line.
 
 The indirect buffer inherits the connection from any live
 `clutch-mode' buffer.  Edit the SQL freely, then press
-\\<clutch-indirect-mode-map>\\[clutch-indirect-execute] \
+\\<clutch--indirect-mode-map>\\[clutch-indirect-execute] \
 to execute or \\[clutch-indirect-abort] to abort."
   (interactive)
   (let* ((text (clutch--extract-indirect-sql-text))
@@ -1485,7 +1484,7 @@ to execute or \\[clutch-indirect-abort] to abort."
     (when conn
       (clutch--bind-connection-context conn params product)
       (clutch--update-mode-line))
-    (clutch-indirect-mode 1)
+    (clutch--indirect-mode 1)
     (insert text)
     (goto-char (point-min))
     (message "Edit SQL, then C-c ' to execute, C-c C-k to abort")))

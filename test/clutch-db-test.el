@@ -1,7 +1,8 @@
-;;; clutch-db-test.el --- ERT tests for clutch database backends -*- lexical-binding: t; -*-
+;;; clutch-db-test.el --- ERT tests for database backends -*- lexical-binding: t; -*-
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
 ;; URL: https://github.com/LuciusChen/clutch
 
 ;;; Commentary:
@@ -20,11 +21,11 @@
 ;; trusted CA.
 ;;
 ;; Run unit tests:
-;;   emacs -batch -L .. -l ert -l clutch-db-test \
+;;   Emacs -batch -L .. -l ert -l clutch-db-test \
 ;;     -f ert-run-tests-batch-and-exit
 ;;
 ;; Run live tests:
-;;   emacs -batch -L .. -l ert -l clutch-db-test \
+;;   Emacs -batch -L .. -l ert -l clutch-db-test \
 ;;     --eval '(setq clutch-db-test-mysql-password "test")' \
 ;;     --eval '(setq clutch-db-test-pg-password "test")' \
 ;;     -f ert-run-tests-batch-and-exit
@@ -418,7 +419,7 @@
     (should-not (clutch-db-manual-commit-p conn))))
 
 (ert-deftest clutch-db-test-jdbc-commit-fires-rpc ()
-  "clutch-db-commit should issue a commit RPC with the connection id."
+  "Clutch-db-commit should issue a commit RPC with the connection id."
   (let ((conn (make-clutch-jdbc-conn :conn-id 17
                                      :params '(:driver oracle :rpc-timeout 12)))
         captured-op captured-params captured-timeout)
@@ -434,7 +435,7 @@
       (should (= captured-timeout 12)))))
 
 (ert-deftest clutch-db-test-jdbc-rollback-fires-rpc ()
-  "clutch-db-rollback should issue a rollback RPC with the connection id."
+  "Clutch-db-rollback should issue a rollback RPC with the connection id."
   (let ((conn (make-clutch-jdbc-conn :conn-id 18
                                      :params '(:driver oracle :rpc-timeout 13)))
         captured-op captured-params captured-timeout)
@@ -450,7 +451,7 @@
       (should (= captured-timeout 13)))))
 
 (ert-deftest clutch-db-test-jdbc-set-auto-commit-fires-rpc ()
-  "clutch-db-set-auto-commit should issue set-auto-commit RPC with auto-commit value."
+  "Clutch-db-set-auto-commit should issue set-auto-commit RPC with auto-commit value."
   (let ((conn (make-clutch-jdbc-conn :conn-id 19
                                      :params '(:driver oracle :rpc-timeout 12 :manual-commit t)))
         captured-op captured-params captured-timeout)
@@ -467,7 +468,7 @@
       (should (= captured-timeout 12)))))
 
 (ert-deftest clutch-db-test-jdbc-set-auto-commit-updates-params ()
-  "clutch-db-set-auto-commit should update :manual-commit in conn params."
+  "Clutch-db-set-auto-commit should update :manual-commit in conn params."
   (let ((conn (make-clutch-jdbc-conn :conn-id 20
                                      :params '(:driver oracle :rpc-timeout 12 :manual-commit t))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc) (lambda (_op _params &optional _to) nil)))
@@ -2097,7 +2098,7 @@ Skips if `clutch-db-test-mysql-password' is nil."
     (should (= (length (clutch-db-result-rows result)) 2))))
 
 (defmacro clutch-db-test--define-live-basic-tests (prefix with-macro tags display-name)
-  "Define shared live tests for PREFIX using WITH-MACRO and TAGS."
+  "Define shared live tests for PREFIX using WITH-MACRO, TAGS, and DISPLAY-NAME."
   `(progn
      (ert-deftest ,(intern (format "%s-live-connect" prefix)) ()
        :tags ',tags
@@ -2699,7 +2700,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
 ;;;; Unit tests — clutch--format-value and clutch--value-to-literal
 
 (ert-deftest clutch-db-test-format-value-primitives ()
-  "format-value handles nil, :false, strings, and numbers correctly."
+  "Format-value handles nil, :false, strings, and numbers correctly."
   (should (equal (clutch--format-value nil)    "NULL"))
   (should (equal (clutch--format-value :false) "false"))
   (should (equal (clutch--format-value "hi")   "hi"))
@@ -2707,7 +2708,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   (should (equal (clutch--format-value 3.14)   "3.14")))
 
 (ert-deftest clutch-db-test-format-value-json-hash-table ()
-  "format-value serializes a hash-table (MySQL/PG JSON object) to a JSON string."
+  "Format-value serializes a hash-table (MySQL/PG JSON object) to a JSON string."
   (let ((ht (make-hash-table :test 'equal)))
     (puthash "key" "val" ht)
     (let ((result (clutch--format-value ht)))
@@ -2716,11 +2717,11 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
       (should (string-match-p "\"val\"" result)))))
 
 (ert-deftest clutch-db-test-format-value-json-vector ()
-  "format-value serializes a vector (MySQL/PG JSON array) to a JSON string."
+  "Format-value serializes a vector (MySQL/PG JSON array) to a JSON string."
   (should (equal (clutch--format-value [1 2 3]) "[1,2,3]")))
 
 (ert-deftest clutch-db-test-value-to-literal-json-hash-table ()
-  "value-to-literal escapes a JSON hash-table as a quoted SQL string literal."
+  "Value-to-literal escapes a JSON hash-table as a quoted SQL string literal."
   (let* ((ht (make-hash-table :test 'equal))
          (_ (puthash "k" "v" ht))
          (conn (make-clutch-jdbc-conn
@@ -2733,7 +2734,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
     (should (string-match-p "\"v\"" result))))
 
 (ert-deftest clutch-db-test-value-to-literal-json-vector ()
-  "value-to-literal escapes a JSON vector as a quoted SQL string literal."
+  "Value-to-literal escapes a JSON vector as a quoted SQL string literal."
   (let* ((conn (make-clutch-jdbc-conn
                 :params '(:driver sqlserver :user "sa")))
          (clutch-connection conn)
@@ -2812,7 +2813,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
 ;;;; Unit tests — clutch-db-live-p (JDBC identity check)
 
 (ert-deftest clutch-db-test-jdbc-live-p-matching-live-process ()
-  "conn whose process is the current agent and alive → live."
+  "A conn whose process is the current agent and alive should be live."
   (let ((proc 'fake-proc))
     (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
       (let ((clutch-jdbc--agent-process proc))
@@ -2821,7 +2822,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
                                         :params nil :busy nil)))))))
 
 (ert-deftest clutch-db-test-jdbc-live-p-dead-process ()
-  "conn whose process has died → not live."
+  "A conn whose process has died should not be live."
   (let ((proc 'dead-proc))
     (cl-letf (((symbol-function 'process-live-p) (lambda (_p) nil)))
       (let ((clutch-jdbc--agent-process proc))
@@ -2832,7 +2833,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
 (ert-deftest clutch-db-test-jdbc-live-p-nil-agent-process ()
   "When clutch-jdbc--agent-process is nil (agent was killed), conn is not live.
 This is the key guard: after a timeout kill the JVM may still be in its
-shutdown sequence, so process-live-p on the old process object can return t
+shutdown sequence, so `process-live-p' on the old process object can return t
 briefly.  The nil check on the current-agent variable closes that window."
   (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
     (let ((clutch-jdbc--agent-process nil))
@@ -2841,10 +2842,10 @@ briefly.  The nil check on the current-agent variable closes that window."
                                           :params nil :busy nil))))))
 
 (ert-deftest clutch-db-test-jdbc-live-p-mismatched-process ()
-  "conn whose stored process is NOT the current agent (e.g. after kill+restart) → not live.
+  "A conn whose stored process is not the current agent should not be live.
 This catches the race where agent-process was set to nil, a new agent was
 started (new process object), but the old conn's :process field still holds
-the old process which may still pass process-live-p during JVM shutdown."
+the old process which may still pass `process-live-p' during JVM shutdown."
   (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
     (let ((clutch-jdbc--agent-process 'new-proc))
       (should-not (clutch-db-live-p
@@ -2854,8 +2855,8 @@ the old process which may still pass process-live-p during JVM shutdown."
 ;;;; Unit tests — clutch-jdbc--recv-response timeout behaviour
 
 (ert-deftest clutch-db-test-jdbc-recv-response-returns-matching ()
-  "When a matching response is already queued, recv-response returns it
-immediately without touching the agent process."
+  "When a matching response is already queued, recv-response returns it immediately.
+It does so without touching the agent process."
   (let ((clutch-jdbc--agent-process 'live-proc)
         (clutch-jdbc--response-queue
          (list '(:id 42 :ok t :result (:conn-id 1)))))
@@ -3170,7 +3171,7 @@ immediately without touching the agent process."
     (cl-letf (((symbol-function 'clutch-jdbc--send)
                (lambda (&rest _args)
                  (setq send-called t)
-                 (error "cancel should not be sent"))))
+                 (error "Cancel should not be sent"))))
       (should-not (clutch-db-interrupt-query conn))
       (should-not send-called)
       (should (= (hash-table-count clutch-jdbc--ignored-response-ids) 0)))))
@@ -3233,7 +3234,7 @@ immediately without touching the agent process."
     (cl-letf (((symbol-function 'clutch-jdbc--send)
                (lambda (&rest _args)
                  (setq send-called t)
-                 (error "disconnect RPC should not be sent"))))
+                 (error "Disconnect RPC should not be sent"))))
       (clutch-db-disconnect conn)
       (should-not send-called)
       (should-not (gethash conn clutch-jdbc--busy-request-ids))

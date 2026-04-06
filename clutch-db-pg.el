@@ -37,6 +37,8 @@
 (require 'pg)
 
 (declare-function clutch--connection-context "clutch-connection" (conn))
+(declare-function clutch-db--submit-metadata-call "clutch-db"
+                  (submit-fn conn callback errback fn &rest args))
 
 (defvar pg-connect-timeout)
 (defvar pg-read-timeout)
@@ -441,43 +443,39 @@ ORDER BY schema_name")))
 
 (cl-defmethod clutch-db-refresh-schema-async ((conn pgcon) callback
                                               &optional errback)
-  "Refresh PostgreSQL schema names for CONN on a background worker."
-  (clutch-db-pg--submit-metadata-task
-   conn
-   (lambda (context)
-     (clutch-db-list-tables context))
-   callback
-   errback))
+  "Refresh PostgreSQL schema names for CONN and pass them to CALLBACK.
+Use ERRBACK for failures."
+  (clutch-db--submit-metadata-call
+   #'clutch-db-pg--submit-metadata-task
+   conn callback errback
+   #'clutch-db-list-tables))
 
 (cl-defmethod clutch-db-list-columns-async ((conn pgcon) table callback
                                             &optional errback)
-  "Fetch PostgreSQL column names for TABLE on CONN on a background worker."
-  (clutch-db-pg--submit-metadata-task
-   conn
-   (lambda (context)
-     (clutch-db-list-columns context table))
-   callback
-   errback))
+  "Fetch PostgreSQL column names for TABLE on CONN and pass them to CALLBACK."
+  (clutch-db--submit-metadata-call
+   #'clutch-db-pg--submit-metadata-task
+   conn callback errback
+   #'clutch-db-list-columns
+   table))
 
 (cl-defmethod clutch-db-column-details-async ((conn pgcon) table callback
                                               &optional errback)
-  "Fetch PostgreSQL column details for TABLE on CONN on a background worker."
-  (clutch-db-pg--submit-metadata-task
-   conn
-   (lambda (context)
-     (clutch-db-column-details context table))
-   callback
-   errback))
+  "Fetch PostgreSQL column details for TABLE on CONN and pass them to CALLBACK."
+  (clutch-db--submit-metadata-call
+   #'clutch-db-pg--submit-metadata-task
+   conn callback errback
+   #'clutch-db-column-details
+   table))
 
 (cl-defmethod clutch-db-table-comment-async ((conn pgcon) table callback
                                              &optional errback)
-  "Fetch the PostgreSQL comment for TABLE on CONN on a background worker."
-  (clutch-db-pg--submit-metadata-task
-   conn
-   (lambda (context)
-     (clutch-db-table-comment context table))
-   callback
-   errback))
+  "Fetch the PostgreSQL comment for TABLE on CONN and pass it to CALLBACK."
+  (clutch-db--submit-metadata-call
+   #'clutch-db-pg--submit-metadata-task
+   conn callback errback
+   #'clutch-db-table-comment
+   table))
 
 (cl-defmethod clutch-db-list-tables ((conn pgcon))
   "Return table names for the current PostgreSQL database on CONN."
@@ -679,13 +677,12 @@ ORDER BY t.event_object_table, t.trigger_name")))
 
 (cl-defmethod clutch-db-list-objects-async ((conn pgcon) category callback
                                             &optional errback)
-  "Fetch PostgreSQL object entries for CATEGORY on CONN on a background worker."
-  (clutch-db-pg--submit-metadata-task
-   conn
-   (lambda (context)
-     (clutch-db-list-objects context category))
-   callback
-   errback))
+  "Fetch PostgreSQL object entries for CATEGORY on CONN and pass them to CALLBACK."
+  (clutch-db--submit-metadata-call
+   #'clutch-db-pg--submit-metadata-task
+   conn callback errback
+   #'clutch-db-list-objects
+   category))
 
 (cl-defmethod clutch-db-object-details ((conn pgcon) entry)
   "Return detail plists for PostgreSQL object ENTRY on CONN."

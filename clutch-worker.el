@@ -119,6 +119,17 @@ CLOSE-FN is recorded for later cleanup when the context is reset."
       (puthash conn worker clutch--metadata-workers)
       worker)))
 
+(defun clutch--worker-enqueue (worker job)
+  "Queue JOB on WORKER and wake the worker thread."
+  (let ((mutex (clutch--worker-mutex worker)))
+    (mutex-lock mutex)
+    (unwind-protect
+        (progn
+          (setf (clutch--worker-queue worker)
+                (nconc (clutch--worker-queue worker) (list job)))
+          (condition-notify (clutch--worker-condvar worker)))
+      (mutex-unlock mutex))))
+
 (defun clutch--worker-submit (conn work-fn callback &optional errback)
   "Run WORK-FN for CONN on a background worker.
 CALLBACK receives the result on the main thread.  ERRBACK receives an
@@ -135,14 +146,7 @@ was queued."
                 (error
                  (when errback
                    (run-at-time 0 nil errback (error-message-string err))))))))
-      (let ((mutex (clutch--worker-mutex worker)))
-        (mutex-lock mutex)
-        (unwind-protect
-            (progn
-              (setf (clutch--worker-queue worker)
-                    (nconc (clutch--worker-queue worker) (list job)))
-              (condition-notify (clutch--worker-condvar worker)))
-          (mutex-unlock mutex)))
+      (clutch--worker-enqueue worker job)
       t)))
 
 (defun clutch--worker-submit-contextual (conn open-fn close-fn work-fn
@@ -167,14 +171,7 @@ main thread.  Return non-nil when the task was queued."
                  (clutch--worker-reset-context worker)
                  (when errback
                    (run-at-time 0 nil errback (error-message-string err))))))))
-      (let ((mutex (clutch--worker-mutex worker)))
-        (mutex-lock mutex)
-        (unwind-protect
-            (progn
-              (setf (clutch--worker-queue worker)
-                    (nconc (clutch--worker-queue worker) (list job)))
-              (condition-notify (clutch--worker-condvar worker)))
-          (mutex-unlock mutex)))
+      (clutch--worker-enqueue worker job)
       t)))
 
 (defun clutch--worker-shutdown (conn)
