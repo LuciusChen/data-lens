@@ -562,6 +562,48 @@ Returns a propertized string."
                      visible-cols "")
           (propertize "│" 'face 'clutch-border-face)))
 
+(defun clutch--render-row-line (ridx render-state)
+  "Return the rendered buffer line string for row RIDX.
+RENDER-STATE carries cached lookup tables for pending row state."
+  (let* ((rows (or clutch--filtered-rows clutch--result-rows))
+         (row (nth ridx rows))
+         (visible-cols (clutch--visible-columns))
+         (widths (clutch--effective-widths))
+         (nw (clutch--row-number-digits))
+         (global-first-row (* clutch--page-current clutch-result-max-rows))
+         (bface 'clutch-border-face)
+         (pad-str (make-string clutch-column-padding ?\s))
+         (marked-table (plist-get render-state :marked))
+         (delete-table (plist-get render-state :deletes))
+         (pk-indices (plist-get render-state :pk-indices))
+         (deletingp (and pk-indices
+                         (gethash (clutch-result--extract-pk-vec row pk-indices)
+                                  delete-table)))
+         (editedp (clutch--row-pending-edit-p row ridx render-state))
+         (data-row (let ((rendered (clutch--render-row
+                                    row ridx visible-cols widths render-state)))
+                     (if deletingp
+                         (propertize rendered 'face 'clutch-pending-delete-face)
+                       rendered)))
+         (mark-char (cond (deletingp "D")
+                          (editedp "E")
+                          ((gethash ridx marked-table) "*")
+                          (t " ")))
+         (num-label (string-pad
+                     (number-to-string
+                      (1+ (+ global-first-row ridx)))
+                     nw nil t))
+         (num-face (cond (deletingp 'clutch-pending-delete-face)
+                         (editedp 'clutch-modified-face)
+                         ((gethash ridx marked-table) 'clutch-marked-face)
+                         (t 'shadow))))
+    (concat (propertize "│" 'face bface)
+            (propertize mark-char 'face num-face)
+            (propertize num-label 'face num-face)
+            pad-str
+            data-row
+            "\n")))
+
 (defun clutch--footer-row-summary (row-count total-rows)
   "Build propertized row count display for the footer.
 ROW-COUNT is the current page count, TOTAL-ROWS is the overall total or nil."
@@ -914,47 +956,14 @@ The header-line should track body hscroll exactly."
   (concat (propertize " " 'display '(space :align-to 0))
           (or (clutch--header-line-with-hscroll) "")))
 
-(defun clutch--insert-data-rows (rows visible-cols widths nw
-                                      global-first-row row-positions render-state)
+(defun clutch--insert-data-rows (rows row-positions render-state)
   "Insert data ROWS into the current buffer.
-VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
-GLOBAL-FIRST-ROW is the 0-based offset for numbering.
 ROW-POSITIONS stores line starts keyed by rendered row index.
 RENDER-STATE contains render lookup tables for pending UI state."
-  (let ((bface 'clutch-border-face)
-        (pad-str (make-string clutch-column-padding ?\s))
-        (marked-table (plist-get render-state :marked))
-        (delete-table (plist-get render-state :deletes))
-        (pk-indices (plist-get render-state :pk-indices)))
-    (cl-loop for row in rows
-             for ridx from 0
-             do (aset row-positions ridx (point))
-             for deletingp = (and pk-indices
-                                  (gethash (clutch-result--extract-pk-vec row pk-indices)
-                                           delete-table))
-             for editedp = (clutch--row-pending-edit-p row ridx render-state)
-             for data-row = (let ((r (clutch--render-row
-                                      row ridx visible-cols widths render-state)))
-                               (if deletingp
-                                   (propertize r 'face 'clutch-pending-delete-face)
-                                 r))
-             for mark-char = (cond (deletingp "D")
-                                   (editedp "E")
-                                   ((gethash ridx marked-table) "*")
-                                   (t " "))
-             for num-label = (string-pad
-                              (number-to-string
-                               (1+ (+ global-first-row ridx)))
-                              nw nil t)
-             for num-face = (cond (deletingp 'clutch-pending-delete-face)
-                                  (editedp 'clutch-modified-face)
-                                  ((gethash ridx marked-table) 'clutch-marked-face)
-                                  (t 'shadow))
-             do (insert (propertize "│" 'face bface)
-                        (propertize mark-char 'face num-face)
-                        (propertize num-label 'face num-face)
-                        pad-str
-                        data-row "\n"))))
+  (cl-loop for _row in rows
+           for ridx from 0
+           do (aset row-positions ridx (point))
+           do (insert (clutch--render-row-line ridx render-state))))
 
 (defun clutch--insert-pending-insert-rows (visible-cols widths nw nrows row-positions
                                                         render-state)
@@ -986,19 +995,34 @@ RENDER-STATE contains render lookup tables for pending UI state."
                         pad-str
                         data-row "\n"))))
 
-(defun clutch--update-result-line-formats (rows visible-cols widths nw)
+(defun clutch--refresh-header-line ()
+  "Rebuild the header-line format without touching the table body."
+  (if clutch--column-widths
+      (let* ((visible-cols (clutch--visible-columns))
+             (widths (clutch--effective-widths))
+             (nw (clutch--row-number-digits)))
+        (setq clutch--header-line-string
+              (clutch--build-header-line visible-cols widths nw
+                                         clutch--header-active-col))
+        (setq header-line-format '(:eval (clutch--header-line-display))))
+    (setq clutch--header-line-string nil
+          header-line-format nil)))
+
+(defun clutch--refresh-footer-line ()
+  "Rebuild the mode-line footer format without touching the table body."
+  (let ((rows (or clutch--filtered-rows clutch--result-rows)))
+    (setq clutch--footer-base-string
+          (clutch--render-footer
+           (length rows) clutch--page-current
+           clutch-result-max-rows clutch--page-total-rows))
+    (setq mode-line-format '(:eval (clutch--footer-mode-line-display)))))
+
+(defun clutch--update-result-line-formats (_rows _visible-cols _widths _nw)
   "Set `mode-line-format' and `header-line-format' for the result buffer.
 ROWS, VISIBLE-COLS, and WIDTHS define the rendered table, and NW is the
 available window width."
-  (setq clutch--footer-base-string
-        (clutch--render-footer
-         (length rows) clutch--page-current
-         clutch-result-max-rows clutch--page-total-rows))
-  (setq mode-line-format '(:eval (clutch--footer-mode-line-display)))
-  (setq clutch--header-line-string
-        (clutch--build-header-line visible-cols widths nw
-                                   clutch--header-active-col))
-  (setq header-line-format '(:eval (clutch--header-line-display))))
+  (clutch--refresh-footer-line)
+  (clutch--refresh-header-line))
 
 (defun clutch--render-result ()
   "Render the result buffer content as one horizontally scrollable table.
@@ -1014,18 +1038,72 @@ Preserves point position (row + column) across the render."
          (nw (clutch--row-number-digits))
          (row-positions (make-vector (+ (length rows)
                                         (length clutch--pending-inserts))
-                                     nil))
-         (global-first-row (* clutch--page-current clutch-result-max-rows)))
+                                     nil)))
     (erase-buffer)
     (setq clutch--row-start-positions row-positions)
     (clutch--update-result-line-formats rows visible-cols widths nw)
-    (clutch--insert-data-rows rows visible-cols widths nw global-first-row
-                              row-positions render-state)
+    (clutch--insert-data-rows rows row-positions render-state)
     (clutch--insert-pending-insert-rows visible-cols widths nw (length rows)
                                         row-positions render-state)
     (if save-ridx
         (clutch--goto-cell save-ridx save-cidx)
       (goto-char (point-min)))))
+
+(defun clutch--reindex-row-starts-from (ridx)
+  "Recompute `clutch--row-start-positions' from RIDX to the end of the buffer."
+  (when (and (vectorp clutch--row-start-positions)
+             (integerp ridx)
+             (<= 0 ridx)
+             (< ridx (length clutch--row-start-positions)))
+    (let ((line-pos (aref clutch--row-start-positions ridx))
+          (idx ridx)
+          (len (length clutch--row-start-positions)))
+      (when line-pos
+        (save-excursion
+          (goto-char line-pos)
+          (while (and (< idx len)
+                      (< (point) (point-max)))
+            (aset clutch--row-start-positions idx (point))
+            (setq idx (1+ idx))
+            (forward-line 1))
+          (while (< idx len)
+            (aset clutch--row-start-positions idx nil)
+            (setq idx (1+ idx))))))))
+
+(defun clutch--replace-row-at-index (ridx)
+  "Re-render row RIDX in place without a full body redraw.
+Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
+  (let* ((rows (or clutch--filtered-rows clutch--result-rows))
+         (nrows (length rows))
+         (line-pos (and (vectorp clutch--row-start-positions)
+                        (integerp ridx)
+                        (<= 0 ridx)
+                        (< ridx (length clutch--row-start-positions))
+                        (aref clutch--row-start-positions ridx))))
+    (if (or (not line-pos)
+            (not (integerp ridx))
+            (< ridx 0)
+            (>= ridx nrows))
+        (clutch--refresh-display)
+      (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
+             (save-cidx (get-text-property (point) 'clutch-col-idx))
+             (next-pos (and (< (1+ ridx) (length clutch--row-start-positions))
+                            (aref clutch--row-start-positions (1+ ridx))))
+             (end-pos (or next-pos
+                          (save-excursion
+                            (goto-char line-pos)
+                            (forward-line 1)
+                            (point))))
+             (render-state (clutch--build-render-state))
+             (line (clutch--render-row-line ridx render-state))
+             (inhibit-read-only t))
+        (save-excursion
+          (goto-char line-pos)
+          (delete-region line-pos end-pos)
+          (insert line))
+        (clutch--reindex-row-starts-from ridx)
+        (when save-ridx
+          (clutch--goto-cell save-ridx save-cidx))))))
 
 (defun clutch--col-idx-at-point ()
   "Return the column index at point, from data cells."

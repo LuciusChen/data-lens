@@ -64,6 +64,9 @@
 (declare-function clutch--ensure-point-visible-horizontally "clutch-ui" ())
 (declare-function clutch--ensure-table-comment-async "clutch-schema" (conn table))
 (declare-function clutch--header-line-display "clutch-ui" ())
+(declare-function clutch--refresh-footer-line "clutch-ui" ())
+(declare-function clutch--refresh-header-line "clutch-ui" ())
+(declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
 (declare-function clutch--column-border-position "clutch-ui" (cidx))
 (declare-function clutch--column-info-string "clutch-ui" (cidx))
 (declare-function clutch--resolve-result-column-details "clutch-ui" (conn sql col-names))
@@ -2445,12 +2448,16 @@ Priority: region rows > current row."
          (was-edit
           (setq clutch--pending-edits
                 (cl-remove edit-key clutch--pending-edits :test #'equal :key #'car))
-          (clutch--refresh-display)
+          (clutch--replace-row-at-index ridx)
+          (clutch--refresh-footer-line)
+          (force-mode-line-update)
           (message "Pending edit discarded"))
          (was-delete
           (setq clutch--pending-deletes
                 (cl-remove pv clutch--pending-deletes :test #'equal))
-          (clutch--refresh-display)
+          (clutch--replace-row-at-index ridx)
+          (clutch--refresh-footer-line)
+          (force-mode-line-update)
           (message "Pending deletion discarded"))
          (t
           (user-error "No pending change at point"))))))))
@@ -2561,13 +2568,7 @@ Rebuilds `header-line-format' with the active column highlighted."
     (let ((cidx (clutch--col-idx-at-point)))
       (unless (eql cidx clutch--header-active-col)
         (setq clutch--header-active-col cidx)
-        (let* ((visible-cols (clutch--visible-columns))
-               (widths (clutch--effective-widths))
-               (nw (clutch--row-number-digits)))
-          (setq clutch--header-line-string
-                (clutch--build-header-line visible-cols widths nw cidx))
-          (setq header-line-format
-                '(:eval (clutch--header-line-display))))))))
+        (clutch--refresh-header-line)))))
 
 ;;;###autoload
 (define-derived-mode clutch-result-mode special-mode "clutch-result"
@@ -2754,7 +2755,8 @@ Uses the rewrite layer so complex SQL is handled via derived-table count."
       (setq-local clutch--page-total-rows
                   (if (numberp count-val) count-val
                     (string-to-number (format "%s" count-val))))
-      (clutch--refresh-display)
+      (clutch--refresh-footer-line)
+      (force-mode-line-update)
       (message "Total rows: %d" clutch--page-total-rows))))
 
 ;;;###autoload

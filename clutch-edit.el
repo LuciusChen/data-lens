@@ -43,7 +43,9 @@
 (declare-function clutch--string-pad "clutch-query" (s width &optional pad-left numeric))
 (declare-function clutch--value-to-literal "clutch" (val))
 (declare-function clutch--humanize-db-error "clutch-query" (msg))
+(declare-function clutch--refresh-footer-line "clutch-ui" ())
 (declare-function clutch--refresh-display "clutch-ui" ())
+(declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
 (declare-function clutch-result--selected-row-indices "clutch" ())
 (declare-function clutch-db-escape-identifier "clutch-db" (conn name))
 (declare-function clutch-db-substitute-params "clutch-db" (sql params render-fn))
@@ -480,7 +482,8 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
   (quit-window 'kill))
 
 (defun clutch-result--apply-edit (ridx cidx new-value)
-  "Record edit for row RIDX, column CIDX with NEW-VALUE and refresh display."
+  "Record edit for row RIDX, column CIDX with NEW-VALUE.
+Refresh the affected row and footer in place when possible."
   (let* ((table (clutch--result-source-table-or-user-error "Stage UPDATE"))
          (pk-indices (clutch--result-pk-indices-or-user-error table "Stage UPDATE"))
          (display-rows (or clutch--filtered-rows clutch--result-rows))
@@ -495,7 +498,9 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
         (if existing
             (setcdr existing new-value)
           (push (cons key new-value) clutch--pending-edits)))))
-  (clutch--refresh-display)
+  (clutch--replace-row-at-index ridx)
+  (clutch--refresh-footer-line)
+  (force-mode-line-update)
   (if clutch--pending-edits
       (message "%d pending edit%s — C-c C-c to commit"
                (length clutch--pending-edits)
@@ -748,7 +753,10 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     (dolist (ridx indices)
       (let ((pv (clutch-result--extract-pk-vec (nth ridx display-rows) pk-indices)))
         (cl-pushnew pv clutch--pending-deletes :test #'equal)))
-    (clutch--refresh-display)
+    (dolist (ridx indices)
+      (clutch--replace-row-at-index ridx))
+    (clutch--refresh-footer-line)
+    (force-mode-line-update)
     (message "%d row%s staged for deletion — C-c C-c to commit"
              (length indices)
              (if (= (length indices) 1) "" "s"))))

@@ -466,6 +466,134 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
         (when (buffer-live-p buf)
           (kill-buffer buf))))))
 
+(defun clutch-test--setup-rendered-result (&optional rows)
+  "Populate the current buffer with a rendered three-column result table.
+ROWS defaults to a small three-row sample."
+  (let ((rows (or rows '((1 "alpha" "oslo")
+                         (2 "bravo" "rome")
+                         (3 "charlie" "paris"))))
+        (columns '((:name "id" :type-category numeric)
+                   (:name "name" :type-category text)
+                   (:name "city" :type-category text))))
+    (clutch-result-mode)
+    (setq-local clutch--result-columns '("id" "name" "city")
+                clutch--result-column-defs columns
+                clutch--result-rows rows
+                clutch--filtered-rows nil
+                clutch--pending-edits nil
+                clutch--pending-deletes nil
+                clutch--pending-inserts nil
+                clutch--marked-rows nil
+                clutch--cached-pk-indices '(0)
+                clutch--sort-column nil
+                clutch--sort-descending nil
+                clutch--page-current 0
+                clutch--page-total-rows (length rows)
+                clutch--query-elapsed nil
+                clutch-result-max-rows 100
+                clutch--column-widths [3 8 8])
+    (clutch--render-result)))
+
+(defun clutch-test--rendered-line-at (ridx)
+  "Return rendered line RIDX from the current result buffer."
+  (let ((start (aref clutch--row-start-positions ridx))
+        (end (or (and (< (1+ ridx) (length clutch--row-start-positions))
+                      (aref clutch--row-start-positions (1+ ridx)))
+                 (point-max))))
+    (buffer-substring start end)))
+
+(ert-deftest clutch-test-refresh-footer-line-updates-without-changing-body ()
+  "Footer refresh should update mode-line state without touching buffer text."
+  (with-temp-buffer
+    (clutch-test--setup-rendered-result)
+    (let ((body (buffer-string))
+          (before (substring-no-properties clutch--footer-base-string)))
+      (setq-local clutch--page-total-rows 9)
+      (clutch--refresh-footer-line)
+      (should (equal body (buffer-string)))
+      (should-not (equal before
+                         (substring-no-properties clutch--footer-base-string)))
+      (should (string-match-p "9"
+                              (substring-no-properties clutch--footer-base-string))))))
+
+(ert-deftest clutch-test-refresh-header-line-updates-without-changing-body ()
+  "Header refresh should update header state without touching buffer text."
+  (with-temp-buffer
+    (clutch-test--setup-rendered-result)
+    (let ((body (buffer-string))
+          (before (substring-no-properties clutch--header-line-string)))
+      (setq-local clutch--sort-column "name"
+                  clutch--sort-descending t)
+      (clutch--refresh-header-line)
+      (should (equal body (buffer-string)))
+      (should-not (equal before
+                         (substring-no-properties clutch--header-line-string))))))
+
+(ert-deftest clutch-test-replace-row-at-index-changes-only-target-row ()
+  "Row replacement should update only the targeted rendered line."
+  (with-temp-buffer
+    (clutch-test--setup-rendered-result)
+    (let ((before0 (substring-no-properties (clutch-test--rendered-line-at 0)))
+          (before1 (substring-no-properties (clutch-test--rendered-line-at 1)))
+          (before2 (substring-no-properties (clutch-test--rendered-line-at 2))))
+      (setq-local clutch--pending-deletes (list (vector 2)))
+      (clutch--replace-row-at-index 1)
+      (let ((after0 (substring-no-properties (clutch-test--rendered-line-at 0)))
+            (after1 (substring-no-properties (clutch-test--rendered-line-at 1)))
+            (after2 (substring-no-properties (clutch-test--rendered-line-at 2))))
+        (should (equal before0 after0))
+        (should (equal before2 after2))
+        (should-not (equal before1 after1))
+        (should (string-match-p "^│D" after1))))))
+
+(ert-deftest clutch-test-replace-row-at-index-preserves-point-cell ()
+  "Row replacement should keep point on the same logical cell."
+  (with-temp-buffer
+    (clutch-test--setup-rendered-result)
+    (setq-local clutch--pending-edits
+                (list (cons (cons (vector 2) 2) "表表表")))
+    (clutch--goto-cell 1 2)
+    (clutch--replace-row-at-index 1)
+    (should (= (get-text-property (point) 'clutch-row-idx) 1))
+    (should (= (get-text-property (point) 'clutch-col-idx) 2))))
+
+(ert-deftest clutch-test-replace-row-at-index-falls-back-without-row-starts ()
+  "Row replacement should fall back to a full redraw without cached row starts."
+  (with-temp-buffer
+    (let (refreshed)
+      (setq-local clutch--result-rows '((1 "alpha" "oslo")))
+      (setq-local clutch--filtered-rows nil)
+      (setq-local clutch--column-widths [3 8 8])
+      (cl-letf (((symbol-function 'clutch--refresh-display)
+                 (lambda ()
+                   (setq refreshed t))))
+        (clutch--replace-row-at-index 0)
+        (should refreshed)))))
+
+(ert-deftest clutch-test-reindex-row-starts-from-tracks-buffer-positions ()
+  "Row-start reindexing should match actual buffer positions after replacement."
+  (with-temp-buffer
+    (clutch-test--setup-rendered-result)
+    (let ((old-third-start (aref clutch--row-start-positions 2)))
+      (setq-local clutch--pending-edits
+                  (list (cons (cons (vector 2) 2) "表表表")))
+      (clutch--replace-row-at-index 1)
+      (let ((actual-third-start (save-excursion
+                                  (goto-char (point-min))
+                                  (forward-line 2)
+                                  (point))))
+        (should (= (aref clutch--row-start-positions 2) actual-third-start))
+        (should (/= old-third-start actual-third-start))))))
+
+(ert-deftest clutch-test-render-row-line-matches-inserted-output ()
+  "Row-line rendering should match the line inserted into the result buffer."
+  (with-temp-buffer
+    (clutch-test--setup-rendered-result)
+    (let* ((render-state (clutch--build-render-state))
+           (expected (clutch-test--rendered-line-at 1))
+           (actual (clutch--render-row-line 1 render-state)))
+      (should (equal-including-properties actual expected)))))
+
 ;;;; Unit tests — SQL query detection
 
 (ert-deftest clutch-test-sql-has-limit-p ()
@@ -3229,7 +3357,7 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
                 ((symbol-function 'clutch-db-query)
                  (lambda (_conn _sql)
                    (make-clutch-db-result :rows '((7)))))
-                ((symbol-function 'clutch--refresh-display) #'ignore)
+                ((symbol-function 'clutch--refresh-footer-line) #'ignore)
                 ((symbol-function 'message) #'ignore))
         (clutch-result-count-total)
         (should (equal captured-base "FILTER[id = 1]{SELECT * FROM t}"))
@@ -3333,7 +3461,7 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
                  (lambda (conn _sql)
                    (setq captured-conn conn)
                    (make-clutch-db-result :rows '((3)))))
-                ((symbol-function 'clutch--refresh-display) #'ignore)
+                ((symbol-function 'clutch--refresh-footer-line) #'ignore)
                 ((symbol-function 'message) #'ignore))
         (clutch-result-count-total)
         (should ensured)
@@ -3968,15 +4096,22 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
 (ert-deftest clutch-test-insert-data-rows-marks-pending-edits ()
   "Edited rows should show an E marker in the left prefix."
   (with-temp-buffer
-    (setq-local clutch--result-column-defs '((:name "id" :type-category numeric)
+    (setq-local clutch--result-columns '("id" "name")
+                clutch--result-column-defs '((:name "id" :type-category numeric)
                                              (:name "name" :type-category text))
+                clutch--result-rows '((1 "before"))
+                clutch--filtered-rows nil
+                clutch-result-max-rows 100
+                clutch--page-current 0
+                clutch--column-widths [4 8]
                 clutch--cached-pk-indices '(0)
                 clutch--pending-edits '((([1] . 1) . "edited"))
                 clutch--pending-deletes nil
                 clutch--marked-rows nil)
     (let ((row-positions (make-vector 1 nil)))
-      (clutch--insert-data-rows '((1 "before")) '(0 1) [4 8] 3 0
-                                row-positions (clutch--build-render-state))
+      (clutch--insert-data-rows '((1 "before"))
+                                row-positions
+                                (clutch--build-render-state))
       (should (string-prefix-p "│E  1 " (buffer-string))))))
 
 (ert-deftest clutch-test-record-render-uses-pk-keyed-pending-edits ()
