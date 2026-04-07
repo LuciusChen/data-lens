@@ -2697,45 +2697,23 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
 
 ;;;; Unit tests — clutch-db-live-p (JDBC identity check)
 
-(ert-deftest clutch-db-test-jdbc-live-p-matching-live-process ()
-  "A conn whose process is the current agent and alive should be live."
-  (let ((proc 'fake-proc))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
-      (let ((clutch-jdbc--agent-process proc))
-        (should (clutch-db-live-p
-                 (make-clutch-jdbc-conn :process proc :conn-id 1
-                                        :params nil :busy nil)))))))
-
-(ert-deftest clutch-db-test-jdbc-live-p-dead-process ()
-  "A conn whose process has died should not be live."
-  (let ((proc 'dead-proc))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) nil)))
-      (let ((clutch-jdbc--agent-process proc))
-        (should-not (clutch-db-live-p
-                     (make-clutch-jdbc-conn :process proc :conn-id 1
-                                            :params nil :busy nil)))))))
-
-(ert-deftest clutch-db-test-jdbc-live-p-nil-agent-process ()
-  "When clutch-jdbc--agent-process is nil (agent was killed), conn is not live.
-This is the key guard: after a timeout kill the JVM may still be in its
-shutdown sequence, so `process-live-p' on the old process object can return t
-briefly.  The nil check on the current-agent variable closes that window."
-  (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
-    (let ((clutch-jdbc--agent-process nil))
-      (should-not (clutch-db-live-p
-                   (make-clutch-jdbc-conn :process 'old-proc :conn-id 1
-                                          :params nil :busy nil))))))
-
-(ert-deftest clutch-db-test-jdbc-live-p-mismatched-process ()
-  "A conn whose stored process is not the current agent should not be live.
-This catches the race where agent-process was set to nil, a new agent was
-started (new process object), but the old conn's :process field still holds
-the old process which may still pass `process-live-p' during JVM shutdown."
-  (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
-    (let ((clutch-jdbc--agent-process 'new-proc))
-      (should-not (clutch-db-live-p
-                   (make-clutch-jdbc-conn :process 'old-proc :conn-id 1
-                                          :params nil :busy nil))))))
+(ert-deftest clutch-db-test-jdbc-live-p-variants ()
+  "JDBC liveness should depend on current-agent identity and process state."
+  (dolist (case '(("matching-live-process" fake-proc fake-proc t t)
+                  ("dead-process" dead-proc dead-proc nil nil)
+                  ("nil-agent-process" old-proc nil t nil)
+                  ("mismatched-process" old-proc new-proc t nil)))
+    (pcase-let ((`(,label ,conn-proc ,agent-proc ,livep ,expected) case))
+      (ert-info ((format "live-p case: %s" label))
+        (cl-letf (((symbol-function 'process-live-p) (lambda (_p) livep)))
+          (let ((clutch-jdbc--agent-process agent-proc))
+            (if expected
+                (should (clutch-db-live-p
+                         (make-clutch-jdbc-conn :process conn-proc :conn-id 1
+                                                :params nil :busy nil)))
+              (should-not (clutch-db-live-p
+                           (make-clutch-jdbc-conn :process conn-proc :conn-id 1
+                                                  :params nil :busy nil))))))))))
 
 ;;;; Unit tests — clutch-jdbc--recv-response timeout behaviour
 

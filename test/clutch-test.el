@@ -3679,51 +3679,40 @@ ROWS defaults to a small three-row sample."
                   "no primary key detected for table users"
                   (error-message-string err))))))))
 
-(ert-deftest clutch-test-build-delete-stmt-generates-where-from-pk ()
-  "DELETE builder should parameterize primary-key values in WHERE."
+(ert-deftest clutch-test-build-delete-stmt-variants ()
+  "DELETE builder should handle primary-key variants correctly."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (cl-letf (((symbol-function 'clutch-db-escape-identifier)
                (lambda (_conn id) (format "\"%s\"" id))))
-      (let ((stmt (clutch-result--build-delete-stmt
-                   "orders"
-                   '(42 "alice" "2024-01-15")
-                   '("id" "customer" "created_at")
-                   '(0))))
-        (should (equal (car stmt)
-                       "DELETE FROM \"orders\" WHERE \"id\" = ?"))
-        (should (equal (cdr stmt) '(42)))))))
-
-(ert-deftest clutch-test-build-delete-stmt-compound-pk ()
-  "DELETE with compound primary key should parameterize all PK columns."
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn)
-    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn id) (format "\"%s\"" id))))
-      (let ((stmt (clutch-result--build-delete-stmt
-                   "order_items"
-                   '(7 99 3)
-                   '("order_id" "item_id" "qty")
-                   '(0 1))))
-        (should (equal (car stmt)
-                       "DELETE FROM \"order_items\" WHERE \"order_id\" = ? AND \"item_id\" = ?"))
-        (should (equal (cdr stmt) '(7 99)))))))
-
-(ert-deftest clutch-test-build-delete-stmt-null-pk-uses-is-null ()
-  "DELETE should keep NULL PKs literal and exclude them from params."
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn)
-    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn id) (format "\"%s\"" id))))
-      (let ((stmt (clutch-result--build-delete-stmt
-                   "events"
-                   '(nil "orphan")
-                   '("parent_id" "name")
-                   '(0))))
-        (should (equal (car stmt)
-                       "DELETE FROM \"events\" WHERE \"parent_id\" IS NULL"))
-        (should-not (member nil (cdr stmt)))
-        (should (null (cdr stmt)))))))
+      (dolist (case '(("single"
+                       "orders"
+                       (42 "alice" "2024-01-15")
+                       ("id" "customer" "created_at")
+                       (0)
+                       "DELETE FROM \"orders\" WHERE \"id\" = ?"
+                       (42))
+                      ("compound"
+                       "order_items"
+                       (7 99 3)
+                       ("order_id" "item_id" "qty")
+                       (0 1)
+                       "DELETE FROM \"order_items\" WHERE \"order_id\" = ? AND \"item_id\" = ?"
+                       (7 99))
+                      ("null"
+                       "events"
+                       (nil "orphan")
+                       ("parent_id" "name")
+                       (0)
+                       "DELETE FROM \"events\" WHERE \"parent_id\" IS NULL"
+                       ())))
+        (pcase-let ((`(,label ,table ,row ,columns ,pk-indices ,sql ,params) case))
+          (ert-info ((format "delete case: %s" label))
+            (let ((stmt (clutch-result--build-delete-stmt
+                         table row columns pk-indices)))
+              (should (equal (car stmt) sql))
+              (should (equal (cdr stmt) params))
+              (should-not (member nil (cdr stmt))))))))))
 
 (ert-deftest clutch-test-build-insert-sql-returns-template-and-params ()
   "INSERT builder should return a template plus parameter values."
