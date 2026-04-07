@@ -8007,6 +8007,33 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                     :schema "DATA_OWNER" :source-schema "DATA_OWNER"))
                  "DATA_OWNER/view")))
 
+(ert-deftest clutch-test-object-sql-name-rejects-current-schema-placeholder ()
+  "Browse SQL must never contain literal \"current_schema\" as schema qualifier.
+Reproduces the bug where `C-c C-j' on a PG table generated
+SELECT * FROM \"current_schema\".\"orders_large\" which PostgreSQL rejects.
+The fix is in the PG backend: entries carry the real schema (e.g. \"public\"),
+so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
+  (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    ;; An entry with a real schema produces correct qualified SQL.
+    (let* ((entry '(:name "orders_large" :type "TABLE"
+                    :schema "public" :source-schema "public"))
+           (sql-name (clutch--object-sql-name 'fake entry)))
+      (should (equal sql-name "\"public\".\"orders_large\""))
+      (should-not (string-match-p "current_schema" sql-name)))))
+
+(ert-deftest clutch-test-object-sql-name-never-produces-current-schema-literal ()
+  "clutch--object-sql-name must never emit the string \"current_schema\" as a schema qualifier."
+  (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    ;; With a real schema name, should produce "public"."orders"
+    (should (equal (clutch--object-sql-name 'fake '(:name "orders" :type "TABLE"
+                                                    :schema "public"))
+                   "\"public\".\"orders\""))
+    ;; Without schema, should produce bare "orders"
+    (should (equal (clutch--object-sql-name 'fake '(:name "orders" :type "TABLE"))
+                   "\"orders\""))))
+
 ;;;; Live integration tests
 
 (defmacro clutch-test--with-conn (var &rest body)

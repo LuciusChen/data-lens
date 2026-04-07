@@ -454,9 +454,10 @@ ORDER BY tablename")))
 (cl-defmethod clutch-db-list-table-entries ((conn pgcon))
   "Return table/view entry plists for the current PostgreSQL schema on CONN."
   (condition-case err
-      (let ((result (pg-exec
-                     conn
-                     "SELECT name, type
+      (let* ((schema (clutch-db-current-schema conn))
+             (result (pg-exec
+                      conn
+                      "SELECT name, type
 FROM (
   SELECT tablename AS name, 'TABLE' AS type
   FROM pg_tables
@@ -472,8 +473,8 @@ ORDER BY name")))
            (pcase-let ((`(,name ,type) row))
              (list :name name
                    :type type
-                   :schema "current_schema"
-                   :source-schema "current_schema")))
+                   :schema schema
+                   :source-schema schema)))
          (clutch-db-pg--rows result)))
     (pg-error
      (signal 'clutch-db-error
@@ -530,6 +531,7 @@ ORDER BY ordinal_position"
 (cl-defmethod clutch-db-list-objects ((conn pgcon) category)
   "Return object entry plists for CATEGORY on PostgreSQL CONN."
   (condition-case err
+      (let ((schema (clutch-db-current-schema conn)))
       (pcase category
         ('indexes
          (let ((result
@@ -545,8 +547,8 @@ ORDER BY i.tablename, i.indexname")))
            (mapcar
             (lambda (row)
               (pcase-let ((`(,name ,table-name ,unique) row))
-                (list :name name :type "INDEX" :schema "current_schema"
-                      :source-schema "current_schema"
+                (list :name name :type "INDEX" :schema schema
+                      :source-schema schema
                       :target-table table-name :unique unique)))
             (clutch-db-pg--rows result))))
         ('sequences
@@ -560,8 +562,8 @@ ORDER BY sequencename")))
            (mapcar
             (lambda (row)
               (pcase-let ((`(,name ,min ,max ,increment ,last) row))
-                (list :name name :type "SEQUENCE" :schema "current_schema"
-                      :source-schema "current_schema"
+                (list :name name :type "SEQUENCE" :schema schema
+                      :source-schema schema
                       :min min :max max :increment increment :last last)))
             (clutch-db-pg--rows result))))
         ('procedures
@@ -577,8 +579,8 @@ ORDER BY p.proname")))
            (mapcar
             (lambda (row)
               (pcase-let ((`(,name ,oid) row))
-                (list :name name :type "PROCEDURE" :schema "current_schema"
-                      :source-schema "current_schema"
+                (list :name name :type "PROCEDURE" :schema schema
+                      :source-schema schema
                       :identity (format "OID:%s" oid))))
             (clutch-db-pg--rows result))))
         ('functions
@@ -594,8 +596,8 @@ ORDER BY p.proname")))
            (mapcar
             (lambda (row)
               (pcase-let ((`(,name ,oid) row))
-                (list :name name :type "FUNCTION" :schema "current_schema"
-                      :source-schema "current_schema"
+                (list :name name :type "FUNCTION" :schema schema
+                      :source-schema schema
                       :identity (format "OID:%s" oid))))
             (clutch-db-pg--rows result))))
         ('triggers
@@ -625,13 +627,13 @@ ORDER BY t.event_object_table, t.trigger_name")))
                                              (or (plist-get existing :event) ""))
                        (setf (plist-get existing :event)
                              (concat (plist-get existing :event) " OR " event)))
-                   (push (list :name name :type "TRIGGER" :schema "current_schema"
-                               :source-schema "current_schema"
+                   (push (list :name name :type "TRIGGER" :schema schema
+                               :source-schema schema
                                :target-table table-name :event event :timing timing
                                :status "ENABLED"
                                :identity (format "OID:%s" oid))
                          grouped)))))))
-        (_ nil))
+        (_ nil)))
     (pg-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
