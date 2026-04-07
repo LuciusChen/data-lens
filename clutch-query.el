@@ -58,16 +58,12 @@
 (defvar clutch-result-window-height 0.33)
 (defvar clutch-result-max-rows 500)
 (defvar clutch-column-width-max 30)
-(defvar clutch-column-padding 1)
 (defvar clutch-console-yank-cleanup t)
-(defvar clutch-console-directory
-  (expand-file-name "clutch" user-emacs-directory))
 
 ;; Forward declarations — variables defined in clutch-ui / clutch-edit
 (defvar clutch--aggregate-summary)
 (defvar clutch--cached-pk-indices)
 (defvar clutch--column-widths)
-(defvar clutch--dml-result)
 (defvar clutch--filter-pattern)
 (defvar clutch--filtered-rows)
 (defvar clutch--fk-info)
