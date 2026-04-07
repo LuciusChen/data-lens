@@ -3018,25 +3018,19 @@ ROWS defaults to a small three-row sample."
         (clutch-result-copy 'tsv)
         (should (equal (current-kill 0) "alice"))))))
 
-(ert-deftest clutch-test-copy-csv-command-dispatches-to-csv ()
-  "CSV copy command should dispatch to the unified copy entry."
-  (with-temp-buffer
-    (let (called)
-      (cl-letf (((symbol-function 'clutch-result-copy)
-                 (lambda (fmt &optional rect)
-                   (setq called (list fmt rect)))))
-        (clutch-result-copy-csv)
-        (should (equal called '(csv nil)))))))
-
-(ert-deftest clutch-test-copy-tsv-command-dispatches-to-tsv ()
-  "TSV copy command should dispatch to the unified copy entry."
-  (with-temp-buffer
-    (let (called)
-      (cl-letf (((symbol-function 'clutch-result-copy)
-                 (lambda (fmt &optional rect)
-                   (setq called (list fmt rect)))))
-        (clutch-result-copy-tsv)
-        (should (equal called '(tsv nil)))))))
+(ert-deftest clutch-test-copy-format-commands-dispatch-to-unified-copy ()
+  "CSV and TSV copy commands should dispatch to `clutch-result-copy'."
+  (dolist (case '((clutch-result-copy-csv csv)
+                  (clutch-result-copy-tsv tsv)))
+    (pcase-let ((`(,command ,expected-format) case))
+      (ert-info ((symbol-name command))
+        (with-temp-buffer
+          (let (called)
+            (cl-letf (((symbol-function 'clutch-result-copy)
+                       (lambda (fmt &optional rect)
+                         (setq called (list fmt rect)))))
+              (funcall command)
+              (should (equal called (list expected-format nil))))))))))
 
 (ert-deftest clutch-test-copy-fmt-with-refine-uses-refined-rectangle ()
   "Refined copy should pass the final rectangle into the unified copy entry."
@@ -8885,56 +8879,36 @@ database.  Only a query re-execution should discard them."
                           :pass-entry "alpha"))))
         ))))
 
-(ert-deftest clutch-test-read-connection-params-loads-clutch-entrypoint ()
-  "Saved connection reader should load `clutch' before checking saved profiles."
-  (let ((clutch-connection-alist nil)
-        required
-        (orig-featurep (symbol-function 'featurep))
-        (orig-require (symbol-function 'require)))
-    (cl-letf (((symbol-function 'featurep)
-               (lambda (feature)
-                 (if (eq feature 'clutch)
-                     nil
-                   (funcall orig-featurep feature))))
-              ((symbol-function 'require)
-               (lambda (feature &optional filename noerror)
-                 (if (eq feature 'clutch)
-                     (progn
-                       (setq required t
-                             clutch-connection-alist
-                             '(("alpha" . (:backend mysql :database "app_a"))))
-                       t)
-                   (funcall orig-require feature filename noerror))))
-              ((symbol-function 'completing-read)
-               (lambda (&rest _args) "alpha")))
-      (should (equal (clutch--read-connection-params)
-                     '(:backend mysql :database "app_a" :pass-entry "alpha")))
-      (should required))))
-
-(ert-deftest clutch-test-read-query-console-name-loads-clutch-entrypoint ()
-  "Query console reader should load `clutch' before checking saved profiles."
-  (let ((clutch-connection-alist nil)
-        required
-        (orig-featurep (symbol-function 'featurep))
-        (orig-require (symbol-function 'require)))
-    (cl-letf (((symbol-function 'featurep)
-               (lambda (feature)
-                 (if (eq feature 'clutch)
-                     nil
-                   (funcall orig-featurep feature))))
-              ((symbol-function 'require)
-               (lambda (feature &optional filename noerror)
-                 (if (eq feature 'clutch)
-                     (progn
-                       (setq required t
-                             clutch-connection-alist
-                             '(("alpha" . (:backend mysql :database "app_a"))))
-                       t)
-                   (funcall orig-require feature filename noerror))))
-              ((symbol-function 'completing-read)
-               (lambda (&rest _args) "alpha")))
-      (should (equal (clutch--read-query-console-name) "alpha"))
-      (should required))))
+(ert-deftest clutch-test-readers-load-clutch-entrypoint ()
+  "Saved-connection readers should load `clutch' before checking profiles."
+  (dolist (case `((clutch--read-connection-params
+                   (:backend mysql :database "app_a" :pass-entry "alpha"))
+                  (clutch--read-query-console-name
+                   "alpha")))
+    (pcase-let ((`(,reader ,expected) case))
+      (ert-info ((symbol-name reader))
+        (let ((clutch-connection-alist nil)
+              required
+              (orig-featurep (symbol-function 'featurep))
+              (orig-require (symbol-function 'require)))
+          (cl-letf (((symbol-function 'featurep)
+                     (lambda (feature)
+                       (if (eq feature 'clutch)
+                           nil
+                         (funcall orig-featurep feature))))
+                    ((symbol-function 'require)
+                     (lambda (feature &optional filename noerror)
+                       (if (eq feature 'clutch)
+                           (progn
+                             (setq required t
+                                   clutch-connection-alist
+                                   '(("alpha" . (:backend mysql :database "app_a"))))
+                             t)
+                         (funcall orig-require feature filename noerror))))
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _args) "alpha")))
+            (should (equal (funcall reader) expected))
+            (should required)))))))
 
 (ert-deftest clutch-test-connect-in-query-console-errors-when-saved-connection-missing ()
   "Query console reconnect should error when its saved connection no longer exists."
