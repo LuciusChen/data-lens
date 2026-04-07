@@ -25,12 +25,12 @@
 (require 'clutch-db-jdbc)
 (require 'clutch)
 
-(defvar mysql-wire-tls-verify-server)
+(defvar mysql-tls-verify-server)
 (defvar clutch-column-displayers)
 (defvar clutch--result-source-table)
 
 (declare-function make-clutch-jdbc-conn "clutch-db-jdbc" (&rest slot-value-pairs))
-(declare-function make-mysql-wire-conn "mysql-wire" (&rest args))
+(declare-function make-mysql-conn "mysql" (&rest args))
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
 
 ;;;; Test configuration
@@ -3438,9 +3438,9 @@ ROWS defaults to a small three-row sample."
 (ert-deftest clutch-test-value-to-literal-string ()
   "Test string literal conversion (requires connection)."
   (require 'clutch-db-mysql)
-  (require 'mysql-wire)
+  (require 'mysql)
   ;; String escaping requires a connection
-  (let ((clutch-connection (make-mysql-wire-conn :host "localhost")))
+  (let ((clutch-connection (make-mysql-conn :host "localhost")))
     (let ((result (clutch--value-to-literal "hello")))
       (should (stringp result))
       (should (string-prefix-p "'" result)))
@@ -3470,8 +3470,8 @@ ROWS defaults to a small three-row sample."
 (ert-deftest clutch-test-connection-key ()
   "Test connection key generation."
   (require 'clutch-db-mysql)
-  (require 'mysql-wire)
-  (let ((conn (make-mysql-wire-conn :host "localhost" :port 3306
+  (require 'mysql)
+  (let ((conn (make-mysql-conn :host "localhost" :port 3306
                                     :user "root" :database "test")))
     (let ((key (clutch--connection-key conn)))
       (should (stringp key))
@@ -8042,7 +8042,7 @@ Skips if `clutch-test-password' is nil."
   (declare (indent 1))
   `(if (null clutch-test-password)
        (ert-skip "Set clutch-test-password to enable live tests")
-     (let ((mysql-wire-tls-verify-server nil))
+     (let ((mysql-tls-verify-server nil))
        (let ((,var (clutch-db-connect
                     clutch-test-backend
                     (list :host clutch-test-host

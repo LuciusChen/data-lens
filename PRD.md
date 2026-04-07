@@ -60,7 +60,7 @@ clutch follows a **layered, interface-based architecture** with clear separation
          │             │             │                  │
          v             v             v                  v
     ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌──────────────┐
-    │mysql-wire│ │ upstream│  │ Emacs    │  │ Java 17+ JVM │
+    │mysql    │  │ upstream│  │ Emacs    │  │ Java 17+ JVM │
     │(external │ │ pg-el   │  │ 29.1+    │  │ process +    │
     │ pure     │ │ package)│  │ -in      │  │ JDBC drivers │
     │ Elisp)   │ │         │  │ sqlite-* │  │              │
@@ -78,7 +78,7 @@ clutch follows a **layered, interface-based architecture** with clear separation
 | `clutch-db-pg.el` | ~350 | PostgreSQL backend adapter, OID-to-type mapping |
 | `clutch-db-sqlite.el` | ~330 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
 | `clutch-db-jdbc.el` | ~980 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
-| External dependency: `mysql-wire` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
+| External dependency: `mysql` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
 | External dependency: `pg` | n/a | PostgreSQL client from upstream `pg-el` (separate package) |
 | Optional package: `ob-clutch` | n/a | Org-Babel integration bridge (separate package) |
 
@@ -98,7 +98,7 @@ user queries on the same JDBC session.
 
 | Backend | Emacs Version | Implementation | Notes |
 |---------|---------------|----------------|-------|
-| **MySQL** | 28.1+ | `mysql-wire` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
+| **MySQL** | 28.1+ | `mysql` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
 | **PostgreSQL** | 28.1+ | `pg` | External `pg-el` package; supports PG 12+ |
 | **SQLite** | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
 

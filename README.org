@@ -15,7 +15,7 @@ sidecar (=clutch-jdbc-agent=, Java 17+).
 - =clutch-db-jdbc.el= — JDBC backend adapter (Oracle, SQL Server, DB2, Snowflake, Redshift, and any JDBC-compatible database)
 - =clutch.el= — interactive UI layer: single-page result browser, record view, FK navigation, editing, transient menus, REPL
 - External native protocol dependencies:
-  - =mysql-wire= — pure Elisp MySQL wire protocol client
+  - =mysql= — pure Elisp MySQL wire protocol client
   - =pg= — PostgreSQL client from =pg-el=
 
 For Org-Babel integration, install the separate =ob-clutch= package.
@@ -104,13 +104,13 @@ Clone this repository and add it to your =load-path=
 (skip this if installed via a package manager):
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "/path/to/mysql-wire")
+(add-to-list 'load-path "/path/to/mysql")
 (add-to-list 'load-path "/path/to/pg-el")
 (add-to-list 'load-path "/path/to/clutch")
 (require 'clutch)
 #+end_src
 
-When installed from MELPA, =mysql-wire= and =pg= are pulled in as package
+When installed from MELPA, =mysql= and =pg= are pulled in as package
 dependencies.  For Org-Babel support, install the separate =ob-clutch=
 package.
 
@@ -1114,7 +1114,7 @@ disconnected when Emacs exits (via =kill-emacs-hook=).
 
 * Native Backend Usage
 
-For =mysql-wire=, =pg=, and SQLite connection examples, TLS notes, timeout
+For =mysql=, =pg=, and SQLite connection examples, TLS notes, timeout
 behavior, and helper APIs, see [[file:docs/native-backends.md][docs/native-backends.md]].
 
 * Testing
@@ -1133,10 +1133,10 @@ connection and timeout mapping, query-timeout clamping, transaction
 (commit/rollback/autocommit toggle), schema refresh, cursor pagination, driver
 installation (Oracle, SQL Server, Redshift), agent JAR validation and lifecycle,
 =clutch-db-live-p= identity check, RPC timeout kill, native backend adapter
-mapping (mysql-wire / pg / sqlite), and cross-backend value formatting and null
+mapping (mysql / pg / sqlite), and cross-backend value formatting and null
 handling.
 
-The pure protocol packages (=mysql-wire= and =pg=) and the Org-Babel bridge
+The pure protocol packages (=mysql= and =pg=) and the Org-Babel bridge
 (=ob-clutch=) now live in separate repositories and carry their own focused test
 suites.
 

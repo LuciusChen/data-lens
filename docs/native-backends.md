@@ -2,7 +2,7 @@
 
 `clutch` ships three non-JDBC backends that do not require a sidecar process:
 
-- `mysql-wire` — external pure Emacs Lisp MySQL wire protocol client
+- `mysql` — external pure Emacs Lisp MySQL wire protocol client
 - `pg` — external PostgreSQL client from `pg-el`
 - `clutch-db-sqlite.el` — SQLite adapter over Emacs 29.1+ built-in `sqlite-*`
 
@@ -10,7 +10,7 @@ Use this document for backend-specific connection, protocol, TLS, timeout, and
 usage notes for the native backends.  The JDBC sidecar has its own document in
 [`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).
 
-## MySQL (`mysql-wire`)
+## MySQL (`mysql`)
 
 ### Scope
 
@@ -24,19 +24,19 @@ usage notes for the native backends.  The JDBC sidecar has its own document in
 ### Connection Example
 
 ```elisp
-(require 'mysql-wire)
+(require 'mysql)
 
-(setq conn (mysql-wire-connect :host "127.0.0.1"
+(setq conn (mysql-connect :host "127.0.0.1"
                                :port 3306
                                :user "root"
                                :password "secret"
                                :database "mydb"))
 
-(let ((result (mysql-wire-query conn "SELECT * FROM users LIMIT 10")))
-  (mysql-wire-result-columns result)
-  (mysql-wire-result-rows result))
+(let ((result (mysql-query conn "SELECT * FROM users LIMIT 10")))
+  (mysql-result-columns result)
+  (mysql-result-rows result))
 
-(mysql-wire-disconnect conn)
+(mysql-disconnect conn)
 ```
 
 ### TLS
@@ -51,30 +51,30 @@ disables the automatic MySQL 8 TLS reconnect path.
 
 Relevant variables:
 
-- `mysql-wire-tls-trustfiles`
-- `mysql-wire-tls-verify-server`
-- `mysql-wire-tls-keylist`
+- `mysql-tls-trustfiles`
+- `mysql-tls-verify-server`
+- `mysql-tls-keylist`
 
 For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS
 for authentication.  For self-signed local dev certificates, either trust the
-CA or set `mysql-wire-tls-verify-server` to `nil` explicitly.
+CA or set `mysql-tls-verify-server` to `nil` explicitly.
 
 ### Convenience API
 
-- `with-mysql-wire-connection`
-- `with-mysql-wire-transaction`
-- `mysql-wire-ping`
-- `mysql-wire-escape-identifier`
-- `mysql-wire-escape-literal`
-- `mysql-wire-connect-uri`
+- `with-mysql-connection`
+- `with-mysql-transaction`
+- `mysql-ping`
+- `mysql-escape-identifier`
+- `mysql-escape-literal`
+- `mysql-connect-uri`
 
 ### Prepared Statements
 
 ```elisp
-(let ((stmt (mysql-wire-prepare conn "SELECT * FROM users WHERE id = ?")))
-  (let ((result (mysql-wire-execute stmt 42)))
-    (mysql-wire-result-rows result))
-  (mysql-wire-stmt-close stmt))
+(let ((stmt (mysql-prepare conn "SELECT * FROM users WHERE id = ?")))
+  (let ((result (mysql-execute stmt 42)))
+    (mysql-result-rows result))
+  (mysql-stmt-close stmt))
 ```
 
 ## PostgreSQL (`pg`)
