@@ -8009,7 +8009,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
 
 (ert-deftest clutch-test-object-sql-name-rejects-current-schema-placeholder ()
   "Browse SQL must never contain literal \"current_schema\" as schema qualifier.
-Reproduces the bug where `C-c C-j' on a PG table generated
+Reproduces the bug where jumping to a PG table generated
 SELECT * FROM \"current_schema\".\"orders_large\" which PostgreSQL rejects.
 The fix is in the PG backend: entries carry the real schema (e.g. \"public\"),
 so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
@@ -8023,7 +8023,7 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
       (should-not (string-match-p "current_schema" sql-name)))))
 
 (ert-deftest clutch-test-object-sql-name-never-produces-current-schema-literal ()
-  "clutch--object-sql-name must never emit the string \"current_schema\" as a schema qualifier."
+  "Ensure `clutch--object-sql-name' never emits \"current_schema\" as a schema qualifier."
   (cl-letf (((symbol-function 'clutch-db-escape-identifier)
              (lambda (_conn id) (format "\"%s\"" id))))
     ;; With a real schema name, should produce "public"."orders"
@@ -9443,6 +9443,4 @@ database.  Only a query re-execution should discard them."
              (lambda (_) nil)))
     (should-not (clutch--resolve-result-column-details
                  'dummy "SELECT 1+1" '("col1")))))
-
-(provide 'clutch-test)
 ;;; clutch-test.el ends here

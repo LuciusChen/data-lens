@@ -91,7 +91,7 @@ Each output plist has :name and :type-category."
           mysql-columns))
 
 (defun clutch-db-mysql--wrap-result (mysql-result)
-  "Convert MYSQL-WIRE-RESULT to a `clutch-db-result'."
+  "Convert MYSQL-RESULT to a `clutch-db-result'."
   (let ((cols (mysql-result-columns mysql-result)))
     (make-clutch-db-result
      :connection (mysql-result-connection mysql-result)
@@ -214,7 +214,8 @@ controls the optional sort clause."
 
 (cl-defmethod clutch-db-refresh-schema-async ((conn mysql-conn) callback
                                               &optional errback)
-  "Refresh MySQL schema names for CONN on the main thread when idle."
+  "Refresh MySQL schema names for CONN via CALLBACK on the main thread.
+Call ERRBACK if the metadata refresh fails."
   (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-list-tables))

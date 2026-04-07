@@ -493,7 +493,8 @@ ORDER BY schema_name")))
 
 (cl-defmethod clutch-db-refresh-schema-async ((conn pgcon) callback
                                               &optional errback)
-  "Refresh PostgreSQL schema names for CONN on the main thread when idle."
+  "Refresh PostgreSQL schema names for CONN via CALLBACK on the main thread.
+Call ERRBACK if the metadata refresh fails."
   (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-list-tables))

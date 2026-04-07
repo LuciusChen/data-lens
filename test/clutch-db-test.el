@@ -3164,6 +3164,4 @@ It does so without touching the agent process."
                          '((:id 42 :ok t)))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
-
-(provide 'clutch-db-test)
 ;;; clutch-db-test.el ends here
