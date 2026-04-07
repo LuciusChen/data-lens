@@ -3,7 +3,7 @@
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (mysql-wire "0.1") (pg "0.40"))
+;; Package-Requires: ((emacs "28.1") (mysql-wire "0.1") (pg "0.40") (transient "0.3.7"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 ;; This file is part of clutch.

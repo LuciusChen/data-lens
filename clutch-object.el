@@ -3,6 +3,7 @@
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1") (transient "0.3.7"))
 ;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
