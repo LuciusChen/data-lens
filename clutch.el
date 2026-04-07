@@ -64,6 +64,7 @@
 (declare-function clutch--ensure-point-visible-horizontally "clutch-ui" ())
 (declare-function clutch--ensure-table-comment-async "clutch-schema" (conn table))
 (declare-function clutch--header-line-display "clutch-ui" ())
+(declare-function clutch--refresh-footer-cursor "clutch-ui" ())
 (declare-function clutch--refresh-footer-line "clutch-ui" ())
 (declare-function clutch--refresh-header-line "clutch-ui" ())
 (declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
@@ -998,9 +999,10 @@ Set by `clutch-query-console'; used to save/restore buffer content.")
     (rename-buffer (clutch--console-buffer-name clutch--console-name clutch-connection)
                    t)))
 
-(defun clutch--refresh-current-schema (&optional quiet)
+(defun clutch--refresh-current-schema (&optional quiet force-sync)
   "Refresh schema for the current connection and report the outcome.
 When QUIET is non-nil, do not emit a minibuffer message.
+When FORCE-SYNC is non-nil, bypass any background refresh path.
 Returns non-nil on success, nil on failure."
   (clutch--ensure-connection)
   (let* ((conn clutch-connection)
@@ -1010,7 +1012,8 @@ Returns non-nil on success, nil on failure."
           (unless quiet
             (message "Schema refresh already in progress"))
           nil)
-      (if (clutch-db-eager-schema-refresh-p conn)
+      (if (or force-sync
+              (clutch-db-eager-schema-refresh-p conn))
           (let* ((ok (clutch--refresh-schema-cache conn))
                  (entry (clutch--schema-status-entry conn))
                  (tables (plist-get entry :tables))
@@ -1144,7 +1147,7 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
 Useful after DDL operations (CREATE TABLE, ALTER TABLE, DROP TABLE)
 executed outside clutch that would otherwise leave stale completions."
   (interactive)
-  (clutch--refresh-current-schema))
+  (clutch--refresh-current-schema nil t))
 
 (defun clutch--update-connection-params-for-buffers (conn update-fn)
   "Apply UPDATE-FN to buffer-local connection params for buffers attached to CONN."
@@ -2508,9 +2511,6 @@ Priority: region rows > current row."
     (define-key map "i" #'clutch-result-insert-row)
     (define-key map "I" #'clutch-clone-row-to-insert)
     (define-key map (kbd "C-c C-k") #'clutch-result-discard-pending-at-point)
-    ;; Override pixel-scroll with line-based scrolling
-    (define-key map [wheel-up] #'scroll-down-line)
-    (define-key map [wheel-down] #'scroll-up-line)
     map)
   "Keymap for `clutch-result-mode'.")
 
@@ -2548,23 +2548,37 @@ Priority: region rows > current row."
           (when ridx (clutch--position-indicator-parts ridx cidx)))))
 
 (defun clutch--update-row-highlight ()
-  "Highlight the entire row under the cursor."
-  (when clutch--row-overlay
-    (delete-overlay clutch--row-overlay)
-    (setq clutch--row-overlay nil))
-  (when (get-text-property (point) 'clutch-row-idx)
-    (let ((ov (make-overlay (line-beginning-position)
-                            (line-end-position))))
-      (overlay-put ov 'face 'hl-line)
-      (overlay-put ov 'priority -1)
-      (setq clutch--row-overlay ov))))
+  "Highlight the entire row under the cursor.
+Reuses the existing overlay via `move-overlay' when possible."
+  (let ((beg (line-beginning-position))
+        (end (line-end-position)))
+    (if (get-text-property (point) 'clutch-row-idx)
+        (if (and clutch--row-overlay (overlay-buffer clutch--row-overlay))
+            (move-overlay clutch--row-overlay beg end)
+          (when clutch--row-overlay
+            (delete-overlay clutch--row-overlay))
+          (let ((ov (make-overlay beg end)))
+            (overlay-put ov 'face 'hl-line)
+            (overlay-put ov 'priority -1)
+            (setq clutch--row-overlay ov)))
+      (when clutch--row-overlay
+        (delete-overlay clutch--row-overlay)
+        (setq clutch--row-overlay nil)))))
 
 (defun clutch--update-header-highlight ()
   "Highlight the header cell for the column under the cursor.
-Rebuilds `header-line-format' with the active column highlighted."
-  (when clutch--column-widths
+Rebuilds `header-line-format' with the active column highlighted.
+Skips work for scroll commands that do not move point."
+  (when (and clutch--column-widths
+             (not (memq this-command
+                        '(scroll-down-line scroll-up-line
+                          scroll-down scroll-up
+                          scroll-down-command scroll-up-command
+                          mwheel-scroll))))
     (clutch--update-position-indicator)
     (clutch--update-row-highlight)
+    (clutch--refresh-footer-cursor)
+    (force-mode-line-update)
     (let ((cidx (clutch--col-idx-at-point)))
       (unless (eql cidx clutch--header-active-col)
         (setq clutch--header-active-col cidx)

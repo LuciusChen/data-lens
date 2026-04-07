@@ -179,13 +179,13 @@ Relevant variables:
 ### Completion and Schema Refresh
 
 - Native backends integrate directly with clutch schema refresh and completion
-- MySQL and PostgreSQL now refresh the initial schema snapshot in the background
-  after connect/reconnect; SQLite keeps its synchronous in-process path
+- MySQL and PostgreSQL now defer the initial schema snapshot until Emacs is
+  idle after connect/reconnect; SQLite keeps its synchronous in-process path
 - Schema/database switch prompts remain synchronous, but the post-switch schema
-  snapshot refresh runs in the background
+  snapshot refresh runs as deferred idle work
 - Completion and Eldoc remain statement-scoped where possible, but native
-  MySQL/PostgreSQL hot paths are now cache-first and queue background metadata
-  preheat on cache miss instead of blocking point motion or CAPF
+  MySQL/PostgreSQL hot paths are now cache-first and schedule idle-time
+  metadata preheat on cache miss instead of blocking point motion or CAPF
 - Result buffers render first and then opportunistically enrich cached column
   details in the background; explicit detail commands still load synchronously
 - Object warmup keeps non-table categories off the first-open path and fills

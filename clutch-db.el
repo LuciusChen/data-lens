@@ -366,21 +366,6 @@ AUTO-COMMIT non-nil enables auto-commit; nil enables manual-commit.")
   "Most backends can synchronously load column metadata during completion."
   t)
 
-(cl-defgeneric clutch-db-open-metadata-context (conn params)
-  "Return a background metadata context for CONN built from PARAMS.
-Return nil when the backend does not support a separate metadata context.")
-
-(cl-defmethod clutch-db-open-metadata-context ((_conn t) _params)
-  "Backends without metadata-context support return nil."
-  nil)
-
-(cl-defgeneric clutch-db-close-metadata-context (conn context)
-  "Close background metadata CONTEXT associated with CONN.")
-
-(cl-defmethod clutch-db-close-metadata-context ((_conn t) _context)
-  "Backends without metadata-context support do nothing."
-  nil)
-
 (cl-defgeneric clutch-db-refresh-schema-async (conn callback &optional errback)
   "Start an asynchronous schema refresh for CONN.
 CALLBACK receives the table name list on success.  ERRBACK receives
@@ -413,17 +398,23 @@ started, nil when unsupported.")
   "Backends without asynchronous column-name support return nil."
   nil)
 
-(defun clutch-db--submit-metadata-call (submit-fn conn callback errback fn
-                                                  &rest args)
-  "Queue metadata FN for CONN through SUBMIT-FN.
-SUBMIT-FN accepts CONN, a worker function, CALLBACK, and optional ERRBACK.
-FN runs with the backend metadata context followed by ARGS."
-  (funcall submit-fn
-           conn
-           (lambda (context)
-             (apply fn context args))
-           callback
-           errback))
+(defun clutch-db--schedule-idle-metadata-call (conn callback errback fn
+                                                    &rest args)
+  "Schedule metadata FN for CONN on the main thread once Emacs is idle.
+CALLBACK receives the result of calling FN with CONN and ARGS.
+ERRBACK receives an error-message string when the work fails."
+  (run-with-idle-timer
+   0 nil
+   (lambda ()
+     (if (clutch-db-live-p conn)
+         (condition-case err
+             (when callback
+               (funcall callback (apply fn conn args)))
+           (error
+            (when errback
+              (funcall errback (error-message-string err)))))
+       (when errback
+         (funcall errback "Connection closed"))))))
 
 ;; Query
 

@@ -658,11 +658,11 @@ user-facing `defcustom`s.
 ### Eager vs. Async Refresh
 
 - **Eager (synchronous)**: SQLite — lightweight in-process metadata path
-- **Async (background)**: MySQL, PostgreSQL, JDBC — background refresh with ticket-based stale-response guard and timeout/failure exit
+- **Async (deferred)**: MySQL, PostgreSQL, JDBC — deferred refresh with ticket-based stale-response guard and timeout/failure exit
   - Buffer status line shows: `[schema...]` (refreshing), `[schema~]` (stale), `[schema!]` (failed), `[schema Nt]` (ready)
   - `Nt` is the size of the current schema-cache snapshot; `schema 0t` means refresh succeeded but cached zero browseable objects
-  - Native MySQL/PostgreSQL use an isolated metadata context behind the existing async callback path; JDBC keeps using the agent's metadata session
-  - When thread-backed native refresh is unavailable, clutch falls back to the previous synchronous metadata path instead of leaving the cache stale forever
+  - Native MySQL/PostgreSQL schedule passive metadata work on the main thread when Emacs is idle; JDBC keeps using the agent's metadata session
+- **Explicit manual refresh**: `clutch-refresh-schema` (`C-c C-s`) bypasses the deferred path and runs a foreground refresh so users can immediately recover from a failed lazy refresh
 
 ### Cache Invalidation
 
@@ -944,12 +944,11 @@ Current `clutch-db.el` generic surface, grouped by responsibility:
 |--------|-------------|
 | `clutch-db-eager-schema-refresh-p (conn)` | Whether connect-time schema refresh stays synchronous |
 | `clutch-db-completion-sync-columns-p (conn)` | Whether completion may still use synchronous column lookup |
-| `clutch-db-open-metadata-context (conn params)` / `clutch-db-close-metadata-context (conn context)` | Open/close an isolated metadata context for async work |
-| `clutch-db-refresh-schema-async (conn callback &optional errback)` | Refresh schema snapshot in the background |
-| `clutch-db-column-details-async (conn table callback &optional errback)` | Load detailed column metadata in the background |
-| `clutch-db-list-columns-async (conn table callback &optional errback)` | Load column names in the background |
-| `clutch-db-table-comment-async (conn table callback &optional errback)` | Load table comments in the background |
-| `clutch-db-list-objects-async (conn category callback &optional errback)` | Warm object metadata in the background |
+| `clutch-db-refresh-schema-async (conn callback &optional errback)` | Defer schema snapshot refresh until Emacs is idle |
+| `clutch-db-column-details-async (conn table callback &optional errback)` | Defer detailed column metadata load until Emacs is idle |
+| `clutch-db-list-columns-async (conn table callback &optional errback)` | Defer column-name load until Emacs is idle |
+| `clutch-db-table-comment-async (conn table callback &optional errback)` | Defer table-comment load until Emacs is idle |
+| `clutch-db-list-objects-async (conn category callback &optional errback)` | Defer object warmup until Emacs is idle |
 | `clutch-db-list-tables (conn)` / `clutch-db-list-schemas (conn)` | Enumerate tables and schemas/databases |
 | `clutch-db-current-schema (conn)` / `clutch-db-set-current-schema (conn schema)` | Read/write current schema context |
 | `clutch-db-list-table-entries (conn)` / `clutch-db-browseable-object-entries (conn)` | Return browseable table/object entries |
@@ -1064,8 +1063,8 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 
 ### Branch Features
 
-- Background metadata loading now keeps MySQL/PostgreSQL schema and object warmup
-  off the UI hot path via async metadata contexts and cache preheat.
+- Deferred metadata loading now keeps MySQL/PostgreSQL schema and object warmup
+  off the initial UI hot path via idle-time cache preheat on the main thread.
 - Result buffers support per-table/per-column displayers through
   `clutch-register-column-displayer`.
 - Result buffers can pipe the current cell through a shell command with `|`.

@@ -32,12 +32,10 @@
 
 (require 'cl-lib)
 (require 'clutch-db)
-(require 'clutch-worker)
 (require 'mysql-wire)
 
-(declare-function clutch--connection-context "clutch-connection" (conn))
-(declare-function clutch-db--submit-metadata-call "clutch-db"
-                  (submit-fn conn callback errback fn &rest args))
+(declare-function clutch-db--schedule-idle-metadata-call "clutch-db"
+                  (conn callback errback fn &rest args))
 
 ;;;; Type-category mapping
 
@@ -125,7 +123,7 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
     (condition-case err
         (apply #'mysql-wire-connect
                (cl-loop for (k v) on params by #'cddr
-                        unless (memq k '(:sql-product :backend))
+                        unless (memq k '(:sql-product :backend :pass-entry))
                         append (list k v)))
       (mysql-wire-error
        (signal 'clutch-db-error
@@ -213,72 +211,33 @@ controls the optional sort clause."
 
 ;;;; Schema methods
 
-(defun clutch-db-mysql--metadata-params (conn)
-  "Return reconnect PARAMS for MySQL metadata work on CONN."
-  (if-let* ((context (clutch--connection-context conn))
-            (params (car context)))
-      params
-    (signal 'clutch-db-error
-            (list "MySQL metadata refresh requires stored connection params"))))
-
-(defun clutch-db-mysql--submit-metadata-task (conn work-fn callback &optional errback)
-  "Run metadata WORK-FN for CONN on its reusable background context.
-WORK-FN receives the live metadata context.  CALLBACK and ERRBACK run on the
-main thread."
-  (let ((params (clutch-db-mysql--metadata-params conn)))
-    (clutch--worker-submit-contextual
-     conn
-     (lambda ()
-       (clutch-db-open-metadata-context conn params))
-     (lambda (context)
-       (clutch-db-close-metadata-context conn context))
-     work-fn
-     callback
-     errback)))
-
-(cl-defmethod clutch-db-open-metadata-context ((_conn mysql-wire-conn) params)
-  "Return a dedicated MySQL metadata context built from PARAMS."
-  (let ((context (clutch-db-mysql-connect params)))
-    (clutch-db-init-connection context)
-    context))
-
-(cl-defmethod clutch-db-close-metadata-context ((_conn mysql-wire-conn)
-                                                (context mysql-wire-conn))
-  "Close dedicated MySQL metadata CONTEXT."
-  (clutch-db-disconnect context))
-
 (cl-defmethod clutch-db-refresh-schema-async ((conn mysql-wire-conn) callback
                                               &optional errback)
-  "Refresh MySQL schema names for CONN and pass them to CALLBACK.
-Use ERRBACK for failures."
-  (clutch-db--submit-metadata-call
-   #'clutch-db-mysql--submit-metadata-task
+  "Refresh MySQL schema names for CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-list-tables))
 
 (cl-defmethod clutch-db-list-columns-async ((conn mysql-wire-conn) table callback
                                             &optional errback)
-  "Fetch MySQL column names for TABLE on CONN and pass them to CALLBACK."
-  (clutch-db--submit-metadata-call
-   #'clutch-db-mysql--submit-metadata-task
+  "Fetch MySQL column names for TABLE on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-list-columns
    table))
 
 (cl-defmethod clutch-db-column-details-async ((conn mysql-wire-conn) table callback
                                               &optional errback)
-  "Fetch MySQL column details for TABLE on CONN and pass them to CALLBACK."
-  (clutch-db--submit-metadata-call
-   #'clutch-db-mysql--submit-metadata-task
+  "Fetch MySQL column details for TABLE on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-column-details
    table))
 
 (cl-defmethod clutch-db-table-comment-async ((conn mysql-wire-conn) table callback
                                              &optional errback)
-  "Fetch the MySQL comment for TABLE on CONN and pass it to CALLBACK."
-  (clutch-db--submit-metadata-call
-   #'clutch-db-mysql--submit-metadata-task
+  "Fetch the MySQL comment for TABLE on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-table-comment
    table))
@@ -425,9 +384,8 @@ ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME")))
 
 (cl-defmethod clutch-db-list-objects-async ((conn mysql-wire-conn) category callback
                                             &optional errback)
-  "Fetch MySQL object entries for CATEGORY on CONN and pass them to CALLBACK."
-  (clutch-db--submit-metadata-call
-   #'clutch-db-mysql--submit-metadata-task
+  "Fetch MySQL object entries for CATEGORY on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-list-objects
    category))

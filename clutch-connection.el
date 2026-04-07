@@ -33,7 +33,6 @@
 ;;; Code:
 
 (require 'clutch-db)
-(require 'clutch-worker)
 (require 'clutch-schema)
 (require 'auth-source)
 (require 'cl-lib)
@@ -350,7 +349,6 @@ Returns non-nil on success, nil on failure."
     (condition-case err
         (let ((conn (clutch--build-conn params)))
           (clutch--clear-tx-dirty old-conn)
-          (clutch--worker-shutdown old-conn)
           (clutch--rebind-connection-buffers old-conn conn params product)
           (clutch--finalize-rebound-connection conn)
           (message "Reconnected to %s" (clutch--connection-key conn))
@@ -366,7 +364,6 @@ PRODUCT is the effective SQL product for the new logical session."
          (old-key (clutch--connection-key old-conn))
          (new-conn (clutch--build-conn params)))
     (clutch--clear-tx-dirty old-conn)
-    (clutch--worker-shutdown old-conn)
     (when (clutch--connection-alive-p old-conn)
       (clutch-db-disconnect old-conn))
     (unless (clutch--connection-alive-p new-conn)
@@ -601,6 +598,9 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
           (if (and clutch--executing-p spinner)
               (concat base " " (propertize spinner 'face 'success))
             base)))
+  (when (derived-mode-p 'clutch-result-mode)
+    (when (fboundp 'clutch--refresh-footer-timing)
+      (clutch--refresh-footer-timing)))
   (when (derived-mode-p 'clutch-mode 'clutch-repl-mode)
     ;; Use :eval so line-number-display-width is recomputed on each redraw,
     ;; keeping alignment correct when display-line-numbers-mode is toggled.
@@ -735,21 +735,32 @@ signaled condition."
     (setq diag (plist-put diag :context context))
     (plist-put details :diag diag)))
 
+(defun clutch--materialize-connection-params (params)
+  "Return effective connection PARAMS with resolved credentials included.
+The returned plist keeps the original backend-facing keys, but fills in the
+password that `clutch--resolve-password' produced so later reconnects reuse the
+same credentials as the successful foreground connection."
+  (let* ((backend (or (plist-get params :backend) 'mysql))
+         (params (clutch--normalize-timeout-params backend params))
+         (password (clutch--resolve-password params)))
+    (when (and (clutch--jdbc-backend-p backend)
+               (plist-get params :pass-entry)
+               (null password))
+      (user-error
+       (concat "No password resolved for JDBC connection %s (:pass-entry %s). "
+               "Enable auth-source-pass/auth-source, or set :password explicitly")
+       backend
+       (plist-get params :pass-entry)))
+    (if password
+        (plist-put (copy-sequence params) :password password)
+      params)))
+
 (defun clutch--build-conn (params)
   "Connect to a database using PARAMS, resolving the password via auth-source.
 Returns a live connection object or signals a `user-error'."
   (let* ((backend  (or (plist-get params :backend) 'mysql))
-         (params   (clutch--normalize-timeout-params backend params))
-         (password (clutch--resolve-password params))
-         (_guard
-          (when (and (clutch--jdbc-backend-p backend)
-                     (plist-get params :pass-entry)
-                     (null password))
-            (user-error
-             (concat "No password resolved for JDBC connection %s (:pass-entry %s). "
-                     "Enable auth-source-pass/auth-source, or set :password explicitly")
-             backend
-             (plist-get params :pass-entry))))
+         (params   (clutch--materialize-connection-params params))
+         (password (plist-get params :password))
          (db-params (cl-loop for (k v) on params by #'cddr
                              unless (memq k '(:sql-product :backend :password :pass-entry))
                              append (list k v)))
@@ -845,13 +856,14 @@ params; see `clutch-connection-alist' for details."
        old-conn
        "Uncommitted changes will be lost.  Disconnect? "))
     (let* ((params  (clutch--connect-params-for-current-buffer))
+           (effective-params (clutch--materialize-connection-params params))
            (product (clutch--effective-sql-product params))
            (conn    (clutch--build-conn params)))
       (when old-live-p
         (clutch--do-disconnect old-conn))
       (unless (clutch--connection-alive-p conn)
         (setq conn (clutch--build-conn params)))
-      (clutch--activate-current-buffer-connection conn params product)
+      (clutch--activate-current-buffer-connection conn effective-params product)
       (message "Connected to %s" (clutch--connection-key conn)))))
 
 ;;;###autoload
@@ -887,7 +899,6 @@ state, and disconnects the underlying connection."
   (clutch--mark-dml-results-connection-closed conn)
   (clutch--invalidate-derived-buffers conn)
   (clutch--clear-tx-dirty conn)
-  (clutch--worker-shutdown conn)
   (when clutch-debug-mode
     (clutch--remember-debug-event
      :connection conn

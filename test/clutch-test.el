@@ -32,11 +32,6 @@
 (declare-function make-clutch-jdbc-conn "clutch-db-jdbc" (&rest slot-value-pairs))
 (declare-function make-mysql-wire-conn "mysql-wire" (&rest args))
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
-(declare-function clutch--worker-supported-p "clutch-worker" ())
-(declare-function clutch--worker-submit "clutch-worker" (conn work-fn callback &optional errback))
-(declare-function clutch--worker-submit-contextual "clutch-worker"
-                  (conn open-fn close-fn work-fn callback &optional errback))
-(declare-function clutch--worker-shutdown "clutch-worker" (conn))
 
 ;;;; Test configuration
 
@@ -151,7 +146,7 @@
   (let* ((sentinel (list :driver 'oracle))
          (conn (make-clutch-jdbc-conn :params sentinel)))
     (cl-letf (((symbol-function 'plist-get)
-               (lambda (plist prop)
+               (lambda (plist prop &optional _default)
                  (if (eq plist sentinel)
                      (signal 'wrong-type-argument '(listp sentinel))
                    (let ((tail plist)
@@ -2174,131 +2169,6 @@ ROWS defaults to a small three-row sample."
             (should (string-match-p "Phase: success" text))
             (should (string-match-p "Phase: stale-drop" text))))))))
 
-(ert-deftest clutch-test-worker-submit-runs-callback ()
-  "Metadata worker should deliver callback results back to the main thread."
-  (skip-unless (clutch--worker-supported-p))
-  (let (result)
-    (unwind-protect
-        (progn
-          (should (clutch--worker-submit
-                   'fake-conn
-                   (lambda () 42)
-                   (lambda (value)
-                     (setq result value))))
-          (let ((deadline (+ (float-time) 1.0)))
-            (while (and (null result)
-                        (< (float-time) deadline))
-              (accept-process-output nil 0.01)))
-          (should (equal result 42)))
-      (clutch--worker-shutdown 'fake-conn))))
-
-(ert-deftest clutch-test-worker-submit-contextual-reuses-context-until-shutdown ()
-  "Contextual metadata workers should reuse one context across queued tasks."
-  (skip-unless (clutch--worker-supported-p))
-  (let (first-result second-result
-        (opens 0)
-        (closes 0))
-    (unwind-protect
-        (progn
-          (should
-           (clutch--worker-submit-contextual
-            'fake-conn
-            (lambda ()
-              (cl-incf opens)
-              opens)
-            (lambda (_context)
-              (cl-incf closes))
-            (lambda (context)
-              (list :context context))
-            (lambda (value)
-              (setq first-result value))))
-          (let ((deadline (+ (float-time) 1.0)))
-            (while (and (null first-result)
-                        (< (float-time) deadline))
-              (accept-process-output nil 0.01)))
-          (should (equal first-result '(:context 1)))
-          (should (= opens 1))
-          (should (= closes 0))
-          (should
-           (clutch--worker-submit-contextual
-            'fake-conn
-            (lambda ()
-              (cl-incf opens)
-              opens)
-            (lambda (_context)
-              (cl-incf closes))
-            (lambda (context)
-              (list :context context))
-            (lambda (value)
-              (setq second-result value))))
-          (let ((deadline (+ (float-time) 1.0)))
-            (while (and (null second-result)
-                        (< (float-time) deadline))
-              (accept-process-output nil 0.01)))
-          (should (equal second-result '(:context 1)))
-          (should (= opens 1))
-          (clutch--worker-shutdown 'fake-conn)
-          (let ((deadline (+ (float-time) 1.0)))
-            (while (and (= closes 0)
-                        (< (float-time) deadline))
-              (accept-process-output nil 0.01)))
-          (should (= closes 1)))
-      (clutch--worker-shutdown 'fake-conn))))
-
-(ert-deftest clutch-test-worker-submit-contextual-resets-context-after-errors ()
-  "Contextual metadata workers should reopen the context after task errors."
-  (skip-unless (clutch--worker-supported-p))
-  (let (result error-message
-        (opens 0)
-        (closes 0))
-    (unwind-protect
-        (progn
-          (should
-           (clutch--worker-submit-contextual
-            'fake-conn
-            (lambda ()
-              (cl-incf opens)
-              opens)
-            (lambda (_context)
-              (cl-incf closes))
-            (lambda (_context)
-              (error "Metadata boom"))
-            #'ignore
-            (lambda (message)
-              (setq error-message message))))
-          (let ((deadline (+ (float-time) 1.0)))
-            (while (and (null error-message)
-                        (< (float-time) deadline))
-              (accept-process-output nil 0.01)))
-          (should (string-match-p "metadata boom" error-message))
-          (should (= opens 1))
-          (should (= closes 1))
-          (should
-           (clutch--worker-submit-contextual
-            'fake-conn
-            (lambda ()
-              (cl-incf opens)
-              opens)
-            (lambda (_context)
-              (cl-incf closes))
-            (lambda (context)
-              context)
-            (lambda (value)
-              (setq result value))))
-          (let ((deadline (+ (float-time) 1.0)))
-            (while (and (null result)
-                        (< (float-time) deadline))
-              (accept-process-output nil 0.01)))
-          (should (= result 2))
-          (should (= opens 2))
-          (clutch--worker-shutdown 'fake-conn)
-          (let ((deadline (+ (float-time) 1.0)))
-            (while (and (= closes 1)
-                        (< (float-time) deadline))
-              (accept-process-output nil 0.01)))
-          (should (= closes 2)))
-      (clutch--worker-shutdown 'fake-conn))))
-
 (ert-deftest clutch-test-install-schema-cache-batches-large-refreshes ()
   "Large schema installs should be split across idle slices."
   (let ((clutch--schema-cache (make-hash-table :test 'equal))
@@ -2444,6 +2314,7 @@ ROWS defaults to a small three-row sample."
           (clutch--executing-p t)
           (clutch--spinner-timer t)
           (clutch--spinner-index 2))
+      (clutch--refresh-footer-display)
       (should (string-match-p "⠹"
                               (clutch--footer-mode-line-display))))))
 
@@ -2458,6 +2329,7 @@ ROWS defaults to a small three-row sample."
           (clutch--spinner-index 2))
       (cl-letf (((symbol-function 'clutch--format-elapsed)
                  (lambda (_seconds) "42ms")))
+        (clutch--refresh-footer-display)
         (let ((footer (substring-no-properties
                        (clutch--footer-mode-line-display))))
           (should (string-match-p "⏱ +⠹" footer))
@@ -2474,6 +2346,7 @@ ROWS defaults to a small three-row sample."
           (clutch--spinner-index 2))
       (cl-letf (((symbol-function 'clutch--format-elapsed)
                  (lambda (_seconds) "42ms")))
+        (clutch--refresh-footer-display)
         (let ((footer (substring-no-properties
                        (clutch--footer-mode-line-display))))
           (should (string-match-p "⏱ +42ms" footer))
@@ -2486,7 +2359,7 @@ ROWS defaults to a small three-row sample."
           (clutch--spinner-index 0)
           cancelled)
       (cl-letf (((symbol-function 'buffer-list)
-                 (lambda () (list (current-buffer))))
+                 (lambda (&optional _frame) (list (current-buffer))))
                 ((symbol-function 'cancel-timer)
                  (lambda (_timer) (setq cancelled t))))
         (clutch--spinner-tick)
@@ -2643,7 +2516,7 @@ ROWS defaults to a small three-row sample."
         (should (string-match-p "started in background" seen-message))))))
 
 (ert-deftest clutch-test-prime-schema-cache-falls-back-to-sync-when-async-unavailable ()
-  "Native schema priming should fall back to sync refresh without worker support."
+  "Schema priming should fall back to sync refresh when async is unavailable."
   (let (sync-called async-called)
     (cl-letf (((symbol-function 'clutch-db-eager-schema-refresh-p)
                (lambda (_conn) nil))
@@ -2690,6 +2563,43 @@ ROWS defaults to a small three-row sample."
         (should sync-called)
         (should (string-match-p (regexp-quote "Schema refreshed (2 tables)")
                                 seen-message))))))
+
+(ert-deftest clutch-test-refresh-schema-command-forces-sync-refresh-on-lazy-backends ()
+  "Explicit schema refresh should bypass background refresh for lazy backends."
+  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
+        seen-message
+        sync-called
+        async-called)
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "dev-key"))
+              ((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-eager-schema-refresh-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--refresh-schema-cache-async)
+               (lambda (_conn)
+                 (setq async-called t)
+                 t))
+              ((symbol-function 'clutch--refresh-schema-cache)
+               (lambda (_conn)
+                 (setq sync-called t)
+                 (puthash "dev-key" '(:state ready :tables 2)
+                          clutch--schema-status-cache)
+                 t))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq seen-message (apply #'format fmt args)))))
+      (with-temp-buffer
+        (setq-local clutch-connection 'fake-conn)
+        (should (clutch-refresh-schema))
+        (should sync-called)
+        (should-not async-called)
+        (should (string-match-p (regexp-quote "Schema refreshed (2 tables)")
+                                seen-message))))))
+
+(ert-deftest clutch-test-result-mode-does-not-override-mouse-wheel ()
+  "Result mode should leave mouse-wheel scrolling to Emacs defaults."
+  (should-not (lookup-key clutch-result-mode-map [wheel-up]))
+  (should-not (lookup-key clutch-result-mode-map [wheel-down])))
 
 (ert-deftest clutch-test-icon-supports-any-family ()
   "Icon helper should dispatch any nerd-icons family via nerd-icons--function-name."
@@ -3049,7 +2959,8 @@ ROWS defaults to a small three-row sample."
       (cl-letf (((symbol-function 'use-region-p) (lambda () t))
                 ((symbol-function 'clutch--col-idx-at-point) (lambda () 1))
                 ((symbol-function 'get-text-property)
-                 (lambda (_pos prop) (when (eq prop 'clutch-row-idx) 2)))
+                 (lambda (_pos prop &optional _object)
+                   (when (eq prop 'clutch-row-idx) 2)))
                 ((symbol-function 'clutch--goto-cell) (lambda (&rest _args) nil)))
         (clutch-result-down-cell)
         (should-not deactivate-mark)))))
@@ -5255,19 +5166,15 @@ ROWS defaults to a small three-row sample."
   "Clutch-disconnect should add a connection-closed notice to open DML result buffers."
   (let* ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
          (clutch-connection 'fake-conn)
-         worker-shutdown
          (buf (clutch-test--make-dml-result-buf 'fake-conn)))
     (unwind-protect
         (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_c) t))
-                  ((symbol-function 'clutch--worker-shutdown)
-                   (lambda (conn) (setq worker-shutdown conn)))
                   ((symbol-function 'clutch--confirm-disconnect-transaction-loss) #'ignore)
                   ((symbol-function 'clutch-db-disconnect) #'ignore)
                   ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
                   ((symbol-function 'clutch--update-console-buffer-name) #'ignore)
                   ((symbol-function 'clutch--update-mode-line) #'ignore))
           (clutch-disconnect)
-          (should (eq worker-shutdown 'fake-conn))
           (should (string-match-p "closed"
                                   (with-current-buffer buf
                                     (substring-no-properties header-line-format)))))
@@ -8864,11 +8771,14 @@ database.  Only a query re-execution should discard them."
                        '((:backend jdbc :database "newdb")
                          (:backend jdbc :database "newdb"))))
         (should (equal activated
-                       '(new-conn-2 (:backend jdbc :database "newdb") jdbc)))))))
+                       (list 'new-conn-2
+                             (clutch--materialize-connection-params
+                              '(:backend jdbc :database "newdb"))
+                             'jdbc)))))))
 
 (ert-deftest clutch-test-replace-connection-rebuilds-dead-conn-after-disconnect ()
   "Replacing a connection should rebuild if the first new conn dies during disconnect."
-  (let (built rebound finalized disconnected cleared worker-shutdown)
+  (let (built rebound finalized disconnected cleared)
     (cl-letf (((symbol-function 'clutch--effective-sql-product)
                (lambda (_params) 'clickhouse))
               ((symbol-function 'clutch--connection-key)
@@ -8889,8 +8799,6 @@ database.  Only a query re-execution should discard them."
                    ('new-conn-1 nil)
                    ('new-conn-2 t)
                    (_ nil))))
-              ((symbol-function 'clutch--worker-shutdown)
-               (lambda (conn) (setq worker-shutdown conn)))
               ((symbol-function 'clutch-db-disconnect)
                (lambda (conn) (setq disconnected conn)))
               ((symbol-function 'clutch--rebind-connection-buffers)
@@ -8905,7 +8813,6 @@ database.  Only a query re-execution should discard them."
       (should (equal (nreverse built)
                      '((:backend clickhouse :database "demo")
                        (:backend clickhouse :database "demo"))))
-      (should (eq worker-shutdown 'old-conn))
       (should (eq disconnected 'old-conn))
       (should (equal rebound '(new-conn-2 (:backend clickhouse :database "demo") clickhouse)))
       (should (eq finalized 'new-conn-2))
@@ -8942,6 +8849,41 @@ database.  Only a query re-execution should discard them."
         (clutch-connect)
         (should-not read-called)
         (should (equal built '(:backend mysql :database "app_a" :pass-entry "alpha")))))))
+
+(ert-deftest clutch-test-connect-stores-resolved-password-in-connection-context ()
+  "Connect should retain resolved credentials for reconnects."
+  (with-temp-buffer
+    (let ((clutch-connection-alist
+           '(("alpha" . (:backend mysql :database "app_a"))))
+          built
+          activated)
+      (setq-local clutch--console-name "alpha")
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch--resolve-password)
+                 (lambda (_params) "secret"))
+                ((symbol-function 'clutch--effective-sql-product)
+                 (lambda (_params) 'mysql))
+                ((symbol-function 'clutch--build-conn)
+                 (lambda (params)
+                   (setq built params)
+                   'new-conn))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "test-conn"))
+                ((symbol-function 'clutch--activate-current-buffer-connection)
+                 (lambda (_conn params _product)
+                   (setq activated params)
+                   nil))
+                ((symbol-function 'message) #'ignore))
+        (clutch-connect)
+        (should (equal built
+                       '(:backend mysql :database "app_a"
+                         :pass-entry "alpha")))
+        (should (equal activated
+                       (clutch--materialize-connection-params
+                        '(:backend mysql :database "app_a"
+                          :pass-entry "alpha"))))
+        ))))
 
 (ert-deftest clutch-test-read-connection-params-loads-clutch-entrypoint ()
   "Saved connection reader should load `clutch' before checking saved profiles."

@@ -33,12 +33,10 @@
 
 (require 'cl-lib)
 (require 'clutch-db)
-(require 'clutch-worker)
 (require 'pg)
 
-(declare-function clutch--connection-context "clutch-connection" (conn))
-(declare-function clutch-db--submit-metadata-call "clutch-db"
-                  (submit-fn conn callback errback fn &rest args))
+(declare-function clutch-db--schedule-idle-metadata-call "clutch-db"
+                  (conn callback errback fn &rest args))
 
 (defvar pg-connect-timeout)
 (defvar pg-read-timeout)
@@ -374,39 +372,6 @@ controls the optional sort clause."
 
 ;;;; Schema methods
 
-(defun clutch-db-pg--metadata-params (conn)
-  "Return reconnect PARAMS for PostgreSQL metadata work on CONN."
-  (if-let* ((context (clutch--connection-context conn))
-            (params (car context)))
-      params
-    (signal 'clutch-db-error
-            (list "PostgreSQL metadata refresh requires stored connection params"))))
-
-(defun clutch-db-pg--submit-metadata-task (conn work-fn callback &optional errback)
-  "Run metadata WORK-FN for CONN on its reusable background context.
-WORK-FN receives the live metadata context.  CALLBACK and ERRBACK run on the
-main thread."
-  (let ((params (clutch-db-pg--metadata-params conn)))
-    (clutch--worker-submit-contextual
-     conn
-     (lambda ()
-       (clutch-db-open-metadata-context conn params))
-     (lambda (context)
-       (clutch-db-close-metadata-context conn context))
-     work-fn
-     callback
-     errback)))
-
-(cl-defmethod clutch-db-open-metadata-context ((_conn pgcon) params)
-  "Return a dedicated PostgreSQL metadata context built from PARAMS."
-  (let ((context (clutch-db-pg-connect params)))
-    (clutch-db-init-connection context)
-    context))
-
-(cl-defmethod clutch-db-close-metadata-context ((_conn pgcon) (context pgcon))
-  "Close dedicated PostgreSQL metadata CONTEXT."
-  (clutch-db-disconnect context))
-
 (cl-defmethod clutch-db-list-schemas ((conn pgcon))
   "Return visible schema names for PostgreSQL CONN."
   (condition-case err
@@ -443,36 +408,31 @@ ORDER BY schema_name")))
 
 (cl-defmethod clutch-db-refresh-schema-async ((conn pgcon) callback
                                               &optional errback)
-  "Refresh PostgreSQL schema names for CONN and pass them to CALLBACK.
-Use ERRBACK for failures."
-  (clutch-db--submit-metadata-call
-   #'clutch-db-pg--submit-metadata-task
+  "Refresh PostgreSQL schema names for CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-list-tables))
 
 (cl-defmethod clutch-db-list-columns-async ((conn pgcon) table callback
                                             &optional errback)
-  "Fetch PostgreSQL column names for TABLE on CONN and pass them to CALLBACK."
-  (clutch-db--submit-metadata-call
-   #'clutch-db-pg--submit-metadata-task
+  "Fetch PostgreSQL column names for TABLE on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-list-columns
    table))
 
 (cl-defmethod clutch-db-column-details-async ((conn pgcon) table callback
                                               &optional errback)
-  "Fetch PostgreSQL column details for TABLE on CONN and pass them to CALLBACK."
-  (clutch-db--submit-metadata-call
-   #'clutch-db-pg--submit-metadata-task
+  "Fetch PostgreSQL column details for TABLE on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-column-details
    table))
 
 (cl-defmethod clutch-db-table-comment-async ((conn pgcon) table callback
                                              &optional errback)
-  "Fetch the PostgreSQL comment for TABLE on CONN and pass it to CALLBACK."
-  (clutch-db--submit-metadata-call
-   #'clutch-db-pg--submit-metadata-task
+  "Fetch the PostgreSQL comment for TABLE on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-table-comment
    table))
@@ -677,9 +637,8 @@ ORDER BY t.event_object_table, t.trigger_name")))
 
 (cl-defmethod clutch-db-list-objects-async ((conn pgcon) category callback
                                             &optional errback)
-  "Fetch PostgreSQL object entries for CATEGORY on CONN and pass them to CALLBACK."
-  (clutch-db--submit-metadata-call
-   #'clutch-db-pg--submit-metadata-task
+  "Fetch PostgreSQL object entries for CATEGORY on CONN when Emacs is idle."
+  (clutch-db--schedule-idle-metadata-call
    conn callback errback
    #'clutch-db-list-objects
    category))

@@ -39,6 +39,15 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "Column index currently highlighted in the header, or nil.")
 (defvar-local clutch--footer-base-string nil
   "Static portion of mode-line footer (pagination, sort, etc.).")
+(defvar-local clutch--footer-display-cache nil
+  "Cached complete footer string returned by `:eval'.
+Assembled from segment caches by `clutch--assemble-footer-display'.")
+(defvar-local clutch--footer-timing-cache nil
+  "Cached timing segment string for the footer.")
+(defvar-local clutch--footer-cursor-cache nil
+  "Cached cursor position segment string for the footer.")
+(defvar-local clutch--footer-filters-cache nil
+  "Cached filter/aggregate segment string for the footer.")
 (defvar-local clutch--header-line-string nil
   "Full header-line string before hscroll adjustment.")
 (defvar-local clutch--last-window-width nil
@@ -786,19 +795,42 @@ the page length.  TOTAL-ROWS describes the full result size when known."
                sep)))
 
 (defun clutch--footer-mode-line-display ()
-  "Return the display-ready mode-line string with dynamic cursor position."
+  "Return the cached footer string for mode-line display.
+The cache is rebuilt by `clutch--refresh-footer-display'."
+  (or clutch--footer-display-cache ""))
+
+(defun clutch--assemble-footer-display ()
+  "Assemble `clutch--footer-display-cache' from cached segments."
   (let ((badge (clutch--disconnected-badge))
         (base (or clutch--footer-base-string ""))
-        (timing (clutch--footer-timing-part))
-        (filters (clutch--footer-filter-parts))
-        (cursor (clutch--footer-cursor-part))
+        (timing clutch--footer-timing-cache)
+        (filters clutch--footer-filters-cache)
+        (cursor clutch--footer-cursor-cache)
         (sep (propertize "  •  " 'face 'font-lock-comment-face)))
-    (concat (propertize " " 'display '(space :align-to 0))
-            (when badge (concat badge sep))
-            base
-            (when timing (concat sep timing))
-            (when filters (concat sep (string-join filters sep)))
-            (when cursor (concat sep cursor)))))
+    (setq clutch--footer-display-cache
+          (concat (propertize " " 'display '(space :align-to 0))
+                  (when badge (concat badge sep))
+                  base
+                  (when timing (concat sep timing))
+                  (when filters (concat sep (string-join filters sep)))
+                  (when cursor (concat sep cursor))))))
+
+(defun clutch--refresh-footer-display ()
+  "Rebuild all footer segments and assemble the cached display string."
+  (setq clutch--footer-timing-cache (clutch--footer-timing-part)
+        clutch--footer-cursor-cache (clutch--footer-cursor-part)
+        clutch--footer-filters-cache (clutch--footer-filter-parts))
+  (clutch--assemble-footer-display))
+
+(defun clutch--refresh-footer-timing ()
+  "Rebuild only the timing segment and reassemble the footer."
+  (setq clutch--footer-timing-cache (clutch--footer-timing-part))
+  (clutch--assemble-footer-display))
+
+(defun clutch--refresh-footer-cursor ()
+  "Rebuild only the cursor segment and reassemble the footer."
+  (setq clutch--footer-cursor-cache (clutch--footer-cursor-part))
+  (clutch--assemble-footer-display))
 
 (defun clutch--effective-widths ()
   "Return column widths adjusted for header indicator icons.
@@ -1015,7 +1047,8 @@ RENDER-STATE contains render lookup tables for pending UI state."
           (clutch--render-footer
            (length rows) clutch--page-current
            clutch-result-max-rows clutch--page-total-rows))
-    (setq mode-line-format '(:eval (clutch--footer-mode-line-display)))))
+    (setq mode-line-format '(:eval (clutch--footer-mode-line-display)))
+    (clutch--refresh-footer-display)))
 
 (defun clutch--update-result-line-formats (_rows _visible-cols _widths _nw)
   "Set `mode-line-format' and `header-line-format' for the result buffer.
