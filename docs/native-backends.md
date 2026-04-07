@@ -190,8 +190,8 @@ Relevant variables:
   details in the background; explicit detail commands still load synchronously
 - Object warmup keeps non-table categories off the first-open path and fills
   them lazily during idle time
-- If Emacs lacks native thread primitives, clutch falls back to the older
-  synchronous native metadata path rather than disabling metadata loading
+- Native MySQL/PostgreSQL deferred metadata now stays on the Emacs main thread
+  via idle callbacks rather than using worker threads
 
 ### Parameterized DML
 

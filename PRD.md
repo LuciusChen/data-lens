@@ -227,6 +227,7 @@ query is still running.
 | `RET` | `clutch-result-open-record` | Open record view |
 | `TAB` / `S-TAB` | `clutch-result-next-cell` / `clutch-result-prev-cell` | Move between cells |
 | `n` / `p` | `clutch-result-down-cell` / `clutch-result-up-cell` | Move to next/previous row in same column |
+| `M-n` / `M-p` | `clutch-result-down-cell` / `clutch-result-up-cell` | Alias for next/previous row in same column |
 | `N` / `P` | `clutch-result-next-page` / `clutch-result-prev-page` | Next / previous SQL page |
 | `M-<` / `M->` | `clutch-result-first-page` / `clutch-result-last-page` | First / last SQL page |
 | `]` / `[` | `clutch-result-scroll-right` / `clutch-result-scroll-left` | Page right / left (snap to column border) |
@@ -252,7 +253,6 @@ query is still running.
 | `A` | `clutch-result-aggregate` | Aggregate numeric values |
 | `f` | `clutch-result-fullscreen-toggle` | Toggle fullscreen |
 | `C-c ?` | `clutch-result-dispatch` | Result-buffer transient menu |
-| `q` | `quit-window` | Close result buffer |
 
 **Pending SQL workflow**:
 - Result transient includes a dedicated *Pending* group:
@@ -289,6 +289,24 @@ Full-width inspection of a single row; each field occupies one or more lines.
 | `g` | `clutch-record-refresh` | Re-render the current record |
 | `C-c ?` | `clutch-record-dispatch` | Record-buffer transient menu |
 | `q` | `quit-window` | Close record buffer |
+
+---
+
+### clutch-describe-mode (Object Describe View)
+
+**Derived from**: `special-mode`
+**Buffer name pattern**: `*clutch-describe*`
+
+Read-only object describe view with shared object actions.
+
+**Keybindings**:
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `s` | `clutch-object-show-ddl-or-source` | Show object DDL or source |
+| `g` | `clutch-describe-refresh` | Refresh the current describe buffer |
+| `C-c C-d` | `clutch-describe-dwim` | Describe the object at point, or prompt |
+| `C-c C-o` | `clutch-act-dwim` | Show object actions |
 
 ---
 

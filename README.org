@@ -305,6 +305,7 @@ CAPF keys such as =TAB= / =M-TAB= inherited from Emacs.
 | =RET=          | Open record view                              |
 | =TAB= / =S-TAB= | Next cell / previous cell                   |
 | =n= / =p=     | Next row / previous row (same column)         |
+| =M-n= / =M-p= | Alias for next row / previous row             |
 | =N= / =P=     | Next page / previous page (SQL pagination)    |
 | =M->= / =M-<= | Last page / first page                       |
 | =#=            | Query total row count                         |
@@ -457,6 +458,15 @@ Typical flow:
 | =g=         | Refresh                       |
 | =q=         | Quit                          |
 | =C-c ?=     | Transient menu                |
+
+** Describe View (clutch-describe-mode) Key Bindings
+
+| Key         | Action                        |
+|-------------+-------------------------------|
+| =s=         | Show DDL / source             |
+| =g=         | Refresh describe buffer       |
+| =C-c C-d=   | Describe object at point, or prompt |
+| =C-c C-o=   | Show object actions           |
 
 ** Typical Workflows
 
