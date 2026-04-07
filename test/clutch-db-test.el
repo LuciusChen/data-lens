@@ -71,6 +71,7 @@
 (declare-function clutch-db-mysql-connect "clutch-db-mysql" (params))
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
 (declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns))
+(declare-function clutch-db-pg--wrap-result "clutch-db-pg" (result))
 (declare-function clutch-db-pg-connect "clutch-db-pg" (params))
 (declare-function clutch--jdbc-backend-p "clutch" (backend))
 (declare-function clutch--backend-display-name-from-params "clutch" (params))
@@ -1638,6 +1639,33 @@
     (should (eq (plist-get (nth 1 converted) :type-category) 'json))
     (should (equal (plist-get (nth 2 converted) :name) "created"))
     (should (eq (plist-get (nth 2 converted) :type-category) 'datetime))))
+
+(ert-deftest clutch-db-test-pg-wrap-result-normalizes-temporal-values ()
+  "PostgreSQL results should normalize upstream pg-el temporal values."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pgcon :database "test"))
+         (date (encode-time 0 0 0 1 6 2024))
+         (timestamp (encode-time 30 45 13 15 1 2024))
+         (timestamptz (encode-time 45 30 8 7 4 2026))
+         (pg-result (make-pgresult
+                     :connection conn
+                     :attributes `(("due_on" ,clutch-db-test--pg-oid-date 4)
+                                   ("starts_at" ,clutch-db-test--pg-oid-time 8)
+                                   ("opened_at" ,clutch-db-test--pg-oid-timestamp 8)
+                                   ("shipped_at" ,clutch-db-test--pg-oid-timestamptz 8))
+                     :tuples `((,date "09:10:11.250" ,timestamp ,timestamptz))))
+         (result (clutch-db-pg--wrap-result pg-result))
+         (row (car (clutch-db-result-rows result))))
+    (should (equal (nth 0 row)
+                   '(:year 2024 :month 6 :day 1)))
+    (should (equal (nth 1 row)
+                   '(:hours 9 :minutes 10 :seconds 11 :negative nil)))
+    (should (equal (nth 2 row)
+                   '(:year 2024 :month 1 :day 15
+                     :hours 13 :minutes 45 :seconds 30)))
+    (should (equal (nth 3 row)
+                   '(:year 2026 :month 4 :day 7
+                     :hours 8 :minutes 30 :seconds 45)))))
 
 ;;;; Unit tests — SQL building (paged queries)
 

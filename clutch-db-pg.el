@@ -107,13 +107,97 @@
                     :type-category (clutch-db-pg--type-category type-oid))))
           pg-columns))
 
+(defun clutch-db-pg--normalize-date-value (value)
+  "Normalize PostgreSQL DATE VALUE to clutch's date plist representation."
+  (cond
+   ((null value) nil)
+   ((and (listp value)
+         (plist-get value :year)
+         (not (plist-member value :hours)))
+    value)
+   ((and (stringp value)
+         (string-match "\\`\\([0-9]+\\)-\\([0-9][0-9]\\)-\\([0-9][0-9]\\)\\'" value))
+    (list :year (string-to-number (match-string 1 value))
+          :month (string-to-number (match-string 2 value))
+          :day (string-to-number (match-string 3 value))))
+   (t
+    (pcase-let ((`(,_seconds ,_minutes ,_hours ,day ,month ,year . ,_)
+                  (decode-time value)))
+      (list :year year
+            :month month
+            :day day)))))
+
+(defun clutch-db-pg--normalize-time-value (value)
+  "Normalize PostgreSQL TIME VALUE to clutch's time plist representation."
+  (cond
+   ((null value) nil)
+   ((and (listp value) (plist-member value :hours))
+    value)
+   ((stringp value)
+    (let* ((negative (string-prefix-p "-" value))
+           (rest (if negative (substring value 1) value))
+           (rest (replace-regexp-in-string "[+-][0-9:]+\\'" "" rest))
+           (dot-pos (string-search "." rest))
+           (time-part (if dot-pos (substring rest 0 dot-pos) rest))
+           (parts (split-string time-part ":")))
+      (pcase parts
+        (`(,hours ,minutes ,seconds)
+         (list :hours (string-to-number hours)
+               :minutes (string-to-number minutes)
+               :seconds (string-to-number seconds)
+               :negative negative))
+        (_ value))))
+   (t
+    (pcase-let ((`(,seconds ,minutes ,hours . ,_)
+                  (decode-time value)))
+      (list :hours hours
+            :minutes minutes
+            :seconds seconds
+            :negative nil)))))
+
+(defun clutch-db-pg--normalize-datetime-value (value)
+  "Normalize PostgreSQL DATETIME VALUE to clutch's datetime plist representation."
+  (cond
+   ((null value) nil)
+   ((and (listp value)
+         (plist-get value :year)
+         (plist-member value :hours))
+    value)
+   (t
+    (pcase-let ((`(,seconds ,minutes ,hours ,day ,month ,year . ,_)
+                  (decode-time value)))
+      (list :year year
+            :month month
+            :day day
+            :hours hours
+            :minutes minutes
+            :seconds seconds)))))
+
+(defun clutch-db-pg--normalize-value (value col-def)
+  "Normalize PG VALUE according to COL-DEF's clutch type category."
+  (pcase (plist-get col-def :type-category)
+    ('date (clutch-db-pg--normalize-date-value value))
+    ('time (clutch-db-pg--normalize-time-value value))
+    ('datetime (clutch-db-pg--normalize-datetime-value value))
+    (_ value)))
+
+(defun clutch-db-pg--normalize-row (row columns)
+  "Normalize PG ROW using clutch column metadata COLUMNS."
+  (cl-mapcar #'clutch-db-pg--normalize-value row columns))
+
 (defun clutch-db-pg--wrap-result (pg-result)
   "Convert PG-RESULT to a `clutch-db-result'."
-  (let ((cols (clutch-db-pg--columns pg-result)))
+  (let* ((raw-cols (clutch-db-pg--columns pg-result))
+         (cols (when raw-cols (clutch-db-pg--convert-columns raw-cols)))
+         (rows (if cols
+                   (mapcar (lambda (row)
+                             (clutch-db-pg--normalize-row row cols))
+                           (clutch-db-pg--rows pg-result))
+                 (clutch-db-pg--rows pg-result))))
     (make-clutch-db-result
      :connection (clutch-db-pg--result-connection pg-result)
-     :columns (when cols (clutch-db-pg--convert-columns cols))
-     :rows (clutch-db-pg--rows pg-result)
+     :columns cols
+     :rows rows
      :affected-rows (clutch-db-pg--affected-rows pg-result)
      :last-insert-id nil
      :warnings nil)))
