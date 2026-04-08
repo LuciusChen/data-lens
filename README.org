@@ -72,8 +72,8 @@ For backend-specific implementation notes, see
 - Console header-line shows live connection context: database-type icon + backend name, a dedicated connection-state icon before the compact connection key (=user@host=, with =:port= only when non-default), a separate namespace segment with =nf-md-sitemap_outline= + the current schema/database whenever the effective namespace is known, and =Tx: Auto= / =Tx: Manual= / =Tx: Manual*= for the current commit mode; disconnected state keeps the backend context visible and warns explicitly instead of dimming it away
 - Cache-backed schema actions also warn when the schema cache is stale, failed, or still refreshing, so completion / table prompts do not silently pretend cached metadata is current
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
-- Value viewer (=v=): auto-detects JSON (pretty-printed with =json-ts-mode=), XML (formatted via =xmllint= if available, rendered with =nxml-mode=), or BLOB (concise text/hex preview); XML/BLOB size is shown in viewer header-line (without polluting content highlighting)
-- Per-table/per-column result displayers can override cell text via =clutch-register-column-displayer= or =clutch-column-displayers= while keeping the raw cell value, value viewer (=v=), and cell face logic unchanged
+- Value viewers: =v= opens a static one-shot viewer for the current cell; =V= opens a live viewer that follows point across result / record buffers.  Both auto-detect JSON (pretty-printed with =json-ts-mode=), XML (formatted via =xmllint= if available, rendered with =nxml-mode=), or BLOB (concise text/hex preview); XML/BLOB size is shown in the viewer header-line (without polluting content highlighting)
+- Per-table/per-column result displayers can override cell text via =clutch-register-column-displayer= or =clutch-column-displayers= while keeping the raw cell value, value viewers (=v= / =V=), and cell face logic unchanged
 - REPL mode (comint-based)
 
 * Requirements
@@ -330,6 +330,7 @@ CAPF keys such as =TAB= / =M-TAB= inherited from Emacs.
 | =C-c C-p=      | Preview execution (pending batch if any; otherwise effective query) |
 | =c=            | Open copy transient menu (choose TSV / CSV / INSERT / UPDATE; toggle =-r= to refine) |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
+| =V=            | Open live value viewer (follows point; =f= freeze, =g= refresh, =q= quit) |
 | =|=            | Pipe the current cell through a shell command |
 | =e=            | Export all rows (CSV / INSERT / UPDATE copy/file) |
 | =f=            | Toggle fullscreen                             |
@@ -337,6 +338,8 @@ CAPF keys such as =TAB= / =M-TAB= inherited from Emacs.
 
 Tip: =c= supports both regular region and rectangular selection (=C-x SPC=).
 Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
+Tip: =v= keeps a static snapshot of the current cell; =V= opens =*clutch-live-view*=,
+which follows point until you press =f= to freeze it or =q= to close it.
 Tip: the result-buffer status line uses compact staged-change tokens:
 =E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts.
 When a query result is not updateable because no primary key was detected,
@@ -347,6 +350,9 @@ footer with a spinner instead of replacing the table header with the query-conso
 connection header.
 Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the
 result transient as the exact staged SQL batch.
+Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result
+queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong
+real table name.
 
 #+CAPTION: Result browser with staged edit and delete markers, compact commit/discard icons, sort state, and query timing.
 [[file:docs/screenshots/ghost-in-the-shell-result-browser.png]]
@@ -357,7 +363,7 @@ Result buffers can replace the visible text for a specific table/column pair
 without changing the raw cell value.  The displayer receives the raw Elisp
 value stored in =clutch-full-value= and may return a propertized string.  A
 =nil= return falls back to the default renderer.  Truncation, padding, cell
-faces, and the value viewer (=v=) still use the normal clutch pipeline.
+faces, and the value viewers (=v= / =V=) still use the normal clutch pipeline.
 
 #+begin_src emacs-lisp
 ;; Simple registration API
@@ -455,6 +461,7 @@ Typical flow:
 | =n= / =p=  | Next row / previous row       |
 | =I=         | Clone current record into a prefilled insert form (without PK values) |
 | =v=         | View field value (JSON / XML / BLOB preview) |
+| =V=         | Open live value viewer (follows point; =f= freeze, =g= refresh, =q= quit) |
 | =g=         | Refresh                       |
 | =q=         | Quit                          |
 | =C-c ?=     | Transient menu                |
@@ -952,6 +959,11 @@ Requires the =transient= package (built-in since Emacs 28.1).
 Press =C-c ?= to open the transient menu.  The *Objects* group contains =Jump to object=, =Describe object=, =Object actions=, and =Refresh schema=.
 
 In the result buffer, the *Edit* group in the transient menu provides the unified staged-commit workflow: =i= stages an insert, =d= stages a deletion, =C-c C-k= discards a pending change at point, and =C-c C-c= commits all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
+
+The result and record transients also expose an *Inspect* group: =v= opens the
+static cell viewer, while =V= opens the live viewer that follows point.  Once
+the live viewer is open, use =f= to freeze/unfreeze it, =g= to force a refresh,
+and =q= to close it.
 
 ** Faces
 

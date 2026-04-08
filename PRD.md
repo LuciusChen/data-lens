@@ -247,6 +247,7 @@ query is still running.
 | `c` | `clutch-result-copy-dispatch` | Copy transient (TSV / CSV / INSERT / UPDATE) |
 | `e` | `clutch-result-export` | Export all rows (CSV / INSERT / UPDATE copy/file) |
 | `v` | `clutch-result-view-value` | View current cell value |
+| `V` | `clutch-result-live-view-value` | Open the live cell viewer that follows point |
 | `|` | `clutch-result-shell-command-on-cell` | Pipe the current cell through a shell command |
 | `g` | `clutch-result-rerun` | Re-execute original query |
 | `#` | `clutch-result-count-total` | Count total rows |
@@ -286,6 +287,7 @@ Full-width inspection of a single row; each field occupies one or more lines.
 | `n` | `clutch-record-next-row` | Next row |
 | `I` | `clutch-clone-row-to-insert` | Clone current record into a prefilled insert buffer without PK values |
 | `v` | `clutch-record-view-value` | View current field value |
+| `V` | `clutch-record-live-view-value` | Open the live field viewer that follows point |
 | `g` | `clutch-record-refresh` | Re-render the current record |
 | `C-c ?` | `clutch-record-dispatch` | Record-buffer transient menu |
 | `q` | `quit-window` | Close record buffer |
@@ -432,6 +434,7 @@ on public `M-x` entry points and named commands that users may call directly.
 | `clutch-result-sort-by-column-desc` | Apply descending SQL ORDER BY for the current column |
 | `clutch-result-column-info` | Show column type/default/nullability info at point |
 | `clutch-result-view-value` | Open the value viewer for the current cell |
+| `clutch-result-live-view-value` | Open the live value viewer for the current cell |
 | `clutch-result-shell-command-on-cell` | Pipe the current cell through a shell command |
 | `clutch-result-goto-column` | Jump to a result column by name |
 | `clutch-result-scroll-right` / `clutch-result-scroll-left` | Horizontal result paging aligned to column borders |

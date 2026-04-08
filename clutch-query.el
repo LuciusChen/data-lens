@@ -298,6 +298,16 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
       (and (symbolp val)
            (string= (symbol-name val) "clutch-jdbc-json-false"))))
 
+(defun clutch--json-serialize-text (val)
+  "Return VAL serialized as normal Emacs JSON text.
+`json-serialize' returns a unibyte UTF-8 string.  Decode it back to a
+regular multibyte Emacs string so non-ASCII JSON content remains readable
+in edit/view buffers."
+  (let ((json (json-serialize val)))
+    (if (multibyte-string-p json)
+        json
+      (decode-coding-string json 'utf-8 t))))
+
 (defun clutch--json-value-to-string (val)
   "Convert VAL to valid JSON text suitable for JSON editing and viewing."
   (cond
@@ -307,8 +317,8 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
          (fboundp 'json-serialize)
          (fboundp 'json-parse-string))
     (condition-case nil
-        (json-serialize (json-parse-string val))
-      (error (json-serialize val))))
+        (clutch--json-serialize-text (json-parse-string val))
+      (error (clutch--json-serialize-text val))))
    ((clutch--json-false-value-p val)
     "false")
    ((and (fboundp 'json-serialize)
@@ -318,7 +328,8 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
              (vectorp val)
              (listp val)))
     (condition-case nil
-        (json-serialize (if (clutch--json-false-value-p val) :false val))
+        (clutch--json-serialize-text
+         (if (clutch--json-false-value-p val) :false val))
       (error (clutch--format-value val))))
    (t (clutch--format-value val))))
 

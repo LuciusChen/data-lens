@@ -462,6 +462,9 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar-local clutch--last-query nil
   "Last executed SQL query string.")
 
+(defvar-local clutch--live-view-buffer nil
+  "Live value viewer buffer attached to the current source buffer, or nil.")
+
 (defvar-local clutch--debug-events nil
   "Recent redacted debug events captured for this buffer.")
 
@@ -946,6 +949,12 @@ debug event when `clutch-debug-mode' is enabled."
 (defvar clutch-record--expanded-fields)
 (defvar clutch-record--result-buffer)
 (defvar clutch-record--row-idx)
+(defvar-local clutch--live-view-source-buffer nil
+  "Source buffer currently driving this live viewer.")
+(defvar-local clutch--live-view-frozen nil
+  "Non-nil when this live viewer is frozen in place.")
+(defvar-local clutch--live-view-source-cell-id nil
+  "Identifier for the source cell currently rendered in this viewer.")
 
 (defvar-local clutch--base-query nil
   "The original unfiltered SQL query, used by WHERE filtering.")
@@ -1279,10 +1288,15 @@ executed outside clutch that would otherwise leave stale completions."
          (col (and details
                    (cl-find col-name details
                             :key (lambda (d) (plist-get d :name))
-                            :test #'string=)))
+                            :test (lambda (needle candidate)
+                                    (string-equal (downcase needle)
+                                                  (downcase candidate))))))
+         (canonical-name (or (and col (plist-get col :name))
+                             col-name))
          (header (concat (propertize table 'face 'font-lock-type-face)
                          "."
-                         (propertize col-name 'face 'font-lock-variable-name-face))))
+                         (propertize canonical-name
+                                     'face 'font-lock-variable-name-face))))
     (unless details
       (clutch--ensure-column-details-async conn table))
     (if col
@@ -1440,7 +1454,7 @@ String literals and comments are ignored via masking."
         tables aliases)
     (while (and (< pos end)
                 (string-match
-                 "\\b\\(from\\|join\\|update\\|into\\)\\s-+\\([[:alnum:]_$#.`\"]+\\)"
+                 "\\b\\(from\\|join\\|update\\|into\\)[ \t\n\r]+\\([[:alnum:]_$#.`\"]+\\)"
                  masked pos))
       (when (< (match-beginning 0) end)
         (let* ((table-end (match-end 2))
@@ -1449,7 +1463,7 @@ String literals and comments are ignored via masking."
                (alias-consumed-end table-end))
           (setq pos table-end)
           (when (and (string-match
-                      "\\s-+\\(?:as\\s-+\\)?\\([[:alnum:]_$#`\"]+\\)"
+                      "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\([[:alnum:]_$#`\"]+\\)"
                       masked table-end)
                      (= (match-beginning 0) table-end)
                      (< (match-beginning 0) end))
@@ -1663,6 +1677,15 @@ bounded by semicolons or blank lines.  Falls back to
   (let ((cols (and schema (gethash table schema 'missing))))
     (unless (eq cols 'missing) cols)))
 
+(defun clutch--identifier-match (identifier candidates)
+  "Return canonical match for IDENTIFIER from string CANDIDATES, or nil.
+Matching is case-insensitive so unquoted SQL identifiers still resolve when
+buffer text and cached metadata differ only by case."
+  (cl-find identifier candidates
+           :test (lambda (needle candidate)
+                   (string-equal (downcase needle)
+                                 (downcase candidate)))))
+
 (defun clutch--normalize-statement-table-token (token)
   "Normalize a raw table TOKEN parsed from SQL into a bare table name.
 Handles schema-qualified names like \"HR\".\"EMPLOYEES\" or `db`.`table`."
@@ -1680,7 +1703,7 @@ Handles schema-qualified names like \"HR\".\"EMPLOYEES\" or `db`.`table`."
            found
            (pos 0))
       (while (string-match
-              "\\b\\(from\\|join\\|update\\|into\\)\\s-+\\([[:alnum:]_$#.`\"]+\\)"
+              "\\b\\(from\\|join\\|update\\|into\\)[ \t\n\r]+\\([[:alnum:]_$#.`\"]+\\)"
               masked pos)
         (setq pos (match-end 0))
         (when-let* ((tbl (clutch--normalize-statement-table-token (match-string 2 text))))
@@ -1699,6 +1722,21 @@ For input like `u.name', returns `u' when BEG starts at `name'."
          (skip-chars-backward "[:alnum:]_$#`\"")
          (point))
        (point)))))
+
+(defun clutch--qualified-identifier-table (schema beg)
+  "Return the table referenced by the qualifier before BEG, or nil.
+Resolves both statement aliases like `u.name` and direct qualified table names
+like `orders.id` within the current statement."
+  (when-let* ((qualifier (and schema
+                              (clutch--qualified-identifier-qualifier beg))))
+    (or (cdr (assoc-string qualifier
+                           (clutch--table-aliases-in-current-statement schema)
+                           t))
+        (let ((normalized (clutch--normalize-statement-table-token qualifier)))
+          (when (member normalized
+                        (or (clutch--tables-in-current-statement schema)
+                            (clutch--statement-table-identifiers)))
+            normalized)))))
 
 (defconst clutch--sql-keywords
   '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"
@@ -2152,21 +2190,13 @@ when completion triggers during an in-flight query)."
              (upcase line-before)))
            (busy (clutch-db-busy-p conn))
            (sync-columns-p (clutch-db-completion-sync-columns-p conn))
-           (statement-aliases
-            (and schema (clutch--table-aliases-in-current-statement schema)))
            (direct-table-candidates
             (when (and table-context-p
                        (>= prefix-len clutch--schema-inline-min-prefix-length))
               (clutch--safe-completion-call
                (lambda () (clutch-db-complete-tables conn prefix)))))
-           (qualified-table
-            (when qualifier
-              (or (cdr (assoc-string qualifier statement-aliases t))
-                  (let ((normalized (clutch--normalize-statement-table-token qualifier)))
-                    (when (member normalized
-                                  (or (and schema (clutch--tables-in-current-statement schema))
-                                      (clutch--statement-table-identifiers)))
-                      normalized)))))
+           (qualified-table (and qualifier
+                                 (clutch--qualified-identifier-table schema beg)))
            (context-tables
             (unless (or table-context-p busy
                         (< prefix-len clutch--schema-inline-min-prefix-length))
@@ -2215,9 +2245,11 @@ when completion triggers during an in-flight query)."
                            (not (looking-at-p "\\s-")))
                   (insert " "))))))))
 
-(defun clutch--eldoc-schema-string (conn schema sym)
+(defun clutch--eldoc-schema-string (conn schema sym &optional qualified-table)
   "Return an eldoc string for SYM via SCHEMA on CONN, or nil.
-Matches SYM as a table name first, then as a column in any visible table."
+Matches SYM as a table name first, then as a column in any visible table.
+When QUALIFIED-TABLE is non-nil, resolve field metadata against that table
+even if the current statement exceeds `clutch--schema-inline-table-limit'."
   (let ((sync-columns-p (clutch-db-completion-sync-columns-p conn)))
     (cond
      ((not (eq (gethash sym schema 'missing) 'missing))
@@ -2236,18 +2268,25 @@ Matches SYM as a table name first, then as a column in any visible table."
                 (when comment
                   (propertize (format "  — %s" comment) 'face 'shadow)))))
      ((>= (length sym) clutch--schema-inline-min-prefix-length)
-      (let ((tables (clutch--tables-in-current-statement schema)))
+      (let ((tables (or (and qualified-table (list qualified-table))
+                        (clutch--tables-in-current-statement schema))))
         (when (and tables
-                   (<= (length tables) clutch--schema-inline-table-limit))
+                   (or qualified-table
+                       (<= (length tables) clutch--schema-inline-table-limit)))
           (cl-loop for tbl in tables
-                   for cols = (if sync-columns-p
-                                  (or (clutch--cached-columns schema tbl)
-                                      (progn
-                                        (clutch--ensure-columns-async conn schema tbl)
-                                        nil))
-                                (clutch--cached-columns schema tbl))
-                   when (and cols (member sym cols))
-                   return (clutch--eldoc-column-string conn tbl sym)))))
+                   for cached-cols = (clutch--cached-columns schema tbl)
+                   for cols = (cond
+                               (cached-cols cached-cols)
+                               ((not sync-columns-p) nil)
+                               ((clutch-db-busy-p conn)
+                                (clutch--ensure-columns-async conn schema tbl)
+                                nil)
+                               (t
+                                (clutch--ensure-columns conn schema tbl)))
+                   for matched-col = (and cols
+                                          (clutch--identifier-match sym cols))
+                   when matched-col
+                   return (clutch--eldoc-column-string conn tbl matched-col)))))
      (t nil))))
 
 (defun clutch--eldoc-effective-symbol-at-point (sym schema)
@@ -2274,14 +2313,17 @@ return SYM unchanged."
 Returns a documentation string for the SQL identifier at point.
 Schema-based info (tables, columns) requires an active connection.
 SQL keyword/function docs are shown even without a connection."
-  (when-let* ((sym (thing-at-point 'symbol t)))
+  (when-let* ((bounds (bounds-of-thing-at-point 'symbol))
+              (sym (buffer-substring-no-properties (car bounds) (cdr bounds))))
     (let* ((schema (clutch--schema-for-connection))
+           (qualified-table (clutch--qualified-identifier-table
+                             schema (car bounds)))
            (effective-sym (clutch--eldoc-effective-symbol-at-point sym schema)))
     (or
-     (when-let* ((conn   clutch-connection)
+     (when-let* ((conn clutch-connection)
                  (schema schema)
                  ((not (clutch-db-busy-p conn))))
-       (clutch--eldoc-schema-string conn schema effective-sym))
+       (clutch--eldoc-schema-string conn schema effective-sym qualified-table))
      (when-let* ((conn clutch-connection)
                  ((clutch--connection-alive-p conn))
                  ((not (clutch-db-busy-p conn)))
@@ -2482,6 +2524,7 @@ Priority: region rows > current row."
     (define-key map "S" #'clutch-result-sort-by-column-desc)
     (define-key map "c" #'clutch-result-copy-dispatch)
     (define-key map "v" #'clutch-result-view-value)
+    (define-key map "V" #'clutch-result-live-view-value)
     (define-key map "|" #'clutch-result-shell-command-on-cell)
     (define-key map "?" #'clutch-result-column-info)
     (define-key map "W" #'clutch-result-apply-filter)
@@ -2607,6 +2650,9 @@ Copy:
   \\[clutch-result-copy-dispatch]	Copy… (transient: choose format, -r to refine)
   \\[clutch-result-export]	Export all rows (copy/file)
   \\[clutch-preview-execution-sql]	Preview execution
+Inspect:
+  \\[clutch-result-view-value]	View current cell once
+  \\[clutch-result-live-view-value]	Open live viewer that follows point
 Edit:
   \\[clutch-result-edit-cell]	Edit / re-edit at point
   \\[clutch-result-commit]	Commit pending changes
@@ -3433,30 +3479,96 @@ With prefix arg REFINE and an active region, enter visual refine mode."
                   (clutch-result--aggregate-target nil)))
       (clutch-result--do-aggregate (cons row-indices col-indices)))))
 
+(defun clutch--render-view-buffer (buffer val setup-fn)
+  "Render string VAL into BUFFER, then call SETUP-FN there.
+SETUP-FN is called with no args; it should activate a mode and may also
+reformat the current buffer."
+  (with-current-buffer buffer
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert val)
+      (funcall setup-fn)
+      (goto-char (point-min))
+      (setq buffer-read-only t)))
+  buffer)
+
 (defun clutch--view-in-buffer (val buf-name setup-fn)
-  "Insert string VAL into BUF-NAME, call SETUP-FN, then pop to it.
-SETUP-FN is called with no args; it should activate a mode and
-optionally reformat the buffer content."
-  (let ((buf (get-buffer-create buf-name)))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert val)
-        (funcall setup-fn)
-        (goto-char (point-min))
-        (setq buffer-read-only t)))
-    (pop-to-buffer buf)))
+  "Insert string VAL into BUF-NAME, call SETUP-FN, then pop to it."
+  (pop-to-buffer
+   (clutch--render-view-buffer (get-buffer-create buf-name) val setup-fn)))
+
+(defun clutch--setup-json-view-buffer ()
+  "Enable JSON display mode for the current buffer."
+  (condition-case nil (json-pretty-print-buffer) (error nil))
+  (cond ((fboundp 'json-ts-mode) (json-ts-mode))
+        ((fboundp 'json-mode)    (json-mode))
+        (t                       (special-mode))))
+
+(defun clutch--decode-xml-char-refs-string (text)
+  "Return TEXT with numeric XML character references decoded for display."
+  (replace-regexp-in-string
+   "&#\\(x[[:xdigit:]]+\\|X[[:xdigit:]]+\\|[[:digit:]]+\\);"
+   (lambda (ref)
+     (let* ((body (substring ref 2 -1))
+            (hex (memq (aref body 0) '(?x ?X)))
+            (code (string-to-number (if hex (substring body 1) body)
+                                    (if hex 16 10)))
+            (char (and (> code 0) (decode-char 'ucs code))))
+       (if char
+           (char-to-string char)
+         ref)))
+   text t t))
+
+(defun clutch--decode-xml-char-refs-in-buffer ()
+  "Decode numeric XML character references in the current buffer for display."
+  (let ((decoded (clutch--decode-xml-char-refs-string (buffer-string))))
+    (unless (equal decoded (buffer-string))
+      (erase-buffer)
+      (insert decoded))))
+
+(defun clutch--setup-xml-view-buffer (val &optional quiet)
+  "Pretty-print XML VAL in the current buffer and enable XML mode.
+When QUIET is non-nil, suppress informational fallback messages."
+  (if (executable-find "xmllint")
+      (let ((raw (buffer-string))
+            (err-file (make-temp-file "clutch-xmllint-")))
+        (unwind-protect
+            (unless (eq 0 (call-process-region
+                           (point-min) (point-max)
+                           "xmllint" t (list t err-file) nil "--format" "-"))
+              (erase-buffer)
+              (insert raw)
+              (unless quiet
+                (message "xmllint: %s"
+                         (string-trim (with-temp-buffer
+                                        (insert-file-contents err-file)
+                                        (buffer-string))))))
+          (delete-file err-file)))
+    (unless quiet
+      (message "xmllint not found — showing raw XML without formatting")))
+  ;; Readability matters more than preserving numeric character references in
+  ;; the transient viewer buffer; keep the raw XML value unchanged elsewhere.
+  (clutch--decode-xml-char-refs-in-buffer)
+  (cond ((fboundp 'nxml-mode) (nxml-mode))
+        ((fboundp 'xml-mode) (xml-mode))
+        (t (special-mode)))
+  (setq-local header-line-format
+              (format " XML  |  %d bytes" (string-bytes val)))
+  ;; Force fontification so XML is highlighted immediately in popup buffers.
+  (when (fboundp 'font-lock-ensure)
+    (font-lock-ensure (point-min) (point-max)))
+  (when (fboundp 'jit-lock-fontify-now)
+    (jit-lock-fontify-now (point-min) (point-max))))
+
+(defun clutch--setup-plain-view-buffer ()
+  "Enable plain text view mode for the current buffer."
+  (special-mode))
 
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
   (unless (and (stringp val) (not (string-empty-p val)))
     (user-error "No JSON value at point"))
-  (clutch--view-in-buffer val "*clutch-json*"
-    (lambda ()
-      (condition-case nil (json-pretty-print-buffer) (error nil))
-      (cond ((fboundp 'json-ts-mode) (json-ts-mode))
-            ((fboundp 'json-mode)    (json-mode))
-            (t                       (special-mode))))))
+  (clutch--view-in-buffer val "*clutch-json*" #'clutch--setup-json-view-buffer))
 
 (defun clutch--view-xml-value (val)
   "Display VAL as formatted XML in a pop-up buffer.
@@ -3464,32 +3576,7 @@ Uses xmllint for pretty-printing when available; shows a message otherwise."
   (unless (and (stringp val) (not (string-empty-p val)))
     (user-error "No XML value at point"))
   (clutch--view-in-buffer val "*clutch-xml*"
-    (lambda ()
-      (if (executable-find "xmllint")
-          (let ((raw (buffer-string))
-                (err-file (make-temp-file "clutch-xmllint-")))
-            (unwind-protect
-                (unless (eq 0 (call-process-region
-                               (point-min) (point-max)
-                               "xmllint" t (list t err-file) nil "--format" "-"))
-                  (erase-buffer)
-                  (insert raw)
-                  (message "xmllint: %s"
-                           (string-trim (with-temp-buffer
-                                          (insert-file-contents err-file)
-                                          (buffer-string)))))
-              (delete-file err-file)))
-        (message "xmllint not found — showing raw XML without formatting"))
-      (cond ((fboundp 'nxml-mode) (nxml-mode))
-            ((fboundp 'xml-mode) (xml-mode))
-            (t (special-mode)))
-      (setq-local header-line-format
-                  (format " XML  |  %d bytes" (string-bytes val)))
-      ;; Force fontification so XML is highlighted immediately in popup buffers.
-      (when (fboundp 'font-lock-ensure)
-        (font-lock-ensure (point-min) (point-max)))
-      (when (fboundp 'jit-lock-fontify-now)
-        (jit-lock-fontify-now (point-min) (point-max))))))
+    (lambda () (clutch--setup-xml-view-buffer val))))
 
 (defun clutch--blob-bytes (val)
   "Return a unibyte string for blob-like VAL."
@@ -3569,8 +3656,31 @@ Uses xmllint for pretty-printing when available; shows a message otherwise."
 (defun clutch--view-plain-value (val)
   "Display VAL as plain text in a pop-up buffer."
   (let ((s (clutch--format-value val)))
-    (clutch--view-in-buffer s "*clutch-value*"
-      (lambda () (special-mode)))))
+    (clutch--view-in-buffer s "*clutch-value*" #'clutch--setup-plain-view-buffer)))
+
+(defun clutch--view-spec (val col-def &optional quiet)
+  "Return rendering spec for VAL with column metadata COL-DEF.
+When QUIET is non-nil, suppress viewer fallback chatter where possible."
+  (let ((cat (plist-get col-def :type-category)))
+    (cond
+     ((or (eq cat 'json)
+          (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
+      (list :kind "JSON"
+            :content (if (stringp val) val
+                       (clutch--json-value-to-string val))
+            :setup #'clutch--setup-json-view-buffer))
+     ((clutch--xml-like-string-p val)
+      (list :kind "XML"
+            :content val
+            :setup (lambda () (clutch--setup-xml-view-buffer val quiet))))
+     ((eq cat 'blob)
+      (list :kind "BLOB"
+            :content (clutch--blob-view-string val)
+            :setup #'clutch--setup-plain-view-buffer))
+     (t
+      (list :kind "Value"
+            :content (clutch--format-value val)
+            :setup #'clutch--setup-plain-view-buffer)))))
 
 (defun clutch--dispatch-view (val col-def)
   "Open the appropriate viewer for VAL given column metadata COL-DEF.
@@ -3591,6 +3701,188 @@ blob type with non-text value → binary string; otherwise plain text."
      (t
       (clutch--view-plain-value val)))))
 
+(defvar clutch--live-view-follow-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map "f" #'clutch--live-view-toggle-freeze)
+    (define-key map "g" #'clutch--live-view-refresh)
+    (define-key map "q" #'clutch--live-view-quit)
+    map)
+  "Keymap for `clutch--live-view-follow-mode'.")
+
+(define-minor-mode clutch--live-view-follow-mode
+  "Minor mode for a clutch live-follow value viewer."
+  :init-value nil
+  :lighter " LiveView"
+  :keymap clutch--live-view-follow-mode-map)
+
+(defun clutch--live-view-current-context ()
+  "Return the current live-view source context, or nil when none is available."
+  (cond
+   ((derived-mode-p 'clutch-result-mode)
+    (when-let* ((ridx (get-text-property (point) 'clutch-row-idx))
+                (cidx (get-text-property (point) 'clutch-col-idx)))
+      (list :source-buffer (current-buffer)
+            :source-kind 'result
+            :cell-id (list 'result (buffer-chars-modified-tick) ridx cidx)
+            :ridx ridx
+            :cidx cidx
+            :row-count (length (or clutch--filtered-rows clutch--result-rows))
+            :table clutch--result-source-table
+            :column (nth cidx clutch--result-columns)
+            :col-def (nth cidx clutch--result-column-defs)
+            :value (get-text-property (point) 'clutch-full-value))))
+   ((derived-mode-p 'clutch-record-mode)
+    (when-let* ((result-buf clutch-record--result-buffer)
+                ((buffer-live-p result-buf))
+                (ridx (get-text-property (point) 'clutch-row-idx))
+                (cidx (get-text-property (point) 'clutch-col-idx)))
+      (list :source-buffer (current-buffer)
+            :source-kind 'record
+            :cell-id (list 'record (buffer-chars-modified-tick) ridx cidx)
+            :ridx ridx
+            :cidx cidx
+            :row-count (with-current-buffer result-buf
+                         (length clutch--result-rows))
+            :table (with-current-buffer result-buf clutch--result-source-table)
+            :column (with-current-buffer result-buf
+                      (nth cidx clutch--result-columns))
+            :col-def (with-current-buffer result-buf
+                       (nth cidx clutch--result-column-defs))
+            :value (get-text-property (point) 'clutch-full-value))))))
+
+(defun clutch--live-view-header (kind context frozen)
+  "Return live viewer header for KIND using CONTEXT and FROZEN state."
+  (let* ((table (plist-get context :table))
+         (column (or (plist-get context :column) "?"))
+         (label (if table (format "%s.%s" table column) column))
+         (ridx (plist-get context :ridx))
+         (cidx (plist-get context :cidx))
+         (row-count (or (plist-get context :row-count) 0)))
+    (format " %s | %s | %s | R%d/%d C%d | f freeze  g refresh  q quit"
+            kind
+            (if frozen "FROZEN" "FOLLOW")
+            label
+            (1+ ridx)
+            row-count
+            (1+ cidx))))
+
+(defun clutch--live-view-detach-source (source-buf &optional viewer-buf)
+  "Detach live viewer state from SOURCE-BUF.
+When VIEWER-BUF is non-nil, only detach if SOURCE-BUF points at VIEWER-BUF."
+  (when (buffer-live-p source-buf)
+    (with-current-buffer source-buf
+      (when (or (null viewer-buf)
+                (eq clutch--live-view-buffer viewer-buf))
+        (setq-local clutch--live-view-buffer nil)
+        (remove-hook 'post-command-hook #'clutch--live-view-source-post-command t)
+        (remove-hook 'kill-buffer-hook #'clutch--live-view-source-killed t)
+        (remove-hook 'change-major-mode-hook #'clutch--live-view-source-killed t)))))
+
+(defun clutch--live-view-buffer-killed ()
+  "Clean up source-buffer hooks when the live viewer is killed."
+  (let ((viewer (current-buffer))
+        (source clutch--live-view-source-buffer))
+    (setq-local clutch--live-view-source-buffer nil)
+    (clutch--live-view-detach-source source viewer)))
+
+(defun clutch--live-view-source-killed ()
+  "Dispose of any live viewer attached to the current source buffer."
+  (when (buffer-live-p clutch--live-view-buffer)
+    (let ((viewer clutch--live-view-buffer))
+      (setq-local clutch--live-view-buffer nil)
+      (when (buffer-live-p viewer)
+        (with-current-buffer viewer
+          (setq-local clutch--live-view-source-buffer nil))
+        (kill-buffer viewer))))
+  (remove-hook 'post-command-hook #'clutch--live-view-source-post-command t)
+  (remove-hook 'kill-buffer-hook #'clutch--live-view-source-killed t)
+  (remove-hook 'change-major-mode-hook #'clutch--live-view-source-killed t))
+
+(defun clutch--render-live-view (viewer-buf context &optional force)
+  "Render CONTEXT into VIEWER-BUF.
+When FORCE is non-nil, refresh even if the source cell has not changed."
+  (with-current-buffer viewer-buf
+    (let ((frozen clutch--live-view-frozen)
+          (source (plist-get context :source-buffer))
+          (cell-id (plist-get context :cell-id)))
+      (unless (and (not force)
+                   (equal cell-id clutch--live-view-source-cell-id))
+        (pcase-let* ((`(:kind ,kind :content ,content :setup ,setup)
+                      (clutch--view-spec (plist-get context :value)
+                                         (plist-get context :col-def)
+                                         t)))
+          (clutch--render-view-buffer viewer-buf content setup)
+          (setq-local clutch--live-view-source-buffer source)
+          (setq-local clutch--live-view-source-cell-id cell-id)
+          (setq-local clutch--live-view-frozen frozen)
+          (setq-local header-line-format
+                      (clutch--live-view-header kind context frozen))
+          (clutch--live-view-follow-mode 1))))))
+
+(defun clutch--live-view-source-post-command ()
+  "Refresh the attached live viewer after point moves in a source buffer."
+  (if (not (buffer-live-p clutch--live-view-buffer))
+      (clutch--live-view-detach-source (current-buffer))
+    (let ((viewer clutch--live-view-buffer)
+          (context (clutch--live-view-current-context)))
+      (with-current-buffer viewer
+        (unless clutch--live-view-frozen
+          (when context
+            (clutch--render-live-view viewer context)))))))
+
+(defun clutch--live-view-refresh ()
+  "Refresh the current clutch live viewer from its source point."
+  (interactive)
+  (unless (buffer-live-p clutch--live-view-source-buffer)
+    (user-error "Live viewer source buffer is no longer available"))
+  (when-let* ((context (with-current-buffer clutch--live-view-source-buffer
+                         (clutch--live-view-current-context))))
+    (clutch--render-live-view (current-buffer) context t)
+    (message "Live viewer refreshed")))
+
+(defun clutch--live-view-toggle-freeze ()
+  "Toggle whether the live viewer follows source-buffer point changes."
+  (interactive)
+  (setq-local clutch--live-view-frozen (not clutch--live-view-frozen))
+  (setq-local header-line-format
+              (replace-regexp-in-string
+               (if clutch--live-view-frozen "FOLLOW" "FROZEN")
+               (if clutch--live-view-frozen "FROZEN" "FOLLOW")
+               (format "%s" header-line-format)
+               t t))
+  (unless clutch--live-view-frozen
+    (clutch--live-view-refresh))
+  (message "Live viewer %s"
+           (if clutch--live-view-frozen "frozen" "following point")))
+
+(defun clutch--live-view-quit ()
+  "Close the current clutch live viewer."
+  (interactive)
+  (kill-buffer (current-buffer)))
+
+(defun clutch--open-live-view ()
+  "Open or refresh a live-follow viewer for the current clutch cell."
+  (let* ((source (current-buffer))
+         (context (or (clutch--live-view-current-context)
+                      (user-error "No cell at point")))
+         (viewer (get-buffer-create "*clutch-live-view*")))
+    (with-current-buffer viewer
+      (when (and (buffer-live-p clutch--live-view-source-buffer)
+                 (not (eq clutch--live-view-source-buffer source)))
+        (clutch--live-view-detach-source clutch--live-view-source-buffer viewer))
+      (add-hook 'kill-buffer-hook #'clutch--live-view-buffer-killed nil t))
+    (setq-local clutch--live-view-buffer viewer)
+    (add-hook 'post-command-hook #'clutch--live-view-source-post-command nil t)
+    (add-hook 'kill-buffer-hook #'clutch--live-view-source-killed nil t)
+    (add-hook 'change-major-mode-hook #'clutch--live-view-source-killed nil t)
+    (with-current-buffer viewer
+      (setq-local clutch--live-view-frozen nil)
+      (setq-local clutch--live-view-source-buffer source))
+    (clutch--render-live-view viewer context t)
+    (display-buffer viewer '(display-buffer-at-bottom . ((window-height . 0.33))))
+    viewer))
+
 ;;;###autoload
 (defun clutch-result-view-value ()
   "Display the cell value at point in an appropriate pop-up buffer.
@@ -3599,6 +3891,12 @@ Selects JSON, XML, or binary string view based on column type and content."
   (pcase-let ((`(,_ridx ,cidx ,val) (or (clutch-result--cell-at-point)
                                          (user-error "No cell at point"))))
     (clutch--dispatch-view val (nth cidx clutch--result-column-defs))))
+
+;;;###autoload
+(defun clutch-result-live-view-value ()
+  "Open a live-follow viewer for the result cell at point."
+  (interactive)
+  (clutch--open-live-view))
 
 ;;;###autoload
 (defun clutch-result-shell-command-on-cell (command)
@@ -3631,6 +3929,59 @@ Selects JSON, XML, or binary string view based on column type and content."
                              (clutch-db-escape-identifier conn table)
                              cols
                              (mapconcat #'clutch--value-to-literal vals ", ")))))
+
+(defconst clutch--insert-placeholder-table "MY_TABLE"
+  "Placeholder target table used for ambiguous INSERT copy/export output.")
+
+(defun clutch--next-top-level-clause-position (sql start patterns)
+  "Return earliest top-level clause match in SQL after START for PATTERNS.
+PATTERNS is a list of case-insensitive regex fragments passed to
+`clutch-db-sql-find-top-level-clause'.  Return nil when none are found."
+  (car (sort (delq nil
+                   (mapcar (lambda (pattern)
+                             (clutch-db-sql-find-top-level-clause sql pattern start))
+                           patterns))
+             #'<)))
+
+(defun clutch--simple-insert-source-table (&optional sql)
+  "Return the source table for simple single-table INSERT output, or nil.
+SQL defaults to the current result query.  Joined, derived, UNION, and
+other ambiguous result queries return nil so INSERT copy/export can fall
+back to a placeholder table name instead of inventing a wrong target."
+  (let* ((sql (or sql clutch--last-query))
+         (normalized (and sql
+                          (string-trim-right
+                           (replace-regexp-in-string ";\\s-*\\'" "" sql)))))
+    (when normalized
+      (let* ((case-fold-search t)
+             (masked (clutch-db-sql-mask-literal-or-comment normalized))
+             (from-pos (clutch-db-sql-find-top-level-clause masked "FROM")))
+        (when (and from-pos
+                   (not (clutch-db-sql-find-top-level-clause masked "JOIN"))
+                   (not (clutch-db-sql-find-top-level-clause
+                         masked "UNION\\b\\(?:\\s-+ALL\\b\\)?"))
+                   (not (clutch-db-sql-find-top-level-clause masked "INTERSECT"))
+                   (not (clutch-db-sql-find-top-level-clause masked "EXCEPT"))
+                   (string-match "\\bFROM\\b" masked from-pos))
+          (let* ((from-body-start (match-end 0))
+                 (from-body-end
+                  (or (clutch--next-top-level-clause-position
+                       masked from-body-start
+                       '("WHERE" "GROUP\\s-+BY" "HAVING" "ORDER\\s-+BY"
+                         "LIMIT" "OFFSET" "FETCH" "FOR"))
+                      (length masked)))
+                 (from-body (string-trim
+                             (substring masked from-body-start from-body-end))))
+            (when (and (not (string-prefix-p "(" from-body))
+                       (not (string-match-p "," from-body)))
+              (clutch-result--table-from-sql normalized))))))))
+
+(defun clutch--insert-target-table ()
+  "Return a safe target table name for INSERT copy/export.
+Simple single-table result sets use the detected table name.  Ambiguous
+results use `clutch--insert-placeholder-table' instead."
+  (or (clutch--simple-insert-source-table)
+      clutch--insert-placeholder-table))
 
 (defun clutch-result--selected-update-col-indices (pk-indices col-indices op)
   "Return non-PK update column indices from COL-INDICES for OP.
@@ -3697,7 +4048,7 @@ Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
          (col-indices (or (cdr-safe rect)
                           (cl-loop for i below (length clutch--result-columns)
                                    collect i)))
-         (table (clutch--result-source-table-or-user-error "Copy INSERT SQL"))
+         (table (clutch--insert-target-table))
          (stmts (clutch-result--build-insert-statements indices col-indices table)))
     (kill-new (mapconcat #'identity stmts "\n"))
     (deactivate-mark)
@@ -3960,8 +4311,7 @@ Report success with MESSAGE-FMT and MESSAGE-ARGS."
 
 (defun clutch--insert-content (rows)
   "Return INSERT statement text for ROWS using current result metadata."
-  (let* ((table (or (clutch-result--detect-table)
-                    (user-error "Cannot detect source table for INSERT export")))
+  (let* ((table (clutch--insert-target-table))
          (col-indices (cl-loop for i below (length clutch--result-columns) collect i))
          (stmts (clutch-result--build-insert-statements
                  (cl-loop for i below (length rows) collect i)
@@ -4179,6 +4529,7 @@ previous window layout."
     (define-key map "n" #'clutch-record-next-row)
     (define-key map "p" #'clutch-record-prev-row)
     (define-key map "v" #'clutch-record-view-value)
+    (define-key map "V" #'clutch-record-live-view-value)
     (define-key map "I" #'clutch-clone-row-to-insert)
     (define-key map "q" #'quit-window)
     (define-key map "g" #'clutch-record-refresh)
@@ -4193,6 +4544,8 @@ previous window layout."
   \\[clutch-record-toggle-expand]	Expand/collapse field or follow FK
   \\[clutch-record-next-row]	Next row
   \\[clutch-record-prev-row]	Previous row
+  \\[clutch-record-view-value]	View current field once
+  \\[clutch-record-live-view-value]	Open live viewer that follows point
   \\[clutch-record-refresh]	Refresh"
   (setq truncate-lines nil))
 
@@ -4355,6 +4708,12 @@ Selects JSON, XML, or binary string view based on column type and content."
                     (with-current-buffer clutch-record--result-buffer
                       (nth cidx clutch--result-column-defs)))))
     (clutch--dispatch-view val col-def)))
+
+;;;###autoload
+(defun clutch-record-live-view-value ()
+  "Open a live-follow viewer for the record field at point."
+  (interactive)
+  (clutch--open-live-view))
 
 ;;;###autoload
 (defun clutch-record-refresh ()
@@ -4566,9 +4925,12 @@ Accumulates input until a semicolon is found, then executes."
     ("-" "Narrow column"     clutch-result-narrow-column)
     ("f" "Fullscreen"        clutch-result-fullscreen-toggle)]]
   [ :pad-keys t
+   ["Inspect"
+    ("v" "View value" clutch-result-view-value)
+    ("V" "Live view (follow point)" clutch-result-live-view-value)]
    ["Copy / Export (region/rect: C-x SPC)"
     ("c" "Copy… (-r to refine rows/cols)" clutch-result-copy-dispatch)
-    ("e" "Export"                         clutch-result-export)]])
+    ("e" "Export" clutch-result-export)]])
 
 (transient-define-prefix clutch-record-dispatch ()
   "Dispatch menu for clutch record buffer."
@@ -4577,9 +4939,11 @@ Accumulates input until a semicolon is found, then executes."
     ("n" "Next row"     clutch-record-next-row)
     ("p" "Prev row"     clutch-record-prev-row)
     ("RET" "Expand/FK"  clutch-record-toggle-expand)]
+   ["Inspect"
+    ("v" "View value" clutch-record-view-value)
+    ("V" "Live view (follow point)" clutch-record-live-view-value)]
    ["Other"
     ("I" "Clone row → insert" clutch-clone-row-to-insert)
-    ("v" "View value" clutch-record-view-value)
     ("g" "Refresh" clutch-record-refresh)
     ("q" "Quit"    quit-window)]])
 

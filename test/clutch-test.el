@@ -129,6 +129,15 @@
     (puthash "a" 1 obj)
     (should (equal (clutch--json-value-to-string obj) "{\"a\":1}"))))
 
+(ert-deftest clutch-test-json-value-to-string-hash-table-preserves-unicode ()
+  "Parsed JSON objects should keep readable Unicode text."
+  (let ((obj (make-hash-table :test 'equal)))
+    (puthash "quote" "记忆碎片已封存" obj)
+    (puthash "operator" "Saito" obj)
+    (puthash "thermoptic" :false obj)
+    (should (equal (clutch--json-value-to-string obj)
+                   "{\"quote\":\"记忆碎片已封存\",\"operator\":\"Saito\",\"thermoptic\":false}"))))
+
 (ert-deftest clutch-test-json-value-to-string-scalars ()
   "JSON scalar values should remain valid JSON when edited or viewed."
   (should (equal (clutch--json-value-to-string "hello") "\"hello\""))
@@ -287,6 +296,13 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
   (should-not (clutch--xml-like-string-p "<abc"))
   (should-not (clutch--xml-like-string-p "just <text> marker")))
 
+(ert-deftest clutch-test-decode-xml-char-refs-string ()
+  "XML viewer helper should decode numeric character references."
+  (should (equal
+           (clutch--decode-xml-char-refs-string
+            "<zone>&#x6E7E;&#x5CB8;</zone><operator>&#25998;&#34276;</operator>")
+           "<zone>湾岸</zone><operator>斎藤</operator>")))
+
 (ert-deftest clutch-test-view-xml-value-enables-fontification ()
   "XML viewer should invoke fontification and show byte size in header."
   (let ((fontified nil)
@@ -306,6 +322,143 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
       (with-current-buffer buf
         (should (string-match-p "XML" (format "%s" header-line-format)))
         (should (string-match-p "bytes" (format "%s" header-line-format)))))))
+
+(ert-deftest clutch-test-view-xml-value-decodes-numeric-char-refs-for-display ()
+  "XML viewer should display numeric character references as UTF-8 text."
+  (let ((buf nil))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_cmd) nil))
+              ((symbol-function 'nxml-mode) (lambda () nil))
+              ((symbol-function 'font-lock-ensure) (lambda (&rest _args) nil))
+              ((symbol-function 'jit-lock-fontify-now) (lambda (&rest _args) nil))
+              ((symbol-function 'pop-to-buffer)
+               (lambda (b &rest _args)
+                 (setq buf b)
+                 b)))
+      (clutch--view-xml-value
+       "<?xml version=\"1.0\"?><overlay><zone>&#x6E7E;&#x5CB8;&#x30B1;&#x30FC;&#x30D6;&#x30EB;&#x7DB2;</zone><operator>&#x658E;&#x85E4;</operator></overlay>")
+      (with-current-buffer buf
+        (let ((text (buffer-string)))
+          (should (string-match-p "湾岸ケーブル網" text))
+          (should (string-match-p "斎藤" text))
+          (should-not (string-match-p "&#x6E7E;" text)))))))
+
+(defun clutch-test--prepare-live-view-source (buffer)
+  "Populate BUFFER as a simple result grid for live-view tests."
+  (with-current-buffer buffer
+    (clutch-result-mode)
+    (setq-local clutch--result-source-table "cases")
+    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--result-column-defs
+                '((:name "id" :type-category numeric)
+                  (:name "name" :type-category text)))
+    (setq-local clutch--result-rows '((1 "alice") (2 "bob")))
+    (setq-local clutch--filtered-rows nil)
+    (setq-local clutch--pending-edits nil)
+    (setq-local clutch--pending-deletes nil)
+    (setq-local clutch--pending-inserts nil)
+    (setq-local clutch--marked-rows nil)
+    (setq-local clutch--sort-column nil)
+    (setq-local clutch--sort-descending nil)
+    (setq-local clutch--page-current 0)
+    (setq-local clutch--page-total-rows 2)
+    (setq-local clutch--column-widths [2 5])
+    (clutch--refresh-display)
+    (goto-char (point-min))
+    (when-let* ((match (text-property-search-forward 'clutch-col-idx 1 #'eq)))
+      (goto-char (prop-match-beginning match)))))
+
+(ert-deftest clutch-test-live-view-bindings-are-exposed ()
+  "Result and record workflows should expose the live viewer explicitly."
+  (should (eq (lookup-key clutch-result-mode-map "V")
+              #'clutch-result-live-view-value))
+  (should (eq (lookup-key clutch-record-mode-map "V")
+              #'clutch-record-live-view-value))
+  (should (eq (plist-get (cdr (transient-get-suffix 'clutch-result-dispatch "V"))
+                         :command)
+              'clutch-result-live-view-value))
+  (should (eq (plist-get (cdr (transient-get-suffix 'clutch-record-dispatch "V"))
+                         :command)
+              'clutch-record-live-view-value)))
+
+(ert-deftest clutch-test-live-view-follows-result-point ()
+  "Live viewer should refresh as point moves across result cells."
+  (let ((source (generate-new-buffer " *clutch-live-source*"))
+        viewer)
+    (unwind-protect
+        (progn
+          (clutch-test--prepare-live-view-source source)
+          (with-current-buffer source
+            (cl-letf (((symbol-function 'display-buffer)
+                       (lambda (buf &rest _args)
+                         (setq viewer buf)
+                         buf)))
+              (clutch-result-live-view-value)
+              (should (buffer-live-p viewer))
+              (with-current-buffer viewer
+                (should (string-match-p "alice" (buffer-string))))
+              (clutch-result-down-cell)
+              (run-hooks 'post-command-hook)
+              (with-current-buffer viewer
+                (should (string-match-p "bob" (buffer-string)))))))
+      (when (buffer-live-p viewer)
+        (kill-buffer viewer))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
+
+(ert-deftest clutch-test-live-view-freeze-stops-following ()
+  "Frozen live viewer should ignore subsequent source point changes."
+  (let ((source (generate-new-buffer " *clutch-live-freeze*"))
+        viewer)
+    (unwind-protect
+        (progn
+          (clutch-test--prepare-live-view-source source)
+          (with-current-buffer source
+            (cl-letf (((symbol-function 'display-buffer)
+                       (lambda (buf &rest _args)
+                         (setq viewer buf)
+                         buf)))
+              (clutch-result-live-view-value)))
+          (with-current-buffer viewer
+            (clutch--live-view-toggle-freeze))
+          (with-current-buffer source
+            (clutch-result-down-cell)
+            (run-hooks 'post-command-hook))
+          (with-current-buffer viewer
+            (should (string-match-p "alice" (buffer-string)))
+            (clutch--live-view-toggle-freeze)
+            (should (string-match-p "bob" (buffer-string)))))
+      (when (buffer-live-p viewer)
+        (kill-buffer viewer))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
+
+(ert-deftest clutch-test-live-view-quit-detaches-source-hooks ()
+  "Closing the live viewer should detach it from the source buffer."
+  (let ((source (generate-new-buffer " *clutch-live-quit*"))
+        viewer)
+    (unwind-protect
+        (progn
+          (clutch-test--prepare-live-view-source source)
+          (with-current-buffer source
+            (cl-letf (((symbol-function 'display-buffer)
+                       (lambda (buf &rest _args)
+                         (setq viewer buf)
+                         buf)))
+              (clutch-result-live-view-value)
+              (should (eq clutch--live-view-buffer viewer))
+              (should (memq #'clutch--live-view-source-post-command
+                            post-command-hook))))
+          (with-current-buffer viewer
+            (clutch--live-view-quit))
+          (should-not (buffer-live-p viewer))
+          (with-current-buffer source
+            (should-not clutch--live-view-buffer)
+            (should-not (memq #'clutch--live-view-source-post-command
+                              post-command-hook))))
+      (when (buffer-live-p viewer)
+        (kill-buffer viewer))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
 
 ;;;; Unit tests — column name extraction
 
@@ -2673,8 +2826,9 @@ ROWS defaults to a small three-row sample."
   "INSERT export content should reuse the existing INSERT builder for all rows."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
-                clutch--result-columns '("id" "name"))
-    (cl-letf (((symbol-function 'clutch-result--detect-table)
+                clutch--result-columns '("id" "name")
+                clutch--last-query "SELECT id, name FROM users")
+    (cl-letf (((symbol-function 'clutch--simple-insert-source-table)
                (lambda () "users"))
               ((symbol-function 'clutch-result--build-insert-statements)
                (lambda (indices col-indices table)
@@ -2705,20 +2859,51 @@ ROWS defaults to a small three-row sample."
                       "UPDATE users SET name = 'a' WHERE id = 1\n"
                       "UPDATE users SET name = 'b' WHERE id = 2\n"))))))
 
-(ert-deftest clutch-test-copy-rows-as-insert-errors-when-source-table-is-unknown ()
-  "INSERT copy should fail clearly when the source table cannot be detected."
+(ert-deftest clutch-test-simple-insert-source-table-rejects-joined-query ()
+  "Joined result queries should not pretend one table is the INSERT target."
+  (with-temp-buffer
+    (setq-local clutch--last-query
+                "SELECT u.id, p.title FROM users u JOIN posts p ON p.user_id = u.id")
+    (should-not (clutch--simple-insert-source-table))
+    (should (equal (clutch--insert-target-table) "MY_TABLE"))))
+
+(ert-deftest clutch-test-copy-rows-as-insert-uses-placeholder-for-ambiguous-source ()
+  "INSERT copy should use a placeholder table for ambiguous result queries."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
                 clutch--result-columns '("id")
-                clutch--result-rows '((1)))
+                clutch--result-rows '((1))
+                clutch--last-query
+                "SELECT u.id FROM users u JOIN posts p ON p.user_id = u.id")
     (cl-letf (((symbol-function 'clutch-result--cell-at-point)
                (lambda () (list 0 0 1)))
-              ((symbol-function 'clutch-result--detect-table)
-               (lambda () nil)))
-      (let ((err (should-error (clutch-result--copy-rows-as-insert) :type 'user-error)))
-        (should (string-match-p
-                 "Cannot copy INSERT SQL: source table cannot be detected"
-                 (error-message-string err)))))))
+              ((symbol-function 'clutch-result--build-insert-statements)
+               (lambda (indices col-indices table)
+                 (should (equal indices '(0)))
+                 (should (equal col-indices '(0)))
+                 (should (equal table "MY_TABLE"))
+                 '("INSERT INTO MY_TABLE (id) VALUES (1);"))))
+      (clutch-result--copy-rows-as-insert)
+      (should (equal (current-kill 0) "INSERT INTO MY_TABLE (id) VALUES (1);")))))
+
+(ert-deftest clutch-test-insert-content-uses-placeholder-for-ambiguous-source ()
+  "INSERT export content should use `MY_TABLE' for ambiguous result queries."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-columns '("id" "name")
+                clutch--last-query
+                "SELECT u.id, p.name FROM users u JOIN posts p ON p.user_id = u.id")
+    (cl-letf (((symbol-function 'clutch-result--build-insert-statements)
+               (lambda (indices col-indices table)
+                 (should (equal indices '(0 1)))
+                 (should (equal col-indices '(0 1)))
+                 (should (equal table "MY_TABLE"))
+                 '("INSERT INTO MY_TABLE (id, name) VALUES (1, 'a');"
+                   "INSERT INTO MY_TABLE (id, name) VALUES (2, 'b');"))))
+      (should (equal (clutch--insert-content '((1 "a") (2 "b")))
+                     (concat
+                      "INSERT INTO MY_TABLE (id, name) VALUES (1, 'a');\n"
+                      "INSERT INTO MY_TABLE (id, name) VALUES (2, 'b');\n"))))))
 
 (ert-deftest clutch-test-copy-update-with-region-uses-region-rectangle ()
   "UPDATE copy should use rectangle row/column selection when a region is active."
@@ -3085,11 +3270,11 @@ ROWS defaults to a small three-row sample."
       (setq-local clutch-connection 'fake-conn)
       (setq-local clutch--result-columns '("id" "name" "age"))
       (setq-local clutch--result-rows '((1 "a" 10) (2 "b" 20)))
-        (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
                 ((symbol-function 'clutch-result--region-rectangle-indices)
                  (lambda () '((0 1) 0 1)))
-                ((symbol-function 'clutch-result--detect-table)
-                 (lambda () "t"))
+                ((symbol-function 'clutch--simple-insert-source-table)
+                 (lambda (&optional _sql) "t"))
                 ((symbol-function 'clutch-db-escape-identifier)
                  (lambda (_conn s) (format "\"%s\"" s)))
                 ((symbol-function 'clutch--value-to-literal)
@@ -3110,8 +3295,8 @@ ROWS defaults to a small three-row sample."
       (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
                 ((symbol-function 'clutch-result--cell-at-point)
                  (lambda () '(0 1 "a")))
-                ((symbol-function 'clutch-result--detect-table)
-                 (lambda () "t"))
+                ((symbol-function 'clutch--simple-insert-source-table)
+                 (lambda (&optional _sql) "t"))
                 ((symbol-function 'clutch-db-escape-identifier)
                  (lambda (_conn s) (format "\"%s\"" s)))
                 ((symbol-function 'clutch--value-to-literal)
@@ -5746,6 +5931,31 @@ It should retain duplicates for callers that deduplicate later."
     (should (equal (car result) '("users")))
     (should-not (cdr result))))
 
+(ert-deftest clutch-test-extract-tables-and-aliases-handles-multiline-from-clause ()
+  "Table extraction should survive multiline FROM clauses with indentation."
+  (with-temp-buffer
+    (clutch-mode)
+    (let* ((sql "SELECT
+    case_code
+FROM
+    section9_cases_wide
+ORDER BY id")
+           (result (clutch--extract-tables-and-aliases sql 0 (length sql))))
+      (should (equal (car result) '("section9_cases_wide")))
+      (should-not (cdr result)))))
+
+(ert-deftest clutch-test-statement-table-identifiers-handle-multiline-from-clause ()
+  "Statement table scanning should survive multiline FROM clauses."
+  (with-temp-buffer
+    (clutch-mode)
+    (insert "SELECT
+    case_code
+FROM
+    section9_cases_wide
+ORDER BY id")
+    (should (equal (clutch--statement-table-identifiers)
+                   '("section9_cases_wide")))))
+
 (ert-deftest clutch-test-normalize-table-token-strips-quotes-from-schema-qualified ()
   "Quoted schema-qualified names like \"HR\".\"EMPLOYEES\" should normalize cleanly.
 They should become a bare table name."
@@ -6251,6 +6461,62 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (should (equal (clutch--eldoc-schema-string 'fake schema "id")
                        "users.id bigint"))))))
 
+(ert-deftest clutch-test-eldoc-schema-string-sync-loads-current-statement-columns ()
+  "Native backends should sync-load current statement columns for eldoc."
+  (with-temp-buffer
+    (let ((schema (make-hash-table :test 'equal))
+          called)
+      (puthash "users" nil schema)
+      (cl-letf (((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch--tables-in-current-statement)
+                 (lambda (_schema) '("users")))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (_conn _schema table)
+                   (setq called table)
+                   '("id" "name")))
+                ((symbol-function 'clutch--ensure-columns-async)
+                 (lambda (&rest _args)
+                   (ert-fail "eldoc should not fall back to async-only column loading here")))
+                ((symbol-function 'clutch--cached-table-comment)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'clutch--table-comment-cached-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'clutch--ensure-table-comment-async)
+                 #'ignore)
+                ((symbol-function 'clutch--eldoc-column-string)
+                 (lambda (_conn table col-name)
+                   (format "%s.%s bigint" table col-name))))
+        (should (equal (clutch--eldoc-schema-string 'fake schema "id")
+                       "users.id bigint"))
+        (should (equal called "users"))))))
+
+(ert-deftest clutch-test-eldoc-schema-string-skips-sync-load-when-connection-busy ()
+  "Eldoc should not synchronously load columns while CONN is busy.
+Instead it should queue async warmup and return nil until metadata is ready."
+  (with-temp-buffer
+    (let ((schema (make-hash-table :test 'equal))
+          async-called)
+      (puthash "users" nil schema)
+      (cl-letf (((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--tables-in-current-statement)
+                 (lambda (_schema) '("users")))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (&rest _args)
+                   (signal 'clutch-db-error
+                           '("sync column load should not run while busy"))))
+                ((symbol-function 'clutch--ensure-columns-async)
+                 (lambda (_conn _schema table)
+                   (setq async-called table)
+                   t)))
+        (should-not (clutch--eldoc-schema-string 'fake schema "id"))
+        (should (equal async-called "users"))))))
+
 (ert-deftest clutch-test-eldoc-schema-string-uses-cached-columns-when-sync-loads-disabled ()
   "Eldoc should not synchronously load columns when backend disables it."
   (let ((schema (make-hash-table :test 'equal)))
@@ -6304,6 +6570,130 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
           (should (stringp eldoc))
           (should (string-match-p "users" eldoc))
           (should (string-match-p "1 col" eldoc)))))))
+
+(ert-deftest clutch-test-eldoc-on-uppercase-column-uses-cached-lowercase-metadata ()
+  "Uppercase SQL identifiers should still match lowercase cached columns."
+  (with-temp-buffer
+    (clutch-mode)
+    (insert "SELECT ID FROM users;")
+    (goto-char (point-min))
+    (search-forward "ID")
+    (goto-char (match-beginning 0))
+    (let ((schema (make-hash-table :test 'equal)))
+      (puthash "users" '("id") schema)
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda (&optional _conn) schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch--cached-table-comment)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'clutch--table-comment-cached-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'clutch--ensure-table-comment-async)
+                 #'ignore)
+                ((symbol-function 'clutch-db-database)
+                 (lambda (_conn) "testdb"))
+                ((symbol-function 'clutch--eldoc-column-string)
+                 (lambda (_conn table col-name)
+                   (format "%s.%s bigint" table col-name))))
+        (should (equal (clutch--eldoc-function)
+                       "users.id bigint"))))))
+
+(ert-deftest clutch-test-eldoc-qualified-column-bypasses-statement-table-limit ()
+  "Alias-qualified field eldoc should not be blocked by large join scopes."
+  (with-temp-buffer
+    (clutch-mode)
+    (insert "SELECT d.id
+FROM accounts a
+JOIN customers c ON c.account_id = a.id
+JOIN invoices i ON i.customer_id = c.id
+JOIN orders_large d ON d.invoice_id = i.id;")
+    (goto-char (point-min))
+    (search-forward "d.id")
+    (goto-char (+ (match-beginning 0) 2))
+    (let ((schema (make-hash-table :test 'equal))
+          called)
+      (dolist (table '("accounts" "customers" "invoices" "orders_large"))
+        (puthash table nil schema))
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda (&optional _conn) schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--tables-in-current-statement)
+                 (lambda (_schema)
+                   '("accounts" "customers" "invoices" "orders_large")))
+                ((symbol-function 'clutch--table-aliases-in-current-statement)
+                 (lambda (_schema)
+                   '(("a" . "accounts")
+                     ("c" . "customers")
+                     ("i" . "invoices")
+                     ("d" . "orders_large"))))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (_conn _schema table)
+                   (setq called table)
+                   (should (equal table "orders_large"))
+                   '("id" "invoice_id")))
+                ((symbol-function 'clutch--cached-table-comment)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'clutch--table-comment-cached-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'clutch--ensure-table-comment-async)
+                 #'ignore)
+                ((symbol-function 'clutch-db-database)
+                 (lambda (_conn) "testdb"))
+                ((symbol-function 'clutch--eldoc-column-string)
+                 (lambda (_conn table col-name)
+                   (format "%s.%s bigint" table col-name))))
+        (should (equal (clutch--eldoc-function)
+                       "orders_large.id bigint"))
+        (should (equal called "orders_large"))))))
+
+(ert-deftest clutch-test-eldoc-field-resolves-multiline-from-table ()
+  "Field eldoc should work when FROM and the table name are on separate lines."
+  (with-temp-buffer
+    (clutch-mode)
+    (insert "SELECT
+    case_code, operative_name
+FROM
+    section9_cases_wide
+ORDER BY id")
+    (goto-char (point-min))
+    (search-forward "case_code")
+    (goto-char (match-beginning 0))
+    (let ((schema (make-hash-table :test 'equal))
+          called)
+      (puthash "section9_cases_wide" nil schema)
+      (setq-local clutch-connection 'fake-conn)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda (&optional _conn) schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (_conn _schema table)
+                   (setq called table)
+                   '("case_code" "operative_name")))
+                ((symbol-function 'clutch--cached-table-comment)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'clutch--table-comment-cached-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'clutch--ensure-table-comment-async)
+                 #'ignore)
+                ((symbol-function 'clutch-db-database)
+                 (lambda (_conn) "testdb"))
+                ((symbol-function 'clutch--eldoc-column-string)
+                 (lambda (_conn table col-name)
+                   (format "%s.%s text" table col-name))))
+        (should (equal (clutch--eldoc-function)
+                       "section9_cases_wide.case_code text"))
+        (should (equal called "section9_cases_wide"))))))
 
 (ert-deftest clutch-test-eldoc-schema-string-queues-background-metadata-on-cache-miss ()
   "Eldoc should queue background metadata when a table cache entry is empty."
