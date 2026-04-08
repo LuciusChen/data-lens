@@ -20,7 +20,7 @@ sidecar (=clutch-jdbc-agent=, Java 17+).
 
 For Org-Babel integration, install the separate =ob-clutch= package.
 
-#+CAPTION: Result browser with unified transient workflow (C-c ?), copy (c), full export (e), and horizontal scrolling via [ and ].
+#+CAPTION: Query console with result pane, value viewer, and footer status.
 [[file:docs/screenshots/clutch-overview.png]]
 
 *Note:* MySQL is the primary backend — thoroughly tested and used daily.
@@ -355,7 +355,7 @@ Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result
 queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong
 real table name.
 
-#+CAPTION: Result browser with staged edit and delete markers, compact commit/discard icons, sort state, and query timing.
+#+CAPTION: Result browser with staged markers, sort state, and query timing.
 [[file:docs/screenshots/result-browser-basic.png]]
 
 *** Per-column displayers
@@ -420,7 +420,7 @@ an on-demand child editor for more comfortable multi-line editing.  Saving that
 child editor writes compact JSON back into the insert form, so the primary flow
 remains result buffer -> insert buffer.
 
-#+CAPTION: Insert buffer with aligned read-only labels, inline metadata tags, and point placed directly in the editable value column.
+#+CAPTION: Insert buffer with aligned labels, inline metadata tags, and the value column focused.
 [[file:docs/screenshots/insert-buffer-basic.png]]
 
 *** Visual Refine Mode (=c -r= / =C-u A=)
@@ -444,7 +444,7 @@ Typical flow:
 3. In refine mode, use =m= to exclude rows and =x= to exclude columns.
 4. Press =RET= to confirm and copy only the remaining rectangle.
 
-#+CAPTION: Visual refine mode with manual row/column exclusion before copy.
+#+CAPTION: Refine mode for excluding rows and columns before copy.
 [[file:docs/screenshots/refine-mode-basic.png]]
 
 | Key   | Action                              |
@@ -663,7 +663,7 @@ It resolves the object at point when possible; otherwise it prompts, then opens
 the shared action UI.  The action set is
 intentionally small and shared across Embark and Transient:
 
-#+CAPTION: Object describe buffer with action hints in the header-line and detailed column metadata in the body.
+#+CAPTION: Object describe buffer with action hints and column metadata.
 [[file:docs/screenshots/object-describe-basic.png]]
 
 - =d=: describe object

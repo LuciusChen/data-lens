@@ -25,8 +25,9 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Errors must surface, not hide**: Do not add fallback/default returns that silently swallow failures. Let errors propagate immediately.
 - **Catch at the boundary, nowhere else**: Only the outermost API layer (process loop, top-level command handler) should catch and convert exceptions to error responses. Business logic must not `condition-case` around internal calls.
 - **Tests must fail when the code is wrong**: If deleting or breaking the function under test does not turn the test red, the test is worthless. Assert specific, distinguishable output values.
+- **Match test weight to change size**: Use the smallest test that proves the intended behavior. Do not turn comment edits, documentation changes, mechanical refactors, or message-only wording changes into heavy red/green exercises.
 - **No hard-coded expectations**: Use diverse inputs — multiple data sets, random values, boundary cases — so that a hard-coded return cannot satisfy all assertions.
-- **Red before green**: When fixing a bug, first write a failing test that reproduces it. Confirm it fails. Then fix the code. A test written after the fix has never been proven to catch the bug.
+- **Red before green for real bug fixes**: When fixing a user-visible bug, correctness issue, regression, or timing-sensitive behavior, first write a failing test that reproduces it. Confirm it fails. Then fix the code. If an existing test already proves the path and the change is only a small wording or expectation update, updating that test is sufficient.
 
 ## Architecture and Implementation
 
@@ -201,3 +202,5 @@ When a function's behavior changes intentionally, search all test files for exis
 ```bash
 grep -n "function-name" test/clutch-test.el test/clutch-db-test.el
 ```
+
+Update existing tests first. Add a new failing test only when the current suite does not already prove the regression or changed behavior.
