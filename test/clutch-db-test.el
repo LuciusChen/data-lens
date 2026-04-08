@@ -135,6 +135,22 @@
      (cl-letf (((symbol-value 'mysql-tls-verify-server) nil))
        ,@body)))
 
+(defmacro clutch-db-test--with-immediate-idle-metadata (scheduled-var &rest body)
+  "Run BODY with idle metadata work executing immediately.
+Capture the scheduled idle timer shape in SCHEDULED-VAR and treat the
+connection as live and not busy."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'run-with-idle-timer)
+              (lambda (secs repeat fn &rest args)
+                (setq ,scheduled-var (list secs repeat))
+                (apply fn args)
+                'fake-timer))
+             ((symbol-function 'clutch-db-busy-p)
+              (lambda (_conn) nil))
+             ((symbol-function 'clutch-db-live-p)
+              (lambda (_conn) t)))
+     ,@body))
+
 ;;;; Unit tests — connection parameter normalization
 
 (ert-deftest clutch-db-test-normalize-mysql-connect-params-canonicalizes-disabled ()
@@ -556,24 +572,18 @@
                                     :user "root" :database "mysql"))
         callback-result
         scheduled)
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (setq scheduled (list secs repeat))
-                 (apply fn args)
-                 'fake-timer))
-              ((symbol-function 'clutch-db-list-tables)
+    (clutch-db-test--with-immediate-idle-metadata scheduled
+      (cl-letf (((symbol-function 'clutch-db-list-tables)
                (lambda (context)
                  (should (eq context conn))
-                 '("users" "orders")))
-              ((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-db-refresh-schema-async
-               conn
-               (lambda (tables)
-                 (setq callback-result tables)))
-                  'fake-timer))
-      (should (equal scheduled '(0 nil)))
-      (should (equal callback-result '("users" "orders"))))))
+                 '("users" "orders"))))
+        (should (eq (clutch-db-refresh-schema-async
+                     conn
+                     (lambda (tables)
+                       (setq callback-result tables)))
+                    'fake-timer))
+        (should (equal scheduled '(0 nil)))
+        (should (equal callback-result '("users" "orders")))))))
 
 (ert-deftest clutch-db-test-pg-refresh-schema-async-schedules-idle-call ()
   "Native PostgreSQL schema refresh should schedule idle work on the main thread."
@@ -582,24 +592,53 @@
                                           :user "postgres" :database "test"))
         callback-result
         scheduled)
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (setq scheduled (list secs repeat))
-                 (apply fn args)
-                 'fake-timer))
-              ((symbol-function 'clutch-db-list-tables)
+    (clutch-db-test--with-immediate-idle-metadata scheduled
+      (cl-letf (((symbol-function 'clutch-db-list-tables)
                (lambda (context)
                  (should (eq context conn))
-                 '("customers" "orders")))
+                 '("customers" "orders"))))
+        (should (eq (clutch-db-refresh-schema-async
+                     conn
+                     (lambda (tables)
+                       (setq callback-result tables)))
+                    'fake-timer))
+        (should (equal scheduled '(0 nil)))
+        (should (equal callback-result '("customers" "orders")))))))
+
+(ert-deftest clutch-db-test-idle-metadata-call-reschedules-while-busy ()
+  "Idle metadata calls should not run on a busy connection.
+They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil."
+  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                                          :user "postgres" :database "test"))
+        (scheduled 0)
+        callback-result
+        (busy-states '(t nil)))
+    (cl-letf (((symbol-function 'run-with-idle-timer)
+               (lambda (_secs _repeat fn &rest args)
+                 (setq scheduled (1+ scheduled))
+                 (apply fn args)
+                 'fake-timer))
               ((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-db-refresh-schema-async
-               conn
-               (lambda (tables)
-                 (setq callback-result tables)))
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-busy-p)
+               (lambda (_conn)
+                 (prog1 (car busy-states)
+                   (setq busy-states (or (cdr busy-states) '(nil))))))
+              ((symbol-function 'clutch-db-list-columns)
+               (lambda (context table)
+                 (should (eq context conn))
+                 (should (equal table "users"))
+                 '("id" "name"))))
+      (should (eq (clutch-db--schedule-idle-metadata-call
+                   conn
+                   (lambda (columns)
+                     (setq callback-result columns))
+                   nil
+                   #'clutch-db-list-columns
+                   "users")
                   'fake-timer))
-      (should (equal scheduled '(0 nil)))
-      (should (equal callback-result '("customers" "orders"))))))
+      (should (= scheduled 2))
+      (should (equal callback-result '("id" "name"))))))
 
 (ert-deftest clutch-db-test-mysql-list-columns-async-schedules-idle-call ()
   "Native MySQL column-name preheat should schedule idle work."
@@ -608,25 +647,19 @@
                                     :user "root" :database "mysql"))
         callback-result
         scheduled)
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (setq scheduled (list secs repeat))
-                 (apply fn args)
-                 'fake-timer))
-              ((symbol-function 'clutch-db-list-columns)
+    (clutch-db-test--with-immediate-idle-metadata scheduled
+      (cl-letf (((symbol-function 'clutch-db-list-columns)
                (lambda (context table)
                  (should (eq context conn))
                  (should (equal table "users"))
-                 '("id" "name")))
-              ((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-db-list-columns-async
-               conn "users"
-               (lambda (columns)
-                 (setq callback-result columns)))
-                  'fake-timer))
-      (should (equal scheduled '(0 nil)))
-      (should (equal callback-result '("id" "name"))))))
+                 '("id" "name"))))
+        (should (eq (clutch-db-list-columns-async
+                     conn "users"
+                     (lambda (columns)
+                       (setq callback-result columns)))
+                    'fake-timer))
+        (should (equal scheduled '(0 nil)))
+        (should (equal callback-result '("id" "name")))))))
 
 (ert-deftest clutch-db-test-mysql-column-details-async-schedules-idle-call ()
   "Native MySQL column-detail preheat should schedule idle work."
@@ -635,26 +668,20 @@
                                     :user "root" :database "mysql"))
         callback-result
         scheduled)
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (setq scheduled (list secs repeat))
-                 (apply fn args)
-                 'fake-timer))
-              ((symbol-function 'clutch-db-column-details)
+    (clutch-db-test--with-immediate-idle-metadata scheduled
+      (cl-letf (((symbol-function 'clutch-db-column-details)
                (lambda (context table)
                  (should (eq context conn))
                  (should (equal table "users"))
-                 '((:name "id" :type "bigint"))))
-              ((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-db-column-details-async
-               conn "users"
-               (lambda (details)
-                 (setq callback-result details)))
-                  'fake-timer))
-      (should (equal scheduled '(0 nil)))
-      (should (equal callback-result
-                     '((:name "id" :type "bigint")))))))
+                 '((:name "id" :type "bigint")))))
+        (should (eq (clutch-db-column-details-async
+                     conn "users"
+                     (lambda (details)
+                       (setq callback-result details)))
+                    'fake-timer))
+        (should (equal scheduled '(0 nil)))
+        (should (equal callback-result
+                       '((:name "id" :type "bigint"))))))))
 
 (ert-deftest clutch-db-test-mysql-table-comment-async-schedules-idle-call ()
   "Native MySQL table-comment preheat should schedule idle work."
@@ -663,25 +690,19 @@
                                     :user "root" :database "mysql"))
         callback-result
         scheduled)
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (setq scheduled (list secs repeat))
-                 (apply fn args)
-                 'fake-timer))
-              ((symbol-function 'clutch-db-table-comment)
+    (clutch-db-test--with-immediate-idle-metadata scheduled
+      (cl-letf (((symbol-function 'clutch-db-table-comment)
                (lambda (context table)
                  (should (eq context conn))
                  (should (equal table "users"))
-                 "Users table"))
-              ((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-db-table-comment-async
-               conn "users"
-               (lambda (comment)
-                 (setq callback-result comment)))
-                  'fake-timer))
-      (should (equal scheduled '(0 nil)))
-      (should (equal callback-result "Users table")))))
+                 "Users table")))
+        (should (eq (clutch-db-table-comment-async
+                     conn "users"
+                     (lambda (comment)
+                       (setq callback-result comment)))
+                    'fake-timer))
+        (should (equal scheduled '(0 nil)))
+        (should (equal callback-result "Users table"))))))
 
 (ert-deftest clutch-db-test-mysql-list-objects-async-schedules-idle-call ()
   "Native MySQL object warmup should schedule idle work."
@@ -690,26 +711,20 @@
                                     :user "root" :database "mysql"))
         callback-result
         scheduled)
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (setq scheduled (list secs repeat))
-                 (apply fn args)
-                 'fake-timer))
-              ((symbol-function 'clutch-db-list-objects)
+    (clutch-db-test--with-immediate-idle-metadata scheduled
+      (cl-letf (((symbol-function 'clutch-db-list-objects)
                (lambda (context category)
                  (should (eq context conn))
                  (should (eq category 'indexes))
-                 '((:name "users_pkey" :type "INDEX"))))
-              ((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-db-list-objects-async
-               conn 'indexes
-               (lambda (entries)
-                 (setq callback-result entries)))
-                  'fake-timer))
-      (should (equal scheduled '(0 nil)))
-      (should (equal callback-result
-                     '((:name "users_pkey" :type "INDEX")))))))
+                 '((:name "users_pkey" :type "INDEX")))))
+        (should (eq (clutch-db-list-objects-async
+                     conn 'indexes
+                     (lambda (entries)
+                       (setq callback-result entries)))
+                    'fake-timer))
+        (should (equal scheduled '(0 nil)))
+        (should (equal callback-result
+                       '((:name "users_pkey" :type "INDEX"))))))))
 
 (ert-deftest clutch-db-test-pg-list-columns-async-schedules-idle-call ()
   "Native PostgreSQL column-name preheat should schedule idle work."
@@ -718,25 +733,19 @@
                                           :user "postgres" :database "test"))
         callback-result
         scheduled)
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (setq scheduled (list secs repeat))
-                 (apply fn args)
-                 'fake-timer))
-              ((symbol-function 'clutch-db-list-columns)
+    (clutch-db-test--with-immediate-idle-metadata scheduled
+      (cl-letf (((symbol-function 'clutch-db-list-columns)
                (lambda (context table)
                  (should (eq context conn))
                  (should (equal table "users"))
-                 '("id" "name")))
-              ((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-db-list-columns-async
-               conn "users"
-               (lambda (columns)
-                 (setq callback-result columns)))
-                  'fake-timer))
-      (should (equal scheduled '(0 nil)))
-      (should (equal callback-result '("id" "name"))))))
+                 '("id" "name"))))
+        (should (eq (clutch-db-list-columns-async
+                     conn "users"
+                     (lambda (columns)
+                       (setq callback-result columns)))
+                    'fake-timer))
+        (should (equal scheduled '(0 nil)))
+        (should (equal callback-result '("id" "name")))))))
 
 (ert-deftest clutch-db-test-pg-column-details-async-schedules-idle-call ()
   "Native PostgreSQL column-detail preheat should schedule idle work."
@@ -745,26 +754,20 @@
                                           :user "postgres" :database "test"))
         callback-result
         scheduled)
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (setq scheduled (list secs repeat))
-                 (apply fn args)
-                 'fake-timer))
-              ((symbol-function 'clutch-db-column-details)
+    (clutch-db-test--with-immediate-idle-metadata scheduled
+      (cl-letf (((symbol-function 'clutch-db-column-details)
                (lambda (context table)
                  (should (eq context conn))
                  (should (equal table "users"))
-                 '((:name "id" :type "integer"))))
-              ((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-db-column-details-async
-               conn "users"
-               (lambda (details)
-                 (setq callback-result details)))
-                  'fake-timer))
-      (should (equal scheduled '(0 nil)))
-      (should (equal callback-result
-                     '((:name "id" :type "integer")))))))
+                 '((:name "id" :type "integer")))))
+        (should (eq (clutch-db-column-details-async
+                     conn "users"
+                     (lambda (details)
+                       (setq callback-result details)))
+                    'fake-timer))
+        (should (equal scheduled '(0 nil)))
+        (should (equal callback-result
+                       '((:name "id" :type "integer"))))))))
 
 (ert-deftest clutch-db-test-pg-table-comment-async-schedules-idle-call ()
   "Native PostgreSQL table-comment preheat should schedule idle work."
@@ -773,25 +776,19 @@
                                           :user "postgres" :database "test"))
         callback-result
         scheduled)
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (setq scheduled (list secs repeat))
-                 (apply fn args)
-                 'fake-timer))
-              ((symbol-function 'clutch-db-table-comment)
+    (clutch-db-test--with-immediate-idle-metadata scheduled
+      (cl-letf (((symbol-function 'clutch-db-table-comment)
                (lambda (context table)
                  (should (eq context conn))
                  (should (equal table "users"))
-                 "Users table"))
-              ((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-db-table-comment-async
-               conn "users"
-               (lambda (comment)
-                 (setq callback-result comment)))
-                  'fake-timer))
-      (should (equal scheduled '(0 nil)))
-      (should (equal callback-result "Users table")))))
+                 "Users table")))
+        (should (eq (clutch-db-table-comment-async
+                     conn "users"
+                     (lambda (comment)
+                       (setq callback-result comment)))
+                    'fake-timer))
+        (should (equal scheduled '(0 nil)))
+        (should (equal callback-result "Users table"))))))
 
 (ert-deftest clutch-db-test-pg-list-objects-async-schedules-idle-call ()
   "Native PostgreSQL object warmup should schedule idle work."
@@ -800,26 +797,20 @@
                                           :user "postgres" :database "test"))
         callback-result
         scheduled)
-    (cl-letf (((symbol-function 'run-with-idle-timer)
-               (lambda (secs repeat fn &rest args)
-                 (setq scheduled (list secs repeat))
-                 (apply fn args)
-                 'fake-timer))
-              ((symbol-function 'clutch-db-list-objects)
+    (clutch-db-test--with-immediate-idle-metadata scheduled
+      (cl-letf (((symbol-function 'clutch-db-list-objects)
                (lambda (context category)
                  (should (eq context conn))
                  (should (eq category 'indexes))
-                 '((:name "users_pkey" :type "INDEX"))))
-              ((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-db-list-objects-async
-               conn 'indexes
-               (lambda (entries)
-                 (setq callback-result entries)))
-                  'fake-timer))
-      (should (equal scheduled '(0 nil)))
-      (should (equal callback-result
-                     '((:name "users_pkey" :type "INDEX")))))))
+                 '((:name "users_pkey" :type "INDEX")))))
+        (should (eq (clutch-db-list-objects-async
+                     conn 'indexes
+                     (lambda (entries)
+                       (setq callback-result entries)))
+                    'fake-timer))
+        (should (equal scheduled '(0 nil)))
+        (should (equal callback-result
+                       '((:name "users_pkey" :type "INDEX"))))))))
 
 (ert-deftest clutch-db-test-jdbc-list-columns-async-maps-column-names ()
   "JDBC async column-name preheat should normalize the returned names."

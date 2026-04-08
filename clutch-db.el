@@ -404,18 +404,20 @@ started, nil when unsupported.")
   "Schedule metadata FN for CONN on the main thread once Emacs is idle.
 CALLBACK receives the result of calling FN with CONN and ARGS.
 ERRBACK receives an error-message string when the work fails."
-  (run-with-idle-timer
-   0 nil
-   (lambda ()
-     (if (clutch-db-live-p conn)
-         (condition-case err
-             (when callback
-               (funcall callback (apply fn conn args)))
-           (error
-            (when errback
-              (funcall errback (error-message-string err)))))
-       (when errback
-         (funcall errback "Connection closed"))))))
+  (cl-labels
+      ((run ()
+         (if (clutch-db-live-p conn)
+             (if (clutch-db-busy-p conn)
+                 (run-with-idle-timer 0 nil #'run)
+               (condition-case err
+                   (when callback
+                     (funcall callback (apply fn conn args)))
+                 (error
+                  (when errback
+                    (funcall errback (error-message-string err))))))
+           (when errback
+             (funcall errback "Connection closed")))))
+    (run-with-idle-timer 0 nil #'run)))
 
 ;; Query
 
