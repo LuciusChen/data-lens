@@ -343,7 +343,8 @@ which follows point until you press =f= to freeze it or =q= to close it.
 Tip: the result-buffer status line uses compact staged-change tokens:
 =E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts.
 When a query result is not updateable because no primary key was detected,
-the same line shows =PK missing= and =E/D off=.
+the same line shows =PK missing= and =E/D off=; =C-c '= also errors
+immediately instead of opening an edit buffer that cannot be committed.
 Tip: SQL-backed result refreshes (=g=, =W=, sort, paging) keep the column
 header visible; busy state temporarily replaces the elapsed-time segment in the
 footer with a spinner instead of replacing the table header with the query-console
@@ -355,7 +356,7 @@ queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong
 real table name.
 
 #+CAPTION: Result browser with staged edit and delete markers, compact commit/discard icons, sort state, and query timing.
-[[file:docs/screenshots/ghost-in-the-shell-result-browser.png]]
+[[file:docs/screenshots/result-browser-basic.png]]
 
 *** Per-column displayers
 
@@ -420,7 +421,7 @@ child editor writes compact JSON back into the insert form, so the primary flow
 remains result buffer -> insert buffer.
 
 #+CAPTION: Insert buffer with aligned read-only labels, inline metadata tags, and point placed directly in the editable value column.
-[[file:docs/screenshots/ghost-in-the-shell-insert-buffer.png]]
+[[file:docs/screenshots/insert-buffer-basic.png]]
 
 *** Visual Refine Mode (=c -r= / =C-u A=)
 
@@ -444,7 +445,7 @@ Typical flow:
 4. Press =RET= to confirm and copy only the remaining rectangle.
 
 #+CAPTION: Visual refine mode with manual row/column exclusion before copy.
-[[file:docs/screenshots/ghost-in-the-shell-refine-mode.png]]
+[[file:docs/screenshots/refine-mode-basic.png]]
 
 | Key   | Action                              |
 |-------+-------------------------------------|
@@ -663,7 +664,7 @@ the shared action UI.  The action set is
 intentionally small and shared across Embark and Transient:
 
 #+CAPTION: Object describe buffer with action hints in the header-line and detailed column metadata in the body.
-[[file:docs/screenshots/ghost-in-the-shell-object-describe.png]]
+[[file:docs/screenshots/object-describe-basic.png]]
 
 - =d=: describe object
 - =s=: show DDL / source

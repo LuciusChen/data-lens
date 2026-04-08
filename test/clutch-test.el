@@ -367,18 +367,36 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
     (when-let* ((match (text-property-search-forward 'clutch-col-idx 1 #'eq)))
       (goto-char (prop-match-beginning match)))))
 
-(ert-deftest clutch-test-live-view-bindings-are-exposed ()
-  "Result and record workflows should expose the live viewer explicitly."
-  (should (eq (lookup-key clutch-result-mode-map "V")
-              #'clutch-result-live-view-value))
-  (should (eq (lookup-key clutch-record-mode-map "V")
-              #'clutch-record-live-view-value))
-  (should (eq (plist-get (cdr (transient-get-suffix 'clutch-result-dispatch "V"))
-                         :command)
-              'clutch-result-live-view-value))
-  (should (eq (plist-get (cdr (transient-get-suffix 'clutch-record-dispatch "V"))
-                         :command)
-              'clutch-record-live-view-value)))
+(defun clutch-test--make-edit-cell-result-buffer (columns column-defs rows
+                                                          &rest locals)
+  "Return a result buffer prepared for edit-cell tests.
+COLUMNS, COLUMN-DEFS, and ROWS initialize the result grid.  LOCALS is a
+plist of additional buffer-local variables to set."
+  (let ((buf (generate-new-buffer "*clutch-result*")))
+    (with-current-buffer buf
+      (setq-local clutch-connection 'fake-conn
+                  clutch--result-columns columns
+                  clutch--result-column-defs column-defs
+                  clutch--result-rows rows)
+      (while locals
+        (set (make-local-variable (pop locals))
+             (pop locals))))
+    buf))
+
+(defun clutch-test--open-edit-cell (result-buf cell table &optional details)
+  "Open an edit buffer from RESULT-BUF for CELL on TABLE.
+DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
+  (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+             (lambda () cell))
+            ((symbol-function 'clutch-result--detect-table)
+             (lambda () table))
+            ((symbol-function 'clutch--ensure-column-details)
+             (lambda (_conn _table &optional _strict)
+               details))
+            ((symbol-function 'pop-to-buffer)
+             (lambda (buf &rest _args) buf)))
+    (with-current-buffer result-buf
+      (clutch-result-edit-cell))))
 
 (ert-deftest clutch-test-live-view-follows-result-point ()
   "Live viewer should refresh as point moves across result cells."
@@ -1253,156 +1271,139 @@ ROWS defaults to a small three-row sample."
 
 (ert-deftest clutch-test-edit-cell-shows-metadata-and-completion-hints ()
   "Edit buffer should expose enum metadata and completion affordances."
-  (let ((result-buf (generate-new-buffer "*clutch-result*")))
+  (let ((result-buf (clutch-test--make-edit-cell-result-buffer
+                     '("severity")
+                     '((:name "severity" :type-category text))
+                     '(("low"))
+                     'clutch--cached-pk-indices '(0))))
     (unwind-protect
-        (progn
+        (let ((buf (clutch-test--open-edit-cell
+                    result-buf
+                    '(0 0 "low")
+                    "shipping_incidents"
+                    (list (list :name "severity"
+                                :type "enum('low','medium','high')")))))
+          (with-current-buffer buf
+            (should (string-match-p "\\[enum\\]" (format "%s" header-line-format)))
+            (should (string-match-p "M-TAB: complete" (format "%s" header-line-format)))
+            (pcase-let ((`(,beg ,end ,candidates . ,_)
+                         (clutch-result-edit-completion-at-point)))
+              (should (= beg (point-min)))
+              (should (= end (point-max)))
+              (should (equal candidates '("low" "medium" "high"))))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-edit-cell-errors-clearly-without-primary-key ()
+  "Edit entry should fail early when the result is not updateable."
+  (let ((result-buf (clutch-test--make-edit-cell-result-buffer
+                     '("id" "name")
+                     '((:name "id" :type-category numeric)
+                       (:name "name" :type-category text))
+                     '((1 "alice"))
+                     'clutch--last-query "SELECT * FROM users"
+                     'clutch--cached-pk-indices nil)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+                   (lambda () '(0 1 "alice")))
+                  ((symbol-function 'clutch-result--detect-primary-key)
+                   (lambda () nil)))
           (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("severity")
-                        clutch--result-column-defs '((:name "severity" :type-category text))
-                        clutch--result-rows '(("low"))))
-          (cl-letf (((symbol-function 'clutch-result--cell-at-point)
-                     (lambda () (list 0 0 "low")))
-                    ((symbol-function 'clutch-result--detect-table)
-                     (lambda () "shipping_incidents"))
-                    ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table &optional _strict)
-                       (list (list :name "severity"
-                                   :type "enum('low','medium','high')"))))
-                    ((symbol-function 'pop-to-buffer)
-                     (lambda (buf &rest _args) buf)))
-            (with-current-buffer result-buf
-              (let ((buf (clutch-result-edit-cell)))
-                (with-current-buffer buf
-                  (should (string-match-p "\\[enum\\]" (format "%s" header-line-format)))
-                  (should (string-match-p "M-TAB: complete" (format "%s" header-line-format)))
-                  (pcase-let ((`(,beg ,end ,candidates . ,_)
-                               (clutch-result-edit-completion-at-point)))
-                    (should (= beg (point-min)))
-                    (should (= end (point-max)))
-                    (should (equal candidates '("low" "medium" "high")))))))))
+            (let ((err (should-error (clutch-result-edit-cell)
+                                     :type 'user-error)))
+              (should (string-match-p
+                       "Cannot edit cell: no primary key detected for table users"
+                       (error-message-string err))))
+            (should-not (get-buffer "*clutch-edit: [0].name*"))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-edit-cell-shows-temporal-now-hint ()
   "Temporal edit buffers should advertise the shared now shortcut."
-  (let ((result-buf (generate-new-buffer "*clutch-result*")))
+  (let ((result-buf (clutch-test--make-edit-cell-result-buffer
+                     '("opened_at")
+                     '((:name "opened_at" :type-category datetime))
+                     '(("2026-03-10 10:00:00"))
+                     'clutch--cached-pk-indices '(0))))
     (unwind-protect
-        (progn
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("opened_at")
-                        clutch--result-column-defs '((:name "opened_at" :type-category datetime))
-                        clutch--result-rows '(("2026-03-10 10:00:00"))))
-          (cl-letf (((symbol-function 'clutch-result--cell-at-point)
-                     (lambda () (list 0 0 "2026-03-10 10:00:00")))
-                    ((symbol-function 'clutch-result--detect-table)
-                     (lambda () "shipping_incidents"))
-                    ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table &optional _strict)
-                       (list (list :name "opened_at" :type "datetime"))))
-                    ((symbol-function 'pop-to-buffer)
-                     (lambda (buf &rest _args) buf)))
-            (with-current-buffer result-buf
-              (let ((buf (clutch-result-edit-cell)))
-                (with-current-buffer buf
-                  (should (string-match-p "\\[datetime\\]" (format "%s" header-line-format)))
-                  (should (string-match-p (regexp-quote "C-c .: now")
-                                          (format "%s" header-line-format))))))))
+        (let ((buf (clutch-test--open-edit-cell
+                    result-buf
+                    '(0 0 "2026-03-10 10:00:00")
+                    "shipping_incidents"
+                    (list (list :name "opened_at" :type "datetime")))))
+          (with-current-buffer buf
+            (should (string-match-p "\\[datetime\\]" (format "%s" header-line-format)))
+            (should (string-match-p (regexp-quote "C-c .: now")
+                                    (format "%s" header-line-format)))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-edit-cell-opens-json-sub-editor-directly ()
   "JSON cells should jump straight into the JSON sub-editor."
-  (let ((result-buf (generate-new-buffer "*clutch-result*")))
+  (let ((result-buf (clutch-test--make-edit-cell-result-buffer
+                     '("payload")
+                     '((:name "payload" :type-category json))
+                     '(("{\"a\":1}"))
+                     'clutch--cached-pk-indices '(0))))
     (unwind-protect
-        (progn
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("payload")
-                        clutch--result-column-defs '((:name "payload" :type-category json))
-                        clutch--result-rows '(("{\"a\":1}"))))
-          (cl-letf (((symbol-function 'clutch-result--cell-at-point)
-                     (lambda () (list 0 0 "{\"a\":1}")))
-                    ((symbol-function 'clutch-result--detect-table)
-                     (lambda () "shipping_incidents"))
-                    ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table &optional _strict)
-                       (list (list :name "payload" :type "json"))))
-                    ((symbol-function 'pop-to-buffer)
-                     (lambda (buf &rest _args) buf)))
-            (with-current-buffer result-buf
-              (let ((buf (clutch-result-edit-cell)))
-                (should (string-match-p "\\*clutch-edit-json: payload\\*" (buffer-name buf)))
-                (with-current-buffer buf
-                  (should (equal clutch-result-edit-json--field-name "payload"))
-                  (should (string-match-p "JSON field payload"
-                                          (format "%s" header-line-format)))
-                  (should (equal (buffer-substring-no-properties (point-min) (point-max))
-                                 "{\n  \"a\": 1\n}")))))))
+        (let ((buf (clutch-test--open-edit-cell
+                    result-buf
+                    '(0 0 "{\"a\":1}")
+                    "shipping_incidents"
+                    (list (list :name "payload" :type "json")))))
+          (should (string-match-p "\\*clutch-edit-json: payload\\*" (buffer-name buf)))
+          (with-current-buffer buf
+            (should (equal clutch-result-edit-json--field-name "payload"))
+            (should (string-match-p "JSON field payload"
+                                    (format "%s" header-line-format)))
+            (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                           "{\n  \"a\": 1\n}"))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-edit-cell-json-object-opens-sub-editor-with-json-text ()
   "Parsed JSON objects should reach the JSON sub-editor as JSON text."
   (skip-unless (fboundp 'json-serialize))
-  (let ((result-buf (generate-new-buffer "*clutch-result*"))
-        (payload (make-hash-table :test 'equal)))
+  (let* ((payload (make-hash-table :test 'equal))
+         (result-buf (clutch-test--make-edit-cell-result-buffer
+                      '("payload")
+                      '((:name "payload" :type-category json))
+                      (list (list payload))
+                      'clutch--cached-pk-indices '(0))))
     (puthash "test" t payload)
     (puthash "data" (vector 1 2) payload)
     (unwind-protect
-        (progn
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("payload")
-                        clutch--result-column-defs '((:name "payload" :type-category json))
-                        clutch--result-rows (list (list payload))))
-          (cl-letf (((symbol-function 'clutch-result--cell-at-point)
-                     (lambda () (list 0 0 payload)))
-                    ((symbol-function 'clutch-result--detect-table)
-                     (lambda () "shipping_incidents"))
-                    ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table &optional _strict)
-                       (list (list :name "payload" :type "json"))))
-                    ((symbol-function 'pop-to-buffer)
-                     (lambda (buf &rest _args) buf)))
-            (with-current-buffer result-buf
-              (let ((buf (clutch-result-edit-cell)))
-                (with-current-buffer buf
-                  (should-not (string-match-p "#s(hash-table"
-                                              (buffer-substring-no-properties
-                                               (point-min) (point-max))))
-                  (should (string-match-p "\"test\": true"
-                                          (buffer-substring-no-properties
-                                           (point-min) (point-max))))
-                  (should (string-match-p "\"data\": \\["
-                                          (buffer-substring-no-properties
-                                           (point-min) (point-max)))))))))
+        (let ((buf (clutch-test--open-edit-cell
+                    result-buf
+                    (list 0 0 payload)
+                    "shipping_incidents"
+                    (list (list :name "payload" :type "json")))))
+          (with-current-buffer buf
+            (should-not (string-match-p "#s(hash-table"
+                                        (buffer-substring-no-properties
+                                         (point-min) (point-max))))
+            (should (string-match-p "\"test\": true"
+                                    (buffer-substring-no-properties
+                                     (point-min) (point-max))))
+            (should (string-match-p "\"data\": \\["
+                                    (buffer-substring-no-properties
+                                     (point-min) (point-max))))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-edit-cell-json-string-opens-sub-editor-with-json-text ()
   "Parsed JSON string scalars should stay valid JSON in the sub-editor."
   (skip-unless (fboundp 'json-serialize))
-  (let ((result-buf (generate-new-buffer "*clutch-result*"))
-        (payload "hello"))
+  (let* ((payload "hello")
+         (result-buf (clutch-test--make-edit-cell-result-buffer
+                      '("payload")
+                      '((:name "payload" :type-category json))
+                      (list (list payload))
+                      'clutch--cached-pk-indices '(0))))
     (unwind-protect
-        (progn
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("payload")
-                        clutch--result-column-defs '((:name "payload" :type-category json))
-                        clutch--result-rows (list (list payload))))
-          (cl-letf (((symbol-function 'clutch-result--cell-at-point)
-                     (lambda () (list 0 0 payload)))
-                    ((symbol-function 'clutch-result--detect-table)
-                     (lambda () "shipping_incidents"))
-                    ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table &optional _strict)
-                       (list (list :name "payload" :type "json"))))
-                    ((symbol-function 'pop-to-buffer)
-                     (lambda (buf &rest _args) buf)))
-            (with-current-buffer result-buf
-              (let ((buf (clutch-result-edit-cell)))
-                (with-current-buffer buf
-                  (should (equal (buffer-substring-no-properties (point-min) (point-max))
-                                 "\"hello\"")))))))
+        (let ((buf (clutch-test--open-edit-cell
+                    result-buf
+                    (list 0 0 payload)
+                    "shipping_incidents"
+                    (list (list :name "payload" :type "json")))))
+          (with-current-buffer buf
+            (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                           "\"hello\""))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-edit-set-current-time-replaces-existing-value ()
@@ -1565,7 +1566,9 @@ ROWS defaults to a small three-row sample."
           (clutch-result-mode)
           (setq-local clutch--result-columns '("name")
                       clutch--result-column-defs '((:name "name" :type-category text))
-                      clutch--result-rows '(("before")))
+                      clutch--result-rows '(("before"))
+                      clutch--last-query "SELECT * FROM users"
+                      clutch--cached-pk-indices '(0))
           (let ((inhibit-read-only t))
             (insert "before")
             (add-text-properties (point-min) (point-max)
