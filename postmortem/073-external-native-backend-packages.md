@@ -25,7 +25,7 @@ linting complain for the right reason: they are separate products.
 The native MySQL and PostgreSQL adapters stay in clutch because they express
 clutch's generic backend contract:
 
-- =clutch-db-mysql.el= adapts clutch generics to =mysql-wire=
+- =clutch-db-mysql.el= adapts clutch generics to =mysql=
 - =clutch-db-pg.el= adapts clutch generics to upstream =pg=
 
 This keeps the UI and workflow code stable while letting the protocol clients
@@ -48,6 +48,6 @@ That is simpler for users and cleaner for package review.
 * Tradeoff
 
 The main tradeoff is developer setup: local byte-compilation and tests now need
-the external =mysql-wire= and =pg= packages on the load-path (or installed
+the external =mysql= and =pg= packages on the load-path (or installed
 normally).  That cost is acceptable because it matches the real package boundary
 instead of hiding it inside one repo.

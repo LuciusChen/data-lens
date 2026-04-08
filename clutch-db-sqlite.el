@@ -27,7 +27,7 @@
 ;;; Commentary:
 
 ;; SQLite backend for the clutch generic database interface.
-;; Requires Emacs 29+ (built-in sqlite support).
+;; Requires Emacs 29.1+ (built-in sqlite support).
 ;; Implements all `clutch-db-*' generics by dispatching on
 ;; `clutch-db-sqlite-conn'.
 ;;
@@ -62,7 +62,7 @@
 PARAMS keys: :database (file path or \":memory:\", required).
 Use \":memory:\" for a transient in-memory database."
   (unless (and (fboundp 'sqlite-available-p) (sqlite-available-p))
-    (signal 'clutch-db-error (list "SQLite requires Emacs 29+")))
+    (signal 'clutch-db-error (list "SQLite requires Emacs 29.1+")))
   (let ((db (plist-get params :database)))
     (unless db
       (signal 'clutch-db-error (list "Missing :database parameter")))

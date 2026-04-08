@@ -587,15 +587,11 @@ Returns hash-table mapping pk-vec -> list of (cidx . new-value)."
       (push (cons cidx val) (gethash pk-vec ht)))
     ht))
 
-(defun clutch--sql-has-top-level-where-p (sql)
-  "Return non-nil if SQL has a top-level WHERE clause."
-  (clutch--sql-find-top-level-clause
-   (clutch--sql-normalize-for-rewrite sql) "WHERE"))
-
 (defun clutch-result--ensure-where-guard (statements op-name)
   "Ensure every statement in STATEMENTS has a top-level WHERE for OP-NAME."
   (dolist (stmt statements)
-    (unless (clutch--sql-has-top-level-where-p stmt)
+    (unless (clutch--sql-find-top-level-clause
+             (clutch--sql-normalize-for-rewrite stmt) "WHERE")
       (user-error "%s blocked: statement without WHERE: %s"
                   op-name
                   (truncate-string-to-width (string-trim stmt) 120 nil nil "…")))))
@@ -615,14 +611,12 @@ the parameter list."
      pk-names pk-values)
     (cons (nreverse parts) (nreverse params))))
 
-(defun clutch-result--render-statement (statement)
-  "Return preview SQL text for mutation STATEMENT."
-  (pcase-let ((`(,sql . ,params) statement))
-    (clutch-db-substitute-params sql params #'clutch--value-to-literal)))
-
 (defun clutch-result--render-statements (statements)
   "Return preview SQL strings for mutation STATEMENTS."
-  (mapcar #'clutch-result--render-statement statements))
+  (mapcar (lambda (statement)
+            (pcase-let ((`(,sql . ,params) statement))
+              (clutch-db-substitute-params sql params #'clutch--value-to-literal)))
+          statements))
 
 (defun clutch-result--build-update-stmt (table pk-vec edits col-names pk-names)
   "Build an UPDATE statement spec for TABLE.

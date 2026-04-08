@@ -408,7 +408,7 @@ ERRBACK receives an error-message string when the work fails."
       ((run ()
          (if (clutch-db-live-p conn)
              (if (clutch-db-busy-p conn)
-                 (run-with-idle-timer 0 nil #'run)
+                 (run-with-idle-timer 0.1 nil #'run)
                (condition-case err
                    (when callback
                      (funcall callback (apply fn conn args)))
@@ -432,7 +432,26 @@ Return the same shape as `clutch-db-query'.")
 (cl-defmethod clutch-db-execute-params ((conn t) sql params)
   "Fallback parameter execution for CONN by literal substitution.
 Substitute PARAMS into SQL before calling `clutch-db-query'."
-  (clutch-db-query conn (clutch-db-render-sql-params conn sql params)))
+  (clutch-db-query
+   conn
+   (clutch-db-substitute-params
+    sql params
+    (lambda (value)
+      (cond
+       ((null value) "NULL")
+       ((numberp value) (number-to-string value))
+       ((stringp value) (clutch-db-escape-literal conn value))
+       ((and (listp value)
+             (clutch-db-format-temporal value))
+        (clutch-db-escape-literal conn (clutch-db-format-temporal value)))
+       ((or (hash-table-p value) (vectorp value))
+        (clutch-db-escape-literal
+         conn
+         (condition-case nil
+             (json-serialize value)
+           (error (format "%S" value)))))
+       (t
+        (clutch-db-escape-literal conn (format "%S" value))))))))
 
 (cl-defgeneric clutch-db-interrupt-query (conn)
   "Interrupt the current query on CONN.
@@ -456,24 +475,6 @@ the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
 
 (cl-defgeneric clutch-db-escape-literal (conn value)
   "Escape VALUE as a SQL string literal for CONN's dialect.")
-
-(defun clutch-db--param-literal (conn value)
-  "Return VALUE rendered as an SQL literal for CONN."
-  (cond
-   ((null value) "NULL")
-   ((numberp value) (number-to-string value))
-   ((stringp value) (clutch-db-escape-literal conn value))
-   ((and (listp value)
-         (clutch-db-format-temporal value))
-    (clutch-db-escape-literal conn (clutch-db-format-temporal value)))
-   ((or (hash-table-p value) (vectorp value))
-    (clutch-db-escape-literal
-     conn
-     (condition-case nil
-         (json-serialize value)
-       (error (format "%S" value)))))
-   (t
-    (clutch-db-escape-literal conn (format "%S" value)))))
 
 (defun clutch-db-substitute-params (sql params render-fn)
   "Return SQL with PARAMS substituted using RENDER-FN.
@@ -503,13 +504,6 @@ RENDER-FN is called once per parameter and must return the replacement string."
       (signal 'clutch-db-error
               (list (format "Too many parameters for SQL template: %s" sql))))
     (apply #'concat (nreverse parts))))
-
-(defun clutch-db-render-sql-params (conn sql params)
-  "Return SQL rendered for CONN with PARAMS interpolated as SQL literals."
-  (clutch-db-substitute-params
-   sql params
-   (lambda (value)
-     (clutch-db--param-literal conn value))))
 
 ;; Schema
 

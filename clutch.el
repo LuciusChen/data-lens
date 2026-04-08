@@ -2221,10 +2221,8 @@ when completion triggers during an in-flight query)."
                     (let ((cols
                            (if sync-columns-p
                                (or (clutch--cached-columns schema tbl)
-                                   (progn
-                                     (when schema
-                                       (clutch--ensure-columns-async conn schema tbl))
-                                     nil))
+                                   (and schema
+                                        (clutch--ensure-columns conn schema tbl)))
                              (or (clutch--cached-columns schema tbl)
                                  (clutch--safe-completion-call
                                   (lambda ()
