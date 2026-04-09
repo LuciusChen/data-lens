@@ -650,7 +650,10 @@ the primary set is =TABLE= / =VIEW= / =SYNONYM=, configurable via
 returns quickly with schema snapshot objects and any already-warmed metadata,
 then keeps warming slower categories such as indexes, sequences, and routines
 in the background after schema refreshes.  Once an object is resolved, =RET=
-runs the object's default action.
+runs the object's default action.  In query consoles and the REPL, when point
+is already on a table-like object, =C-c C-j= opens the picker prefilled with
+that name instead of inserting browse SQL immediately; =RET= stays the explicit
+browse trigger.
 
 =C-c C-d= is a describe-focused wrapper over the same resolution logic.  It resolves
 the object at point when possible; otherwise it prompts with the same flat

@@ -1666,10 +1666,22 @@ passed to the fallback reader."
 (defun clutch-jump (&optional entry)
   "Resolve ENTRY, or an object at point, and run its default action."
   (interactive)
-  (let ((entry (or entry
-                   (clutch--resolve-object-dwim "Jump to object: "
-                                                nil nil
-                                                clutch-primary-object-types))))
+  (let* ((prompt "Jump to object: ")
+         (entry (or entry
+                    (if-let* (((derived-mode-p 'clutch-mode 'clutch-repl-mode))
+                              (at-point (clutch-object-at-point))
+                              ((clutch--table-like-entry-p at-point))
+                              ((clutch--object-type-allowed-p
+                                at-point clutch-primary-object-types)))
+                        (clutch-object-read
+                         prompt nil
+                         (or (thing-at-point 'symbol t)
+                             (plist-get at-point :name))
+                         nil
+                         clutch-primary-object-types)
+                      (clutch--resolve-object-dwim prompt
+                                                   nil nil
+                                                   clutch-primary-object-types)))))
     (clutch--run-object-action entry (clutch--object-default-action-id entry))))
 
 ;;;###autoload
