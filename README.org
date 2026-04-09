@@ -49,7 +49,7 @@ For backend-specific implementation notes, see
 
 - Single-page result display with horizontal scrolling for wide tables
 - SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
-  - =mode-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, no-PK guidance, active filters, and cursor position (=R-N:column=) (with =nerd-icons=, Unicode fallback)
+  - =mode-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, no-PK guidance, active filters, and cursor position (=R-N:column-N/M=) (with =nerd-icons=, Unicode fallback)
   - =header-line=: column names with =│= borders and underlined labels
 - After execution, focus stays in the SQL buffer while results refresh below
 - Last successfully executed SQL is marked at the statement start gutter in the editor

@@ -892,6 +892,18 @@ ROWS defaults to a small three-row sample."
                      '((:family "Symbols Nerd Font Mono")
                        font-lock-keyword-face))))))
 
+(ert-deftest clutch-test-footer-cursor-part-shows-column-position ()
+  "Footer cursor segment should include the current column index and total."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "amount" "created_at"))
+    (insert "amount")
+    (put-text-property (point-min) (point-max) 'clutch-row-idx 11)
+    (put-text-property (point-min) (point-max) 'clutch-col-idx 1)
+    (goto-char (point-min))
+    (should (string-match-p "R-12:amount-2/3"
+                            (substring-no-properties
+                             (clutch--footer-cursor-part))))))
+
 (ert-deftest clutch-test-render-footer-warns-when-primary-key-missing ()
   "Footer should explain when edit/delete are disabled due to missing PK."
   (with-temp-buffer

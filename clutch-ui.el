@@ -776,6 +776,7 @@ the page length.  TOTAL-ROWS describes the full result size when known."
     (when (and ridx cidx)
       (let* ((hi 'font-lock-keyword-face)
              (dim 'font-lock-comment-face)
+             (total-cols (length clutch--result-columns))
              (raw-name (or (nth cidx clutch--result-columns) ""))
              (col-name (if (> (length raw-name) 20)
                            (concat (substring raw-name 0 17) "...")
@@ -783,7 +784,8 @@ the page length.  TOTAL-ROWS describes the full result size when known."
         (concat (clutch--footer-icon '(mdicon . "nf-md-cursor_default_click_outline") "⌖" hi)
                 (propertize (format "R-%d" (1+ ridx)) 'face hi)
                 (propertize ":" 'face dim)
-                (propertize col-name 'face hi))))))
+                (propertize (format "%s-%d/%d" col-name (1+ cidx) total-cols)
+                            'face hi))))))
 
 (defun clutch--render-footer (row-count page-num page-size total-rows)
   "Return the static footer string for pagination state.
