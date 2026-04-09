@@ -741,7 +741,8 @@ signaled condition."
 The returned plist keeps the original backend-facing keys, but fills in the
 password that `clutch--resolve-password' produced so later reconnects reuse the
 same credentials as the successful foreground connection."
-  (let* ((backend (or (plist-get params :backend) 'mysql))
+  (let* ((backend (or (plist-get params :backend)
+                      (user-error "Connection params require :backend")))
          (params (clutch--normalize-timeout-params backend params))
          (password (clutch--resolve-password params)))
     (when (and (clutch--jdbc-backend-p backend)
@@ -759,8 +760,8 @@ same credentials as the successful foreground connection."
 (defun clutch--build-conn (params)
   "Connect to a database using PARAMS, resolving the password via auth-source.
 Returns a live connection object or signals a `user-error'."
-  (let* ((backend  (or (plist-get params :backend) 'mysql))
-         (params   (clutch--materialize-connection-params params))
+  (let* ((params   (clutch--materialize-connection-params params))
+         (backend  (plist-get params :backend))
          (password (plist-get params :password))
          (db-params (cl-loop for (k v) on params by #'cddr
                              unless (memq k '(:sql-product :backend :password :pass-entry))
@@ -820,7 +821,8 @@ Leaves PARAMS unchanged when :password or :pass-entry is already set."
 (defun clutch--read-connection-params ()
   "Prompt the user for connection parameters and return a params plist.
 Offers saved connections from `clutch-connection-alist' when non-empty,
-otherwise prompts for host/port/user/password/database individually.
+otherwise prompts for :backend first, then for the backend-specific
+connection parameters.
 The password is resolved via `auth-source' before falling back to `read-passwd'."
   (clutch--ensure-clutch-loaded)
   (if clutch-connection-alist
@@ -829,16 +831,33 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
                                       nil t))
              (params (clutch--saved-connection-params name)))
         params)
-    (let* ((host          (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
-           (port          (read-number "Port (3306): " 3306))
-           (user          (read-string "User: "))
-           (manual-params (list :host host :port port :user user))
-           (pw            (or (clutch--resolve-password manual-params)
-                              (read-passwd "Password: ")))
-           (db            (read-string "Database (optional): ")))
-      (append manual-params
-              (list :password pw
-                    :database (unless (string-empty-p db) db))))))
+    (let* ((backend (intern
+                     (completing-read
+                      "Backend: "
+                      (mapcar #'symbol-name
+                              '(mysql pg sqlite oracle sqlserver db2 snowflake redshift))
+                      nil t nil nil "mysql"))))
+      (if (eq backend 'sqlite)
+          (list :backend 'sqlite
+                :database (read-string "Database (:memory:): " nil nil ":memory:"))
+        (let* ((port-default (pcase backend
+                               ('mysql 3306)
+                               ('pg 5432)
+                               ('oracle 1521)
+                               ('sqlserver 1433)
+                               ('db2 50000)
+                               ('redshift 5439)
+                               ('snowflake 443)))
+               (host (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
+               (port (read-number (format "Port (%d): " port-default) port-default))
+               (user (read-string "User: "))
+               (manual-params (list :backend backend :host host :port port :user user))
+               (pw (or (clutch--resolve-password manual-params)
+                       (read-passwd "Password: ")))
+               (db (read-string "Database (optional): ")))
+          (append manual-params
+                  (list :password pw
+                        :database (unless (string-empty-p db) db))))))))
 
 ;;;; Interactive connect/disconnect
 
@@ -858,7 +877,7 @@ params; see `clutch-connection-alist' for details."
        "Uncommitted changes will be lost.  Disconnect? "))
     (let* ((params  (clutch--connect-params-for-current-buffer))
            (effective-params (clutch--materialize-connection-params params))
-           (product (clutch--effective-sql-product params))
+           (product (clutch--effective-sql-product effective-params))
            (conn    (clutch--build-conn params)))
       (when old-live-p
         (clutch--do-disconnect old-conn))

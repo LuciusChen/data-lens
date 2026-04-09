@@ -104,15 +104,22 @@ Clone this repository and add it to your =load-path=
 (skip this if installed via a package manager):
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "/path/to/mysql")
-(add-to-list 'load-path "/path/to/pg-el")
 (add-to-list 'load-path "/path/to/clutch")
+;; Add the native backend packages you actually use:
+;; (add-to-list 'load-path "/path/to/mysql")  ; for :backend mysql
+;; (add-to-list 'load-path "/path/to/pg-el")  ; for :backend pg
 (require 'clutch)
 #+end_src
 
-When installed from MELPA, =mysql= and =pg= are pulled in as package
-dependencies.  For Org-Babel support, install the separate =ob-clutch=
-package.
+When installed from MELPA, install =clutch= plus the native backend packages
+you actually use:
+
+- =mysql= for =:backend mysql=
+- =pg= for =:backend pg=
+
+SQLite support is built in on Emacs 29.1+, and JDBC support ships inside
+=clutch= itself (the runtime still needs Java 17+ and =clutch-jdbc-agent.jar=).
+For Org-Babel support, install the separate =ob-clutch= package.
 
 * Interactive Client
 
@@ -144,8 +151,7 @@ package.
                           :database "/path/to/my.db"))))
 #+end_src
 
-Each entry should specify =:backend= explicitly (=mysql=, =pg=, =sqlite=, or a JDBC driver symbol).
-Omitting =:backend= defaults to =mysql=, but explicit is clearer.
+Each entry must specify =:backend= explicitly (=mysql=, =pg=, =sqlite=, or a JDBC driver symbol).
 SQLite connections only require =:database= (the file path); no host, port, or user.
 Use =":memory:"= for a transient in-memory database (data is lost when disconnected).
 =:password= is optional for network backends — see [[#password-management][Password Management]] for auth-source integration.
@@ -174,6 +180,8 @@ M-x clutch-query-console   ;; Select a saved connection → opens *clutch: NAME*
 
 Repeated calls with the same name switch to the existing buffer instead of
 opening a new one.  Use =clutch-switch-console= to jump between open consoles.
+If no saved connections are configured, =clutch-connect= first prompts for
+=:backend= and then asks for the matching connection fields.
 
 *** 3. Write and execute SQL
 
@@ -766,11 +774,8 @@ label instead of plain =JDBC=.
 
 *** Setup
 
-#+begin_src emacs-lisp
-(require 'clutch-db-jdbc)
-#+end_src
-
-On first =clutch-connect= to a JDBC backend, clutch will prompt to
+On first =clutch-connect= to a JDBC backend, clutch loads
+=clutch-db-jdbc.el= automatically and then prompts to
 download the agent jar and the required driver jar automatically.
 Just answer =y= at each prompt — no manual setup commands needed.
 
@@ -998,8 +1003,6 @@ Configuration:
 
 #+begin_src emacs-lisp
 (require 'ob-clutch)
-;; For JDBC backends also load:
-(require 'clutch-db-jdbc)
 
 (with-eval-after-load 'org
   (org-babel-do-load-languages

@@ -1547,6 +1547,56 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
    (clutch-db-connect 'unknown '(:host "localhost"))
    :type 'user-error))
 
+(ert-deftest clutch-db-test-native-backend-missing-package-errors-clearly ()
+  "Missing native backend packages should raise a direct user error."
+  (dolist (case '((mysql clutch-db-mysql "mysql package")
+                  (pg clutch-db-pg "pg package")))
+    (pcase-let ((`(,backend ,feature ,expected) case))
+      (ert-info ((symbol-name backend))
+        (let ((orig-require (symbol-function 'require)))
+          (cl-letf (((symbol-function 'require)
+                     (lambda (requested &optional filename noerror)
+                       (if (eq requested feature)
+                           (signal 'file-missing
+                                   (list "Cannot open load file"
+                                         "No such file or directory"
+                                         (symbol-name feature)))
+                         (funcall orig-require requested filename noerror)))))
+            (condition-case err
+                (progn
+                  (clutch-db-connect backend '(:host "localhost"))
+                  (should nil))
+              (user-error
+               (should (string-match-p expected (cadr err)))))))))))
+
+(ert-deftest clutch-db-test-jdbc-driver-backend-loads-jdbc-on-demand ()
+  "Driver-style JDBC backends should load `clutch-db-jdbc' on demand."
+  (let ((clutch-db--backend-features
+         '((mysql . (:require clutch-db-mysql :connect-fn clutch-db-mysql-connect))
+           (pg . (:require clutch-db-pg :connect-fn clutch-db-pg-connect))
+           (sqlite . (:require clutch-db-sqlite :connect-fn clutch-db-sqlite-connect))))
+        required
+        captured-params)
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional _filename _noerror)
+                 (pcase feature
+                   ('clutch-db-jdbc
+                    (setq required t)
+                    (push (cons 'oracle
+                                (list :require 'clutch-db-jdbc
+                                      :connect-fn (lambda (params)
+                                                    (setq captured-params params)
+                                                    'fake-conn)))
+                          clutch-db--backend-features)
+                    t)
+                   (_ t))))
+              ((symbol-function 'clutch-db-init-connection)
+               (lambda (_conn) nil)))
+      (should (eq (clutch-db-connect 'oracle '(:user "scott" :database "orcl"))
+                  'fake-conn))
+      (should required)
+      (should (equal captured-params '(:user "scott" :database "orcl"))))))
+
 ;;;; Unit tests — MySQL type category mapping
 
 (ert-deftest clutch-db-test-mysql-type-categories ()

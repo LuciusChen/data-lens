@@ -3,7 +3,7 @@
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (mysql "0.1") (pg "0.40") (transient "0.3.7"))
+;; Package-Requires: ((emacs "28.1") (transient "0.3.7"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 ;; This file is part of clutch.
@@ -228,8 +228,8 @@ Each entry has the form:
            [:connect-timeout N] [:read-idle-timeout N]
            [:query-timeout N] [:rpc-timeout N]))
 NAME is a string used for `completing-read'.
-:backend is a symbol (\\='mysql, \\='pg, \\='sqlite, or \\='jdbc;
-default \\='mysql).
+:backend is required and names the backend symbol (\\='mysql, \\='pg,
+\\='sqlite, or a JDBC backend such as \\='oracle).
 :sql-product overrides `clutch-sql-product' for this connection.
 :tls is a convenience shortcut for backend TLS defaults.  For MySQL,
 an explicit `:tls nil' forces plaintext and suppresses the automatic
@@ -858,7 +858,7 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
 (defun clutch--effective-sql-product (params)
   "Return the SQL product to use for connection PARAMS."
   (or (plist-get params :sql-product)
-      (pcase (or (plist-get params :backend) 'mysql)
+      (pcase (plist-get params :backend)
         ((or 'pg 'postgresql) 'postgres)
         ((or 'mysql 'mariadb) 'mysql)
         ('sqlite 'sqlite)

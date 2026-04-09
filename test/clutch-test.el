@@ -6167,13 +6167,22 @@ crashing the UI layer."
                          :user "u" :read-timeout 5))
    :type 'user-error))
 
-(ert-deftest clutch-test-effective-sql-product-defaults-missing-backend-to-mysql ()
-  "Saved connections without :backend should still derive mysql SQL product."
-  (should (eq (clutch--effective-sql-product '(:host "127.0.0.1"
+(ert-deftest clutch-test-effective-sql-product-returns-nil-without-backend ()
+  "Connections without :backend should not infer a SQL product."
+  (should-not (clutch--effective-sql-product '(:host "127.0.0.1"
                                                :port 3306
                                                :user "u"
-                                               :database "db"))
-              'mysql)))
+                                               :database "db"))))
+
+(ert-deftest clutch-test-build-conn-errors-without-backend ()
+  "Building a connection should fail fast when :backend is missing."
+  (should-error
+   (clutch--build-conn '(:host "127.0.0.1" :port 3306 :user "u" :database "db"))
+   :type 'user-error)
+  (condition-case err
+      (clutch--build-conn '(:host "127.0.0.1" :port 3306 :user "u" :database "db"))
+    (user-error
+     (should (string-match-p ":backend" (cadr err))))))
 
 (ert-deftest clutch-test-default-connect-timeout-is-10-seconds ()
   "Project default connect timeout should stay at 10 seconds."
@@ -6272,6 +6281,40 @@ crashing the UI layer."
                      (lambda (&rest _args) "alpha")))
             (should (equal (funcall reader) expected))
             (should required)))))))
+
+(ert-deftest clutch-test-read-connection-params-prompts-for-backend-when-unsaved ()
+  "Manual connection prompts should collect an explicit backend first."
+  (let ((clutch-connection-alist nil)
+        backend-prompt
+        port-default)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (prompt _collection &rest _args)
+                 (setq backend-prompt prompt)
+                 "pg"))
+              ((symbol-function 'read-string)
+               (lambda (prompt &optional _initial _history default-value _inherit)
+                 (pcase prompt
+                   ("Host (127.0.0.1): " "db.example.com")
+                   ("User: " "alice")
+                   ("Database (optional): " "app_db")
+                   (_ (or default-value "")))))
+              ((symbol-function 'read-number)
+               (lambda (_prompt default)
+                 (setq port-default default)
+                 5544))
+              ((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'read-passwd)
+               (lambda (&rest _args) "secret")))
+      (should (equal (clutch--read-connection-params)
+                     '(:backend pg
+                       :host "db.example.com"
+                       :port 5544
+                       :user "alice"
+                       :password "secret"
+                       :database "app_db")))
+      (should (string-match-p "Backend" backend-prompt))
+      (should (= port-default 5432)))))
 
 ;;;; Connection — transaction and auto-commit
 
@@ -6876,7 +6919,7 @@ This applies when the buffer owns the connection."
                   ((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
                   ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
                   ((symbol-function 'clutch--read-connection-params)
-                   (lambda () '(:host "localhost")))
+                   (lambda () '(:backend mysql :host "localhost")))
                   ((symbol-function 'clutch--effective-sql-product) (lambda (_p) 'mysql))
                   ((symbol-function 'clutch--build-conn) (lambda (_p) new-conn))
                   ((symbol-function 'clutch--bind-connection-context) #'ignore)
