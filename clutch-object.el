@@ -39,6 +39,7 @@ Each value is a plist with at least :entries and :fetched-at.")
 (defvar embark-default-action-overrides)
 (defvar embark-target-finders)
 (defvar embark-keymap-alist)
+(defvar embark-around-action-hooks)
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
@@ -118,6 +119,13 @@ temporarily unavailable."
 
 (defvar clutch--object-dispatch-entry nil
   "Dynamic object entry currently being dispatched via Embark.")
+
+(defvar clutch--object-completion-entry-map nil
+  "Hash table from the most recent object completion session.
+Maps candidate strings to entry plists.  Replaced at the start of
+each `clutch--object-entry-reader' call so that Embark action
+hooks can resolve a target string back to an entry after the
+minibuffer has been quit.")
 
 (defun clutch--object-entry-key (entry)
   "Return a stable identity key for object ENTRY."
@@ -581,6 +589,7 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
                         (display-sort-function . identity)
                         (cycle-sort-function . identity))
                     (complete-with-action action (candidate-list) str pred))))
+      (setq clutch--object-completion-entry-map entry-map)
       (let ((choice
              (completing-read
               prompt
@@ -746,6 +755,8 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
         (matches (clutch--object-matches-at-point table-like-only allowed-types)))
     (clutch--remember-current-object
      (cond
+      (clutch--object-dispatch-entry
+       clutch--object-dispatch-entry)
       (current-object
        current-object)
       ((clutch--preferred-object-match matches table-like-only))
@@ -1747,6 +1758,20 @@ When PREDICATE is non-nil, keep only action specs matching it."
            `(,(clutch--embark-target-type clutch-browser-current-object)
              ,clutch-browser-current-object)))))))
 
+(cl-defun clutch--embark-with-resolved-entry
+    (&rest rest &key target run &allow-other-keys)
+  "Resolve Embark TARGET string to entry plist for action dispatch.
+Looks up TARGET in `clutch--object-completion-entry-map' and binds
+the result to `clutch--object-dispatch-entry' so that action commands
+see the minibuffer candidate rather than the object at point.
+Clears the map after resolution to prevent stale cross-session matches."
+  (let* ((map clutch--object-completion-entry-map)
+         (clutch--object-dispatch-entry
+          (when (and (stringp target) map)
+            (gethash target map))))
+    (setq clutch--object-completion-entry-map nil)
+    (when run (apply run rest))))
+
 (with-eval-after-load 'embark
   (add-to-list 'embark-default-action-overrides
                '(clutch-object . clutch-object-default-action))
@@ -1778,7 +1803,15 @@ When PREDICATE is non-nil, keep only action specs matching it."
   (add-to-list 'embark-keymap-alist
                '(clutch-object . clutch-embark-object-actions))
   (add-to-list 'embark-keymap-alist
-               '(clutch-target-object . clutch-embark-target-object-actions)))
+               '(clutch-target-object . clutch-embark-target-object-actions))
+
+  ;; Resolve minibuffer candidate to entry plist before running actions.
+  ;; Covers both explicit keymap actions and the default action (RET / embark-dwim).
+  (dolist (cmd (cons 'clutch-object-default-action
+                     (mapcar (lambda (spec) (plist-get spec :command))
+                             (clutch--embark-action-specs))))
+    (add-to-list 'embark-around-action-hooks
+                 (list cmd #'clutch--embark-with-resolved-entry))))
 
 (provide 'clutch-object)
 ;;; clutch-object.el ends here

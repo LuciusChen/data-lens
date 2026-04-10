@@ -10136,6 +10136,61 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
                      '(clutch-target-object
                        (:name "ORDER_IDX" :type "INDEX" :target-table "ORDERS")))))))
 
+(ert-deftest clutch-test-embark-around-hook-resolves-candidate ()
+  "Around-action hook should resolve target string to entry via completion map."
+  (let* ((entry '(:name "xxx_detail" :type "TABLE" :schema "public"))
+         (clutch--object-completion-entry-map (make-hash-table :test 'equal)))
+    (puthash "xxx_detail" entry clutch--object-completion-entry-map)
+    ;; Simulate what Embark passes to around hooks.
+    (let (resolved)
+      (clutch--embark-with-resolved-entry
+       :target "xxx_detail"
+       :run (lambda (&rest _)
+              (setq resolved clutch--object-dispatch-entry)))
+      (should (equal resolved entry)))))
+
+(ert-deftest clutch-test-embark-around-hook-clears-map ()
+  "Around-action hook should clear the completion map after resolution."
+  (let ((clutch--object-completion-entry-map (make-hash-table :test 'equal)))
+    (puthash "xxx" '(:name "xxx" :type "TABLE") clutch--object-completion-entry-map)
+    (clutch--embark-with-resolved-entry
+     :target "xxx"
+     :run (lambda (&rest _) nil))
+    ;; The global should be nil after the hook returns.
+    (should (null (symbol-value 'clutch--object-completion-entry-map)))))
+
+(ert-deftest clutch-test-embark-around-hook-nil-for-unknown-target ()
+  "Around-action hook should leave dispatch entry nil for unknown targets."
+  (let* ((clutch--object-completion-entry-map (make-hash-table :test 'equal)))
+    (puthash "xxx" '(:name "xxx" :type "TABLE") clutch--object-completion-entry-map)
+    (let (resolved)
+      (clutch--embark-with-resolved-entry
+       :target "yyy"
+       :run (lambda (&rest _)
+              (setq resolved clutch--object-dispatch-entry)))
+      (should (null resolved)))))
+
+(ert-deftest clutch-test-embark-around-hook-nil-without-map ()
+  "Around-action hook should be a no-op when no completion map exists."
+  (let ((clutch--object-completion-entry-map nil))
+    (let (resolved)
+      (clutch--embark-with-resolved-entry
+       :target "xxx"
+       :run (lambda (&rest _)
+              (setq resolved clutch--object-dispatch-entry)))
+      (should (null resolved)))))
+
+(ert-deftest clutch-test-resolve-object-entry-prefers-dispatch-entry ()
+  "Resolution should prefer dispatch entry over point matches."
+  (let ((clutch--object-dispatch-entry '(:name "xxx_detail" :type "TABLE")))
+    (with-temp-buffer
+      (setq-local clutch-connection 'fake-conn)
+      ;; Insert a different object name at point to prove dispatch wins.
+      (insert "xxx")
+      (goto-char (point-min))
+      (should (equal (clutch--resolve-object-entry "Test: ")
+                     '(:name "xxx_detail" :type "TABLE"))))))
+
 (ert-deftest clutch-test-embark-action-specs-hide-default-actions ()
   "Embark menus should omit actions that duplicate `RET'."
   (should (equal (mapcar (lambda (spec) (plist-get spec :id))
