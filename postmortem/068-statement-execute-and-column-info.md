@@ -14,30 +14,38 @@ Both are user-visible workflow changes, so the decision needs to be explicit.
 
 ## Decision
 
-- Add `clutch-execute-statement-at-point` on `C-c ;`.
+- Add `clutch-execute-statement-at-point`.
   It uses semicolons as the only statement delimiter and ignores blank lines.
+- Teach `clutch-execute-dwim` to prefer that semicolon-delimited statement
+  behavior whenever the current SQL buffer contains top-level semicolons.
+  The direct `C-c ;` binding was later removed once the DWIM path absorbed the
+  same safe default.
 - Add `clutch-result-column-info` on `?` in result buffers.
   It shows column type/default/nullable/comment info at point.
 
-## Why `C-c ;` Exists Beside `C-c C-c`
+## Why DWIM Now Prefers Statement Semantics in SQL Buffers
 
 `C-c C-c` remains the DWIM entry point:
 
 - region if active
-- otherwise query-at-point using the existing lightweight boundary rules
+- otherwise semicolon-delimited statement-at-point when the buffer is clearly
+  using semicolon-delimited SQL
+- otherwise query-at-point using the lightweight blank-line-aware boundary rules
 
-That command is still useful for quick fragments and legacy behavior.  The new
-`C-c ;` is not a replacement; it is the explicit "run the semicolon-delimited
-statement I am inside" command.
+That keeps the default execution key aligned with real SQL editing.  When a
+buffer already contains top-level semicolons, the more precise statement
+boundary is the safer interpretation.  The blank-line query-at-point fallback
+still matters for quick fragments and scratch-style buffers with no semicolons.
 
-Separating the commands keeps both workflows legible:
+The explicit `clutch-execute-statement-at-point` command remains available for
+`M-x` and transient workflows, but it no longer needs its own dedicated key in
+`clutch-mode`.
 
-- `C-c C-c`: broad DWIM
-- `C-c ;`: exact statement execution
+This preserves both workflows without forcing users to remember a second
+execute key:
 
-The direct key is `;` rather than `RET` because Emacs normalizes `RET` and
-`C-m` to the same event.  `C-c RET` therefore collides with `C-c C-m`, which is
-already used for transaction commit.
+- `C-c C-c`: broad DWIM, but semicolon-aware when the buffer needs it
+- `M-x clutch-execute-statement-at-point` / transient `X`: exact statement execution
 
 ## Why Blank Lines Must Not Split Statements Here
 
@@ -75,10 +83,10 @@ heavy describe UI.
 
 ## Alternatives Rejected
 
-### Replace `C-c C-c` semantics entirely
+### Keep `C-c C-c` on blank-line query parsing even in semicolon-delimited buffers
 
-Rejected because it would silently change an established execute path instead of
-adding a more explicit one.
+Rejected because it makes the primary execute key unsafe for valid SQL strings
+or formatted statements that contain blank lines.
 
 ### Use paragraph / blank-line heuristics for the new command
 
@@ -92,6 +100,10 @@ point-local question.
 
 ## Consequences
 
-- SQL buffers now have an explicit semicolon-scoped execute command.
+- SQL buffers now use semicolon-scoped execution by default when the buffer is
+  clearly semicolon-delimited.
+- The explicit semicolon-scoped command remains available for command-driven
+  workflows, but no longer needs a dedicated `C-c ;` binding.
 - Result buffers expose column metadata directly at point.
-- Existing DWIM execute behavior remains available for users who prefer it.
+- Existing blank-line query-at-point behavior remains available as the fallback
+  when no top-level semicolons are present.

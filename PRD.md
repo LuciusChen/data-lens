@@ -159,8 +159,7 @@ SQL query editing and execution mode. The primary entry point for interacting wi
 | Key | Command | Description |
 |-----|---------|-------------|
 | `C-c C-e` | `clutch-connect` | Connect; query consoles reconnect their own saved connection |
-| `C-c C-x` | `clutch-execute` | Execute SQL at point or region |
-| `C-c ;` | `clutch-execute-statement-at-point` | Execute statement (`;`-only delimiter; blank lines preserved) |
+| `C-c C-c` | `clutch-execute-dwim` | Execute region, or the current `;`-delimited statement / query at point |
 | `C-c C-s` | `clutch-refresh-schema` | Refresh schema cache |
 | `C-c ?` | Transient dispatch | Main command menu |
 | `TAB` | Completion at point | Table/column name CAPF |
@@ -327,7 +326,8 @@ Line-by-line SQL evaluation with history and inline results.
 
 | Command | Description |
 |---------|-------------|
-| `clutch-execute` | Execute SQL at point or selected region |
+| `clutch-execute-dwim` | Execute selected region, or the current `;`-delimited statement / query at point |
+| `clutch-execute` | Execute SQL from any buffer |
 | `clutch-execute-statement-at-point` | Execute statement using `;` as only delimiter (blank lines preserved) |
 | `clutch--refresh-current-schema` | Refresh schema (sync for native; async for JDBC) |
 
@@ -576,8 +576,9 @@ Connection profile plist keys:
 
 ```
 User types SQL in clutch-mode
-  → C-c C-x / clutch-execute
-  → Parse: selected region OR query at point (delimited by semicolon/blank lines)
+  → C-c C-c / clutch-execute-dwim
+  → Parse: selected region OR the current top-level `;`-delimited statement
+           OR, when no top-level semicolons exist, the blank-line-aware query at point
   → clutch-db-query (dispatched by cl-defgeneric to backend)
   → Display in clutch-result-mode buffer
   → Initialize pagination: page 0, first clutch-result-max-rows rows

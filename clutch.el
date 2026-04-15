@@ -2270,7 +2270,6 @@ SQL keyword/function docs are shown even without a connection."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map sql-mode-map)
     (define-key map (kbd "C-c C-c") #'clutch-execute-dwim)
-    (define-key map (kbd "C-c ;") #'clutch-execute-statement-at-point)
     (define-key map (kbd "C-c C-r") #'clutch-execute-region)
     (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
     (define-key map (kbd "C-c C-e") #'clutch-connect)
@@ -2293,7 +2292,7 @@ SQL keyword/function docs are shown even without a connection."
 
 \\<clutch-mode-map>
 Key bindings:
-  \\[clutch-execute-query-at-point]	Execute query at point
+  \\[clutch-execute-dwim]	Execute region or statement/query at point
   \\[clutch-execute-region]	Execute region
   \\[clutch-execute-buffer]	Execute buffer
   \\[clutch-connect]	Connect to server

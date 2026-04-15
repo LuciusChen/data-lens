@@ -2926,6 +2926,21 @@ This avoids json-serialize escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
                                     "DELETE FROM t WHERE id=1;")
                                   "\n")))))))
 
+(ert-deftest clutch-test-preview-execution-sql-prefers-semicolon-statement-bounds-in-sql-buffer ()
+  "Preview in SQL buffers should use DWIM statement bounds when semicolons exist."
+  (with-temp-buffer
+    (let ((sql "INSERT INTO line_sep_demo (id, note)\nVALUES (1, E'first line\n\nthird line');\n\nSELECT 2;")
+          captured)
+      (insert sql)
+      (goto-char (point-min))
+      (search-forward "third line")
+      (cl-letf (((symbol-function 'clutch--preview-sql-buffer)
+                 (lambda (payload)
+                   (setq captured payload))))
+        (clutch-preview-execution-sql)
+        (should (equal captured
+                       "INSERT INTO line_sep_demo (id, note)\nVALUES (1, E'first line\n\nthird line')"))))))
+
 (ert-deftest clutch-test-result-effective-query-applies-where-filter ()
   "Result workflows should reuse the filtered SQL, not just display the filter."
   (with-temp-buffer
@@ -4925,13 +4940,14 @@ connection should still disconnect."
       (should-not toggle-called)
       (should (clutch--tx-dirty-p clutch-connection)))))
 
-(ert-deftest clutch-test-statement-keybinding-does-not-collide-with-commit ()
-  "Statement execution should use a distinct key from transaction commit."
-  (should (eq (lookup-key clutch-mode-map (kbd "C-c ;"))
-              #'clutch-execute-statement-at-point))
+(ert-deftest clutch-test-dwim-keybinding-does-not-collide-with-commit ()
+  "DWIM execution should keep the primary execute key distinct from commit."
+  (should (eq (lookup-key clutch-mode-map (kbd "C-c C-c"))
+              #'clutch-execute-dwim))
   (should (eq (lookup-key clutch-mode-map (kbd "C-c C-m"))
               #'clutch-commit))
-  (should-not (equal (kbd "C-c ;") (kbd "C-c C-m"))))
+  (should-not (lookup-key clutch-mode-map (kbd "C-c ;")))
+  (should-not (equal (kbd "C-c C-c") (kbd "C-c C-m"))))
 
 (ert-deftest clutch-test-execute-runs-risky-dml-confirmation ()
   "Execute should run risky DML confirmation before dispatch."
@@ -9017,6 +9033,42 @@ database.  Only a query re-execution should discard them."
       (should (= (hash-table-count ob-clutch--connection-cache) 0)))))
 
 ;;; Feature: statement-bounds-at-point (;-only delimiter)
+
+(ert-deftest clutch-test-execute-dwim-prefers-semicolon-statement-bounds ()
+  "DWIM execution should prefer statement bounds in semicolon-delimited buffers."
+  (with-temp-buffer
+    (let ((sql "INSERT INTO line_sep_demo (id, note)\nVALUES (1, E'first line\n\nthird line');\n\nSELECT 2;")
+          executed ensured)
+      (insert sql)
+      (goto-char (point-min))
+      (search-forward "third line")
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 (lambda ()
+                   (setq ensured t)))
+                ((symbol-function 'clutch--execute-and-mark)
+                 (lambda (payload _beg _end)
+                   (setq executed payload))))
+        (clutch-execute-dwim (point) (point))
+        (should ensured)
+        (should (equal executed
+                       "INSERT INTO line_sep_demo (id, note)\nVALUES (1, E'first line\n\nthird line')"))))))
+
+(ert-deftest clutch-test-execute-dwim-falls-back-to-query-bounds-without-semicolons ()
+  "DWIM execution should fall back to query-at-point when no semicolons exist."
+  (with-temp-buffer
+    (let (executed ensured)
+      (insert "SELECT 1\n\nSELECT 2")
+      (goto-char (point-min))
+      (search-forward "SELECT 2")
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 (lambda ()
+                   (setq ensured t)))
+                ((symbol-function 'clutch--execute-and-mark)
+                 (lambda (payload _beg _end)
+                   (setq executed payload))))
+        (clutch-execute-dwim (point) (point))
+        (should ensured)
+        (should (equal executed "SELECT 2"))))))
 
 (ert-deftest clutch-test-statement-bounds-ignores-blank-lines ()
   "Statement bounds use only semicolons, ignoring blank lines."
