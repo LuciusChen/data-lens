@@ -1151,6 +1151,37 @@ Prefers an exact error position; otherwise highlights the whole statement."
                 (match-beginning 0)
               (point-max))))))
 
+(defun clutch--statement-delimited-buffer-p ()
+  "Return non-nil when the current buffer contains a top-level semicolon.
+Semicolons inside strings, line comments, and block comments do not count."
+  (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+         (len (length text))
+         (in-string nil)
+         (i 0)
+         found)
+    (while (and (< i len) (not found))
+      (let ((ch (aref text i)))
+        (cond
+         (in-string
+          (when (= ch in-string)
+            (setq in-string nil)))
+         ((= ch ?')  (setq in-string ?'))
+         ((= ch ?\") (setq in-string ?\"))
+         ((and (= ch ?-) (< (1+ i) len) (= (aref text (1+ i)) ?-))
+          (while (and (< i len) (/= (aref text i) ?\n))
+            (cl-incf i)))
+         ((and (= ch ?/) (< (1+ i) len) (= (aref text (1+ i)) ?*))
+          (cl-incf i 2)
+          (while (and (< (1+ i) len)
+                      (not (and (= (aref text i) ?*)
+                                (= (aref text (1+ i)) ?/))))
+            (cl-incf i))
+          (cl-incf i))
+         ((= ch ?\;)
+          (setq found t))))
+      (cl-incf i))
+    found))
+
 (defun clutch--preview-sql-buffer (sql)
   "Display SQL in the *clutch-preview* buffer."
   (let ((buf (get-buffer-create "*clutch-preview*")))
@@ -1191,7 +1222,7 @@ Prefers an exact error position; otherwise highlights the whole statement."
            (string-trim (buffer-substring-no-properties
                          (region-beginning) (region-end))))
           (t
-           (pcase-let* ((`(,beg . ,end) (clutch--query-bounds-at-point)))
+           (pcase-let* ((`(,beg . ,end) (clutch--dwim-bounds-at-point)))
              (string-trim (buffer-substring-no-properties beg end)))))))
     (when (or (null sql) (string-empty-p sql))
       (user-error "No SQL to preview"))
@@ -1250,6 +1281,15 @@ Semicolons inside strings, line comments, and block comments are skipped."
           (when (= end (point-max))
             (setq end (+ (point-min) b)))))
       (cons beg end))))
+
+(defun clutch--dwim-bounds-at-point ()
+  "Return point-local SQL bounds for DWIM execute and preview workflows.
+Prefer semicolon-delimited statement bounds when the current buffer
+contains any top-level semicolon; otherwise fall back to query-at-point
+bounds, which also split on blank lines."
+  (if (clutch--statement-delimited-buffer-p)
+      (clutch--statement-bounds-at-point)
+    (clutch--query-bounds-at-point)))
 
 ;;;###autoload
 (defun clutch-execute-statement-at-point ()
@@ -1334,9 +1374,12 @@ result buffer.  Stops and reports on the first error."
 
 ;;;###autoload
 (defun clutch-execute-dwim (beg end)
-  "Execute the region from BEG to END if active, otherwise execute query at point.
-When the region contains multiple semicolon-separated statements,
-they are executed sequentially."
+  "Execute SQL from BEG to END using the most useful local boundary.
+With an active region, execute that region.  Otherwise, prefer the
+semicolon-delimited statement at point when the current buffer contains
+top-level semicolons; fall back to the current query-at-point when it does
+not.  When the region contains multiple semicolon-separated statements, they
+are executed sequentially."
   (interactive
    (if (use-region-p)
        (list (region-beginning) (region-end))
@@ -1348,10 +1391,10 @@ they are executed sequentially."
         (if (cdr stmts)
             (clutch--execute-statements stmts)
           (clutch--execute-and-mark sql beg end)))
-    (pcase-let* ((`(,qb . ,qe) (clutch--query-bounds-at-point))
+    (pcase-let* ((`(,qb . ,qe) (clutch--dwim-bounds-at-point))
                  (sql (string-trim (buffer-substring-no-properties qb qe))))
       (when (string-empty-p sql)
-        (user-error "No query at point"))
+        (user-error "No SQL at point"))
       (clutch--execute-and-mark sql qb qe))))
 
 ;;;###autoload

@@ -1411,6 +1411,41 @@ ROWS defaults to a small three-row sample."
                       (buffer-substring-no-properties (car bounds) (cdr bounds)))
                      "SELECT 1 -- foo;\nFROM t")))))
 
+(ert-deftest clutch-test-execute-dwim-prefers-semicolon-statement-bounds ()
+  "DWIM execution should prefer semicolon-delimited statement bounds."
+  (with-temp-buffer
+    (insert "INSERT INTO demo(note) VALUES (E'first line\n\nthird line');\n\nSELECT 2")
+    (goto-char (point-min))
+    (search-forward "third")
+    (let (captured)
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch--execute-and-mark)
+                 (lambda (sql beg end &optional _conn)
+                   (setq captured
+                         (list sql
+                               (string-trim
+                                (buffer-substring-no-properties beg end)))))))
+        (clutch-execute-dwim (point) (point))
+        (should (equal captured
+                       '("INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"
+                         "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')")))))))
+
+(ert-deftest clutch-test-execute-dwim-falls-back-to-query-bounds-without-semicolons ()
+  "DWIM execution should keep blank-line query parsing when no top-level semicolon exists."
+  (with-temp-buffer
+    (insert "SELECT 1\n\nSELECT 2")
+    (goto-char (point-max))
+    (let (captured)
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch--execute-and-mark)
+                 (lambda (sql beg end &optional _conn)
+                   (setq captured
+                         (list sql
+                               (string-trim
+                                (buffer-substring-no-properties beg end)))))))
+        (clutch-execute-dwim (point) (point))
+        (should (equal captured '("SELECT 2" "SELECT 2")))))))
+
 ;;;; SQL parsing — table and alias extraction
 
 (ert-deftest clutch-test-tables-in-buffer-caches-until-buffer-changes ()
@@ -6622,13 +6657,14 @@ crashing the UI layer."
       (should-not toggle-called)
       (should (clutch--tx-dirty-p clutch-connection)))))
 
-(ert-deftest clutch-test-statement-keybinding-does-not-collide-with-commit ()
-  "Statement execution should use a distinct key from transaction commit."
-  (should (eq (lookup-key clutch-mode-map (kbd "C-c ;"))
-              #'clutch-execute-statement-at-point))
+(ert-deftest clutch-test-dwim-keybinding-does-not-collide-with-commit ()
+  "DWIM execution should keep the primary SQL key distinct from commit."
+  (should (eq (lookup-key clutch-mode-map (kbd "C-c C-c"))
+              #'clutch-execute-dwim))
+  (should-not (lookup-key clutch-mode-map (kbd "C-c ;")))
   (should (eq (lookup-key clutch-mode-map (kbd "C-c C-m"))
               #'clutch-commit))
-  (should-not (equal (kbd "C-c ;") (kbd "C-c C-m"))))
+  (should-not (equal (kbd "C-c C-c") (kbd "C-c C-m"))))
 
 ;;;; Connection — display key and icons
 
@@ -8057,6 +8093,19 @@ database.  Only a query re-execution should discard them."
                    (setq captured sql))))
         (clutch-preview-execution-sql)
         (should (equal captured "FILTER[id = 1]{SELECT * FROM t}"))))))
+
+(ert-deftest clutch-test-preview-execution-sql-prefers-semicolon-statement-bounds-in-sql-buffer ()
+  "Preview should mirror DWIM statement bounds for semicolon-delimited SQL buffers."
+  (with-temp-buffer
+    (insert "INSERT INTO demo(note) VALUES (E'first line\n\nthird line');\n\nSELECT 2")
+    (goto-char (point-min))
+    (search-forward "third")
+    (let (captured)
+      (cl-letf (((symbol-function 'clutch--preview-sql-buffer)
+                 (lambda (sql) (setq captured sql))))
+        (clutch-preview-execution-sql)
+        (should (equal captured
+                       "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"))))))
 
 (ert-deftest clutch-test-execute-params-fallback-renders-sql-before-query ()
   "Fallback parameter execution should render SQL via escape helpers."

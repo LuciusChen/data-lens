@@ -258,7 +258,7 @@ manually — the query console is not required.
 2. M-x clutch-mode        — enable clutch (inherits sql-mode syntax/fontification)
 3. C-c C-e                 — select a saved connection or enter params manually
                              Mode-line shows MySQL[root@127.0.0.1:3306/mydb]
-4. C-c C-c                 — execute query at point
+4. C-c C-c                 — execute region, or the current statement/query at point
 #+end_src
 
 In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps that generic
@@ -286,8 +286,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 
 | Key         | Action                     |
 |-------------+----------------------------|
-| =C-c C-c=   | Execute region or query at point |
-| =C-c ;=     | Execute statement at point (=;=-only delimiter; blank lines preserved) |
+| =C-c C-c=   | Execute region, or the current =;=-delimited statement / query at point |
 | =C-c C-r=   | Execute selected region          |
 | =C-c C-b=   | Execute entire buffer      |
 | =C-c C-e=   | Connect; query consoles reconnect their own saved connection |

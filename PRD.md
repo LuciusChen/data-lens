@@ -160,8 +160,7 @@ by `clutch--connection-key`: `clutch--schema-cache`,
 | Key | Command | Description |
 |-----|---------|-------------|
 | `C-c C-e` | `clutch-connect` | Connect; query consoles reconnect their own saved connection |
-| `C-c C-c` | `clutch-execute-dwim` | Execute the region when active, otherwise the query at point |
-| `C-c ;` | `clutch-execute-statement-at-point` | Execute statement (`;`-only delimiter; blank lines preserved) |
+| `C-c C-c` | `clutch-execute-dwim` | Execute the active region, otherwise prefer the current `;`-delimited statement and fall back to the query at point |
 | `C-c C-r` | `clutch-execute-region` | Execute the active region |
 | `C-c C-b` | `clutch-execute-buffer` | Execute the whole buffer |
 | `C-c C-m` | `clutch-commit` | Commit transaction (manual-commit connections only) |
@@ -392,7 +391,7 @@ on public `M-x` entry points and named commands that users may call directly.
 | `clutch-preview-execution-sql` | Preview the effective execution payload for the current workflow |
 | `clutch-execute-query-at-point` | Execute the SQL query at point |
 | `clutch-execute-statement-at-point` | Execute statement using `;` as only delimiter (blank lines preserved) |
-| `clutch-execute-dwim` | Execute the active region, or the query at point |
+| `clutch-execute-dwim` | Execute the active region, otherwise prefer the current `;`-delimited statement and fall back to the query at point |
 | `clutch-execute-region` | Execute the active region |
 | `clutch-execute-buffer` | Execute the whole buffer |
 | `clutch-execute` | Execute SQL from any buffer using the current/live clutch connection |
@@ -708,7 +707,7 @@ user-facing `defcustom`s.
 ```
 User types SQL in clutch-mode
   → C-c C-c / clutch-execute-dwim
-  → Parse: selected region OR query at point
+  → Parse: selected region OR current `;`-delimited statement OR query at point
   → clutch-db-query (dispatched by cl-defgeneric to backend)
   → Display in clutch-result-mode buffer
   → Initialize pagination: page 0, first clutch-result-max-rows rows
