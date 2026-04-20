@@ -9070,6 +9070,28 @@ database.  Only a query re-execution should discard them."
         (should ensured)
         (should (equal executed "SELECT 2"))))))
 
+(ert-deftest clutch-test-execute-region-splits-multiple-statements ()
+  "Region execution should split semicolon-delimited statements."
+  (with-temp-buffer
+    (let ((sql "INSERT INTO demo VALUES (1);\nINSERT INTO demo VALUES (2);")
+          executed ensured single-call)
+      (insert sql)
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 (lambda ()
+                   (setq ensured t)))
+                ((symbol-function 'clutch--execute-statements)
+                 (lambda (stmts)
+                   (setq executed stmts)))
+                ((symbol-function 'clutch--execute-and-mark)
+                 (lambda (&rest _args)
+                   (setq single-call t))))
+        (clutch-execute-region (point-min) (point-max))
+        (should ensured)
+        (should (equal executed
+                       '("INSERT INTO demo VALUES (1)"
+                         "INSERT INTO demo VALUES (2)")))
+        (should-not single-call)))))
+
 (ert-deftest clutch-test-statement-bounds-ignores-blank-lines ()
   "Statement bounds use only semicolons, ignoring blank lines."
   (with-temp-buffer

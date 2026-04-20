@@ -1372,25 +1372,31 @@ are executed sequentially."
      (list (point) (point))))
   (clutch--ensure-connection)
   (if (use-region-p)
-      (let* ((sql   (string-trim (buffer-substring-no-properties beg end)))
-             (stmts (clutch--split-statements sql)))
-        (if (cdr stmts)
-            (clutch--execute-statements stmts)
-          (clutch--execute-and-mark sql beg end)))
+      (clutch--execute-region-sql beg end)
     (pcase-let* ((`(,qb . ,qe) (clutch--dwim-bounds-at-point))
                  (sql (string-trim (buffer-substring-no-properties qb qe))))
       (when (string-empty-p sql)
         (user-error "No SQL at point"))
       (clutch--execute-and-mark sql qb qe))))
 
+(defun clutch--execute-region-sql (beg end)
+  "Execute trimmed SQL between BEG and END.
+Semicolon-delimited multi-statement regions run sequentially."
+  (let* ((sql (string-trim (buffer-substring-no-properties beg end)))
+         (stmts (clutch--split-statements sql)))
+    (when (string-empty-p sql)
+      (user-error "No SQL in region"))
+    (if (cdr stmts)
+        (clutch--execute-statements stmts)
+      (clutch--execute-and-mark sql beg end))))
+
 ;;;###autoload
 (defun clutch-execute-region (beg end)
-  "Execute SQL in the region from BEG to END."
+  "Execute SQL in the region from BEG to END.
+Semicolon-delimited multi-statement regions run sequentially."
   (interactive "r")
   (clutch--ensure-connection)
-  (clutch--execute-and-mark
-   (string-trim (buffer-substring-no-properties beg end))
-   beg end))
+  (clutch--execute-region-sql beg end))
 
 ;;;###autoload
 (defun clutch-execute-buffer ()
