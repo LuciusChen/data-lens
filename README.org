@@ -288,7 +288,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 |-------------+----------------------------|
 | =C-c C-c=   | Execute region, or the current =;=-delimited statement / query at point |
 | =C-c C-r=   | Execute selected region; multiple =;=-delimited statements run sequentially |
-| =C-c C-b=   | Execute entire buffer      |
+| =C-c C-b=   | Execute entire buffer; multiple =;=-delimited statements run sequentially |
 | =C-c C-e=   | Connect; query consoles reconnect their own saved connection |
 | =C-c C-j=   | Jump to configured primary object types and run the default action |
 | =C-c C-d=   | Describe object at point, or prompt |

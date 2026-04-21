@@ -1386,20 +1386,20 @@ are executed sequentially."
      (list (point) (point))))
   (clutch--ensure-connection)
   (if (use-region-p)
-      (clutch--execute-region-sql beg end)
+      (clutch--execute-sql-range beg end "region")
     (pcase-let* ((`(,qb . ,qe) (clutch--dwim-bounds-at-point))
                  (sql (string-trim (buffer-substring-no-properties qb qe))))
       (when (string-empty-p sql)
         (user-error "No SQL at point"))
       (clutch--execute-and-mark sql qb qe))))
 
-(defun clutch--execute-region-sql (beg end)
-  "Execute trimmed SQL between BEG and END.
-Semicolon-delimited multi-statement regions run sequentially."
+(defun clutch--execute-sql-range (beg end scope)
+  "Execute trimmed SQL between BEG and END for SCOPE.
+Semicolon-delimited multi-statement ranges run sequentially."
   (let* ((sql (string-trim (buffer-substring-no-properties beg end)))
          (stmts (clutch--split-statements sql)))
     (when (string-empty-p sql)
-      (user-error "No SQL in region"))
+      (user-error "No SQL in %s" scope))
     (if (cdr stmts)
         (clutch--execute-statements stmts)
       (clutch--execute-and-mark sql beg end))))
@@ -1410,16 +1410,15 @@ Semicolon-delimited multi-statement regions run sequentially."
 Semicolon-delimited multi-statement regions run sequentially."
   (interactive "r")
   (clutch--ensure-connection)
-  (clutch--execute-region-sql beg end))
+  (clutch--execute-sql-range beg end "region"))
 
 ;;;###autoload
 (defun clutch-execute-buffer ()
-  "Execute the entire buffer as a SQL query."
+  "Execute SQL in the current buffer.
+Semicolon-delimited multi-statement buffers run sequentially."
   (interactive)
   (clutch--ensure-connection)
-  (clutch--execute-and-mark
-   (string-trim (buffer-substring-no-properties (point-min) (point-max)))
-   (point-min) (point-max)))
+  (clutch--execute-sql-range (point-min) (point-max) "buffer"))
 
 (defun clutch--find-connection ()
   "Find a live database connection from any clutch-mode buffer.
