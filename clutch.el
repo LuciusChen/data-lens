@@ -4864,6 +4864,7 @@ Accumulates input until a semicolon is found, then executes."
   [ :pad-keys t
    ["Connection"
     ("c" "Connect"    clutch-connect)
+    ("S" "Prepare SSH" clutch-prepare-ssh-host)
     ("d" "Disconnect" clutch-disconnect)
     ("m" "Commit"            clutch-commit)
     ("u" "Rollback"          clutch-rollback)

@@ -23,6 +23,16 @@ This SSH path is intentionally OpenSSH-first:
 - let `ssh-agent` or the OpenSSH client handle SSH credentials
 - keep database passwords in `auth-source`
 
+If the first SSH use still needs a passphrase or host-key confirmation, run
+`M-x clutch-prepare-ssh-host` for that alias once, or press `S` from
+`clutch-dispatch`. After that, `clutch-connect` goes back to the normal batch
+tunnel path.
+
+The batch tunnel uses `ssh -o BatchMode=yes`, so it cannot prompt. If
+interactive `ssh HOST` succeeds but clutch still reports SSH authentication
+failure, configure OpenSSH to authenticate non-interactively too, usually by
+loading the key into `ssh-agent` or enabling `AddKeysToAgent`.
+
 ## MySQL (`mysql`)
 
 ### Scope

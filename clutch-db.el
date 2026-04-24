@@ -49,8 +49,8 @@
 
 ;;;; Shared helpers
 
-(defun clutch-db--pass-secret-by-suffix (suffix)
-  "Return pass secret from the first entry whose path ends with SUFFIX.
+(defun clutch-db--pass-entry-by-suffix (suffix)
+  "Return the first pass entry path whose tail matches SUFFIX.
 Matches e.g. `dev-mysql' against `mysql/dev-mysql'.
 Returns nil when no matching entry is found or auth-source-pass is absent."
   (when (and (fboundp 'auth-source-pass-entries)
@@ -58,8 +58,7 @@ Returns nil when no matching entry is found or auth-source-pass is absent."
     (let* ((re (format "\\(^\\|/\\)%s$" (regexp-quote suffix)))
            (entry (cl-find-if (lambda (e) (string-match-p re e))
                               (auth-source-pass-entries))))
-      (when entry
-        (cdr (assq 'secret (auth-source-pass-parse-entry entry)))))))
+      entry)))
 
 (defun clutch-db--normalize-symbol-option (value)
   "Return VALUE normalized to a lowercase symbol, or nil when absent."

@@ -1,0 +1,90 @@
+#+TITLE: ob-clutch Org-Babel Guide
+
+* Org-Babel Integration
+
+Execute SQL directly in org files via the separate =ob-clutch= package.  It
+bridges clutch connections into Org-Babel block types for MySQL, PostgreSQL,
+SQLite, and the generic =clutch= backend used for JDBC databases.
+
+Configuration:
+
+#+begin_src emacs-lisp
+(require 'ob-clutch)
+
+(with-eval-after-load 'org
+  (org-babel-do-load-languages
+   'org-babel-load-languages
+   '((mysql . t)
+     (postgresql . t)
+     (sqlite . t)
+     (clutch . t))))   ; generic block — needed for JDBC backends
+#+end_src
+
+Using a saved connection (works for any backend including JDBC):
+
+: #+begin_src mysql :connection dev
+: SELECT * FROM users LIMIT 5;
+: #+end_src
+
+: #+begin_src clutch :connection prod-oracle
+: SELECT * FROM employees WHERE ROWNUM <= 10;
+: #+end_src
+
+The generic =clutch= block does not need an inline =:backend= when =:connection=
+is present; the backend is taken from the saved connection entry.  An explicit
+=:backend= is only required for inline connection parameters.
+
+Or with inline connection parameters:
+
+: #+begin_src mysql :host 127.0.0.1 :port 3306 :user root :password test :database mydb
+: SHOW TABLES;
+: #+end_src
+
+PostgreSQL and SQLite blocks:
+
+: #+begin_src postgresql :connection dev-pg
+: SELECT now();
+: #+end_src
+
+: #+begin_src sqlite :database /tmp/demo.db
+: SELECT name FROM sqlite_master WHERE type = 'table';
+: #+end_src
+
+Generic form with explicit backend — required for JDBC databases:
+
+: #+begin_src clutch :backend pg :host 127.0.0.1 :port 5432 :user postgres :password test :database mydb
+: SELECT version();
+: #+end_src
+
+: #+begin_src clutch :backend oracle :host db.corp.com :port 1521 :user scott :password tiger :database ORCL
+: SELECT table_name FROM user_tables;
+: #+end_src
+
+: #+begin_src clutch :backend sqlserver :host sqlserver.corp.com :port 1433 :user sa :password secret :database mydb
+: SELECT TOP 10 * FROM sys.tables;
+: #+end_src
+
+Compatibility entry files live in the =ob-clutch= package:
+- =ob-mysql.el=, =ob-postgresql.el=, =ob-sqlite.el= — thin language entry points for the named block types.
+- =ob-clutch.el= — core execution logic; also registers the generic =clutch= block type.
+
+=C-c C-c= executes the source block; results are inserted as an org table.
+
+** Header Arguments
+
+| Argument       | Description                                                         |
+|----------------+---------------------------------------------------------------------|
+| =:connection=  | Name from =clutch-connection-alist= (overrides all inline params)   |
+| =:backend=     | =mysql=, =pg=, =sqlite=, =oracle=, =sqlserver=, =redshift=, etc.    |
+| =:host=        | Database host (default: =127.0.0.1=)                                |
+| =:port=        | Database port (omit to use driver default)                          |
+| =:user=        | Database user                                                       |
+| =:database=    | Database name or file path (SQLite)                                 |
+| =:pass-entry=  | auth-source entry name for password lookup                          |
+
+** Connection Caching
+
+Connections are cached by parameter hash and reused across source block
+evaluations in the same Emacs session.  All cached connections are cleanly
+disconnected when Emacs exits (via =kill-emacs-hook=).
+

@@ -6227,6 +6227,123 @@ crashing the UI layer."
        :type 'user-error)
       (should-not connect-called))))
 
+(ert-deftest clutch-test-start-ssh-tunnel-starts-batch-tunnel-directly ()
+  "SSH tunnel startup should rely on the real batch tunnel command."
+  (let (process-file-called make-process-args)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (_name) "/usr/bin/ssh"))
+              ((symbol-function 'process-file)
+               (lambda (&rest _args)
+                 (setq process-file-called t)
+                 0))
+              ((symbol-function 'clutch--allocate-local-port)
+               (lambda () 40123))
+              ((symbol-function 'make-process)
+                (lambda (&rest args)
+                 (setq make-process-args args)
+                 'fake-proc))
+              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
+              ((symbol-function 'clutch--wait-for-ssh-tunnel)
+               (lambda (&rest _args) t)))
+      (let ((tunnel (clutch--start-ssh-tunnel
+                     '(:backend pg
+                       :host "db.internal"
+                       :port 5432
+                       :ssh-host "bastion-prod"))))
+        (should-not process-file-called)
+        (should (eq (plist-get tunnel :process) 'fake-proc))
+        (should (equal (plist-get make-process-args :command)
+                       '("ssh"
+                         "-N"
+                         "-o" "BatchMode=yes"
+                         "-o" "ExitOnForwardFailure=yes"
+                         "-L" "127.0.0.1:40123:db.internal:5432"
+                         "bastion-prod")))))))
+
+(ert-deftest clutch-test-ssh-diagnose-output-hints-locked-key ()
+  "SSH diagnosis should point users at an interactive unlock step."
+  (let ((message (clutch--ssh-diagnose-output
+                  "bastion-prod"
+                  "sign_and_send_pubkey: signing failed for ED25519 \"~/.ssh/id_ed25519\" from agent: agent refused operation\n")))
+    (should (string-match-p "locked" message))
+    (should (string-match-p "clutch-prepare-ssh-host" message))))
+
+(ert-deftest clutch-test-ssh-diagnose-output-hints-authorized-keys ()
+  "SSH diagnosis should surface remote auth problems clearly."
+  (let ((message (clutch--ssh-diagnose-output
+                  "bastion-prod"
+                  "lucius@db: Permission denied (publickey,password).\n")))
+    (should (string-match-p "clutch-prepare-ssh-host" message))
+    (should (string-match-p "authorized_keys" message))))
+
+(ert-deftest clutch-test-prepare-ssh-host-starts-interactive-session ()
+  "Interactive SSH prepare should open a comint session for the alias."
+  (let (started puts sentinel-set query-flag popped message-text proc-lookups)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (_name) "/usr/bin/ssh"))
+              ((symbol-function 'make-comint-in-buffer)
+               (lambda (name buffer program startfile &rest switches)
+                 (setq started (list name buffer program startfile switches))
+                 (get-buffer-create buffer)))
+              ((symbol-function 'get-buffer-process)
+               (lambda (_buffer)
+                 (prog1 (if proc-lookups 'fake-proc nil)
+                   (setq proc-lookups t))))
+              ((symbol-function 'process-live-p)
+               (lambda (proc) (eq proc 'fake-proc)))
+              ((symbol-function 'process-put)
+               (lambda (proc key value)
+                 (push (list proc key value) puts)))
+              ((symbol-function 'set-process-query-on-exit-flag)
+               (lambda (proc flag)
+                 (setq query-flag (list proc flag))))
+              ((symbol-function 'set-process-sentinel)
+               (lambda (proc fn)
+                 (setq sentinel-set (list proc fn))))
+              ((symbol-function 'pop-to-buffer)
+               (lambda (buffer &rest _args)
+                 (setq popped buffer)
+                 buffer))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq message-text (apply #'format fmt args)))))
+      (clutch-prepare-ssh-host "bastion-prod")
+      (should (equal (car started) "clutch-ssh-prepare-bastion-prod"))
+      (should (equal (buffer-name (cadr started))
+                     "*clutch-ssh-prepare bastion-prod*"))
+      (should (equal (cddr started)
+                     '("ssh"
+                       nil
+                       ("bastion-prod" "exit"))))
+      (should (equal query-flag '(fake-proc nil)))
+      (should (equal (car puts) '(fake-proc :clutch-ssh-host "bastion-prod")))
+      (should (eq (car sentinel-set) 'fake-proc))
+      (should (eq (cadr sentinel-set) #'clutch--ssh-prepare-sentinel))
+      (should (equal (buffer-name popped) "*clutch-ssh-prepare bastion-prod*"))
+      (should (string-match-p "Complete any SSH prompts" message-text)))))
+
+(ert-deftest clutch-test-ssh-prepare-sentinel-nonzero-suggests-retry ()
+  "Non-zero SSH prepare exit should not imply preparation was useless."
+  (let ((buffer (get-buffer-create "*clutch-ssh-prepare bastion-prod*"))
+        message-text)
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-status)
+                   (lambda (_proc) 'exit))
+                  ((symbol-function 'process-exit-status)
+                   (lambda (_proc) 255))
+                  ((symbol-function 'process-get)
+                   (lambda (_proc key)
+                     (when (eq key :clutch-ssh-host) "bastion-prod")))
+                  ((symbol-function 'process-buffer)
+                   (lambda (_proc) buffer))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq message-text (apply #'format fmt args)))))
+          (clutch--ssh-prepare-sentinel 'fake-proc "exited")
+          (should (string-match-p "retry clutch-connect" message-text))
+          (should (string-match-p "inspect" message-text)))
+      (kill-buffer buffer))))
+
 (ert-deftest clutch-test-build-conn-includes-jdbc-timeouts ()
   "Test that `clutch--build-conn' passes timeout defaults to JDBC backends."
   (let ((clutch-connect-timeout-seconds 11)
@@ -6257,10 +6374,47 @@ crashing the UI layer."
                  'fake-conn)))
       (should-error
        (clutch--build-conn
-        '(:backend oracle :host "db" :port 1521 :user "u" :sid "orcl"
+       '(:backend oracle :host "db" :port 1521 :user "u" :sid "orcl"
           :pass-entry "prod-oracle"))
        :type 'user-error)
       (should-not connect-called))))
+
+(ert-deftest clutch-test-resolve-password-errors-when-pass-entry-cannot-be-read ()
+  "Unreadable pass entries should fail before the backend sees auth."
+  (let (connect-called)
+    (cl-letf (((symbol-function 'clutch-db--pass-entry-by-suffix)
+               (lambda (_suffix) "mysql/zj_online"))
+              ((symbol-function 'auth-source-pass-parse-entry)
+               (lambda (_entry) nil))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (&rest _args)
+                 (setq connect-called t)
+                 'fake-conn)))
+      (condition-case err
+          (clutch--build-conn
+           '(:backend mysql :host "db" :port 3306 :user "u"
+             :database "app" :pass-entry "zj_online"))
+        (user-error
+         (should (equal
+                  (cadr err)
+                  "Database password lookup failed for pass entry mysql/zj_online. Unlock pass/auth-source-pass and retry"))))
+      (should-not connect-called))))
+
+(ert-deftest clutch-test-resolve-password-errors-when-auth-source-secret-fails ()
+  "auth-source secret retrieval failures should surface directly."
+  (condition-case err
+      (cl-letf (((symbol-function 'clutch-db--pass-entry-by-suffix)
+                 (lambda (_suffix) nil))
+                ((symbol-function 'auth-source-search)
+                 (lambda (&rest _args)
+                   (list (list :secret (lambda ()
+                                         (error "bad decrypt")))))))
+        (clutch--resolve-password
+         '(:host "db.example.com" :port 3306 :user "scott")))
+    (user-error
+     (should (equal
+              (cadr err)
+              "Database password lookup failed via auth-source for scott@db.example.com:3306: bad decrypt")))))
 
 (ert-deftest clutch-test-build-conn-relays-db-errors-without-duplicate-prefixes ()
   "User-facing connect errors should not duplicate nested connection-failed wrappers."
@@ -6282,6 +6436,24 @@ crashing the UI layer."
        (should (string-match-p "clutch-debug-mode" (cadr err)))
        (should (string-match-p (regexp-quote clutch-debug-buffer-name)
                                (cadr err)))))))
+
+(ert-deftest clutch-test-build-conn-wraps-ssh-setup-errors-before-user-display ()
+  "SSH setup errors should be normalized before they reach the minibuffer."
+  (cl-letf (((symbol-function 'clutch--materialize-connection-params)
+             (lambda (params) params))
+            ((symbol-function 'clutch--prepare-connect-params)
+             (lambda (_params)
+               (signal 'clutch-db-error
+                       '("SSH tunnel to arch failed: SSH authentication to arch was rejected")))))
+    (condition-case err
+        (clutch--build-conn '(:backend mysql :host "db" :port 3306 :ssh-host "arch"))
+      (user-error
+       (should (string-match-p
+                "SSH tunnel to arch failed: SSH authentication to arch was rejected"
+                (cadr err)))
+       (should-not (string-match-p "^let\\*:" (cadr err)))
+       (should-not (string-match-p "^if:" (cadr err)))
+       (should-not (string-match-p "^when-let\\*:" (cadr err)))))))
 
 (ert-deftest clutch-test-build-conn-enriches-buffer-error-details ()
   "Connect failures should keep enriched `current-buffer' error details."

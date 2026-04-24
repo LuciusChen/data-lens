@@ -1,0 +1,219 @@
+#+TITLE: clutch JDBC Backend Guide
+
+* JDBC Backend (clutch-db-jdbc.el)
+
+=clutch-db-jdbc.el= adds support for databases that have no pure Elisp wire
+protocol implementation.  It delegates JDBC work to =clutch-jdbc-agent=, a
+small JVM sidecar.  Java 17+ is required.
+
+For the wire protocol, RPC inventory, runtime session model, and startup/error
+semantics, see [[file:jdbc-agent-protocol.md][jdbc-agent-protocol.md]].
+
+** Supported Databases
+
+| Backend symbol | Database            | Driver auto-install | Default port |
+|----------------+---------------------+---------------------+--------------|
+| =oracle=       | Oracle Database     | Maven Central       | 1521         |
+| =sqlserver=    | Microsoft SQL Server| Maven Central       | 1433         |
+| =redshift=     | Amazon Redshift     | Maven Central       | 5439         |
+| =snowflake=    | Snowflake           | Maven Central       | —            |
+| =db2=          | IBM DB2             | Manual download     | 50000        |
+
+Any other JDBC-compatible database (ClickHouse, TiDB, Hive, KingbaseES, etc.)
+can be used through the generic =jdbc= backend by passing
+=:url "jdbc:xxx://..."= directly and placing the driver jar in the drivers
+directory.  Use =:display-name= if you want the UI to show a friendly backend
+label instead of plain =JDBC=.
+
+** Setup
+
+On first =clutch-connect= to a JDBC backend, clutch loads
+=clutch-db-jdbc.el= automatically and then prompts to
+download the agent jar and the required driver jar automatically.
+Just answer =y= at each prompt — no manual setup commands needed.
+
+If you prefer to pre-install everything up front:
+
+#+begin_src emacs-lisp
+;; Download clutch-jdbc-agent.jar:
+(clutch-jdbc-ensure-agent)
+
+;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift):
+(clutch-jdbc-install-driver 'oracle)      ; ojdbc8.jar + orai18n.jar from Maven Central
+(clutch-jdbc-install-driver 'oracle-11)   ; ojdbc11.jar + orai18n.jar for newer Oracle-only setups
+(clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar (JRE-classified SQL Server driver) from Maven Central
+(clutch-jdbc-install-driver 'snowflake)   ; snowflake-jdbc.jar from Maven Central
+(clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc.jar from Maven Central
+;; DB2: download db2jcc4.jar from IBM manually and place in clutch-jdbc-agent-dir/drivers/
+#+end_src
+
+Driver jars are stored in =~/.emacs.d/clutch-jdbc/drivers/=
+(configurable via =clutch-jdbc-agent-dir=).
+
+The agent jar itself is verified against the configured SHA-256 before startup.
+This catches the common case where a local =clutch-jdbc-agent-<version>.jar=
+exists but does not actually match the jar you intend clutch to launch.
+Running =clutch-jdbc-ensure-agent= also removes stale versioned
+=clutch-jdbc-agent-*.jar= files from the same directory.
+
+If you intentionally use a locally built jar, set
+=clutch-jdbc-agent-sha256= to =nil= to disable verification.  That is the
+escape hatch for custom development builds.
+
+Oracle installs now also pull =orai18n.jar= automatically, which is
+required for CJK database character sets such as =ZHS16GBK=.  If you
+install drivers while the shared JDBC agent is already running, clutch
+will restart that agent on the next JDBC use; reconnecting is enough,
+you do not need to restart Emacs.
+
+Oracle installs also keep the active JDBC line unambiguous:
+=clutch-jdbc-install-driver 'oracle= enables =ojdbc8.jar= and disables
+=ojdbc11.jar= by removing it if present; =clutch-jdbc-install-driver
+'oracle-11= does the inverse.  This avoids loading both Oracle driver lines
+at once.
+
+SQL Server installs use Microsoft's classifier-based Maven artifacts (for
+example =mssql-jdbc-13.4.0.jre11.jar=) and normalize the local filename to
+=mssql-jdbc.jar=.  If you manage the driver manually, use the JRE-classified
+artifact from Maven Central rather than a nonexistent plain
+=mssql-jdbc-<version>.jar= path.
+
+** Connection Examples
+
+#+begin_src emacs-lisp
+(setq clutch-connection-alist
+      '(;; Oracle (service name style)
+        ("prod-oracle" . (:backend oracle
+                           :host "db.corp.com" :port 1521
+                           :database "ORCL"           ; service name or SID
+                           :user "scott" :pass-entry "prod-oracle"
+                           :connect-timeout 8
+                           :read-idle-timeout 30
+                           :query-timeout 20
+                           :rpc-timeout 25))
+
+        ;; Oracle (SID style — use :sid instead of :database)
+        ("prod-oracle-sid" . (:backend oracle
+                               :host "db.corp.com" :port 1521
+                               :sid "ORCL"
+                               :user "scott" :pass-entry "prod-oracle"))
+
+        ;; Microsoft SQL Server
+        ("prod-mssql" . (:backend sqlserver
+                          :host "sqlserver.corp.com" :port 1433
+                          :database "AdventureWorks"
+                          :user "sa" :pass-entry "prod-mssql"
+                          :connect-timeout 8
+                          :query-timeout 15))
+
+        ;; Amazon Redshift
+        ("prod-redshift" . (:backend redshift
+                             :host "cluster.abc123.us-east-1.redshift.amazonaws.com"
+                             :port 5439 :database "analytics"
+                             :user "awsuser" :pass-entry "prod-redshift"))
+
+        ;; Snowflake
+        ("prod-snowflake" . (:backend snowflake
+                              :host "myorg-myaccount"  ; account identifier
+                              :database "MYDB"
+                              :user "myuser" :pass-entry "prod-snowflake"))
+
+        ;; ClickHouse (column-oriented OLAP, HTTP protocol on port 8123)
+        ("clickhouse" . (:backend clickhouse
+                          :host "ch.corp.com"
+                          :database "default"
+                          :user "default" :password ""))
+
+        ;; Generic JDBC (any database with a JDBC driver jar in drivers/)
+        ;; Use :backend jdbc with a full JDBC URL when no native backend exists.
+        ("kingbase" . (:backend jdbc
+                        :url "jdbc:kingbase8://db.corp.com:54321/test"
+                        :display-name "KingbaseES"
+                        :user "system" :pass-entry "kingbase"
+                        :rpc-timeout 15))))
+#+end_src
+
+JDBC connections use the same =:pass-entry= auth-source integration as other
+backends.  See [[file:../README.org::*Password Management][Password Management]] for details.
+
+** Oracle-specific Notes
+
+- *Oracle driver default*: =clutch-jdbc-install-driver 'oracle= now installs
+  =ojdbc8= by default.  It is the safest choice across Oracle 11g/12c/19c and
+  avoids the known 11g LOB compatibility problems seen with =ojdbc11=.
+- *Oracle 11g*: keep using =ojdbc8=.  If =ojdbc11.jar= is present from an older
+  setup, reinstall with =(clutch-jdbc-install-driver 'oracle)= to re-enable
+  =ojdbc8.jar= and remove the conflicting =ojdbc11.jar= copy automatically.
+- *Oracle 19c+ only*: if you specifically want the newer driver line, install
+  it with =(clutch-jdbc-install-driver 'oracle-11)=.
+- *SID vs service name*: use =:sid "MYSID"= for SID-style connections
+  (=@host:port:SID=); use =:database "myservice"= for service name style
+  (=@//host:port/service=).  Mixing them up causes the connection to hang.
+  When in doubt, check with your DBA or use =:url= for full control.
+- Schema is automatically set to the uppercase username (Oracle convention).
+- Oracle/JDBC completion does not rely on a full eager schema refresh.  Table
+  names and column names are resolved through Oracle-specific prefix lookups, so
+  connect stays non-blocking and completion does not have to enumerate the whole
+  schema up front.
+- For low-privilege Oracle accounts, table prompts / browse / schema refresh use
+  the same business-object view: current-schema tables/views, =user_synonyms=,
+  and accessible =all_tables= / =all_views= rows outside the current schema.
+  This covers common "login user is empty, real objects live under another
+  owner" setups.
+- Dictionary objects exposed only through =PUBLIC SYNONYM= (for example
+  =USER_TABLES=) participate in completion, but they are not added to the schema
+  cache / object discovery snapshot.  That keeps Oracle system objects from
+  flooding =C-c C-j= for ordinary query-console use.
+- The Oracle search path filters common system owners in SQL for both
+  =get-tables= and =search-tables=, while still keeping =PUBLIC SYNONYM=
+  dictionary objects available to completion.
+- After connect (and after schema-affecting DDL), Oracle/JDBC also starts a
+  background full table refresh.  Completion stays responsive because it keeps
+  using the prefix fast path, while =C-c C-j= / the object discovery cache / the
+  console's =schema~= state are backfilled from the same low-privilege-aware
+  table snapshot once loading finishes.
+- Pagination uses =ROWNUM= subquery, compatible with all Oracle versions (9i+).
+- CJK character sets (e.g. ZHS16GBK) require =orai18n.jar= in addition to the
+  active Oracle JDBC jar (=ojdbc8.jar= or =ojdbc11.jar=).
+- Oracle =DATE= columns include a time component; the agent always uses =getTimestamp()=
+  to avoid silent data loss.
+
+** Transaction Control
+
+- Oracle JDBC connections use manual commit by default, matching DataGrip's
+  safer query-console behavior.
+- Customize that default globally with =clutch-jdbc-oracle-manual-commit=, or
+  override per connection with =:manual-commit t= / =:manual-commit nil=.
+- Use =C-c C-m= to commit and =C-c C-u= to roll back the current transaction.
+- Use =C-c C-a= to toggle between manual-commit and auto-commit at any time.
+  The toggle is blocked when there are uncommitted changes (matching DataGrip's
+  behavior); commit or roll back first, then switch.
+- Native MySQL supports the same commands by toggling the session autocommit
+  flag.
+- Native PostgreSQL supports the same commands through a clutch-managed manual
+  mode with lazy =BEGIN=; transactional DDL counts as pending work there too.
+- The console header-line always shows the current commit mode: =Tx: Auto=,
+  =Tx: Manual=, or =Tx: Manual*= (uncommitted changes present).
+- Open DML result buffers show a status banner in their header-line after each
+  transaction event:
+  - Commit: =✓ Transaction committed= (green)
+  - Rollback: =⚠ Transaction rolled back — changes not persisted= (orange)
+  - Disconnect: =✕ Connection closed= (grey)
+  The banner clears automatically when the buffer is reused for a new query.
+- Other JDBC backends stay in auto-commit mode by default; add
+  =:manual-commit t= to a connection plist to opt in.
+- Oracle DDL (=CREATE=/=ALTER=/=DROP=/=TRUNCATE=/=RENAME=) auto-commits even
+  in manual-commit mode, so =Tx: Manual*= may clear after DDL without an
+  explicit =COMMIT=.
+
+** Additional JDBC Connection Properties
+
+Pass arbitrary JDBC connection properties via =:props=:
+
+#+begin_src emacs-lisp
+("mssql-encrypt" . (:backend sqlserver
+                     :host "sqlserver.corp.com" :port 1433
+                     :database "mydb" :user "sa" :password "secret"
+                     :props (("encrypt" . "true")
+                             ("trustServerCertificate" . "true"))))
+#+end_src
