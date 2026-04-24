@@ -223,6 +223,7 @@ Underlined to indicate clickable (RET to follow)."
 Each entry has the form:
   (NAME . (:host H :port P :user U [:password P] :database D
            [:backend SYM] [:sql-product SYM] [:pass-entry STR]
+           [:ssh-host SSH-HOST]
            [:url STR] [:display-name STR] [:props ALIST]
            [:tls BOOLEAN] [:ssl-mode disabled] [:sslmode require]
            [:connect-timeout N] [:read-idle-timeout N]
@@ -239,6 +240,10 @@ and `:tls nil' maps to `:sslmode disable'.
 the same explicit plaintext mode.  The older alias `off' is also accepted.
 :sslmode is PostgreSQL-only and follows the upstream naming.  Supported values
 are `disable', `prefer', `require', and `verify-full'.
+:ssh-host enables a local SSH tunnel using the named host from ~/.ssh/config.
+clutch starts `ssh -N -L ... SSH-HOST' automatically, so this currently
+requires structured `:host' / `:port' params and does not apply to `:url'
+based JDBC entries.
 
 Password resolution order:
   1. :password — used as-is when present.
@@ -253,11 +258,12 @@ Password resolution order:
                                    ((:host string)
                                     (:port integer)
                                     (:user string)
-                                    (:password string)
-                                    (:database string)
-                                    (:backend symbol)
-                                    (:sql-product symbol)
-                                    (:pass-entry string)
+                                   (:password string)
+                                   (:database string)
+                                   (:backend symbol)
+                                   (:sql-product symbol)
+                                   (:pass-entry string)
+                                    (:ssh-host string)
                                     (:url string)
                                     (:display-name string)
                                     (:props (alist :key-type string :value-type string))

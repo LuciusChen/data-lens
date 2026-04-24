@@ -147,6 +147,10 @@ For Org-Babel support, install the separate =ob-clutch= package.
                           :host "127.0.0.1" :port 5432
                           :user "postgres" :password "test"
                           :database "mydb"))
+        ("prod-pg"    . (:backend pg
+                          :host "pg.internal" :port 5432
+                          :user "app" :database "appdb"
+                          :ssh-host "bastion-prod"))
         ("dev-sqlite" . (:backend sqlite
                           :database "/path/to/my.db"))))
 #+end_src
@@ -164,6 +168,11 @@ that convenience form to backend-native settings.  For MySQL, prefer
 compatibility alias.  For PostgreSQL, prefer =:sslmode= with one of
 =disable=, =prefer=, =require=, or =verify-full=.  =:tls nil= remains accepted
 as shorthand for the explicit plaintext mode on MySQL and PostgreSQL.
+=:ssh-host= starts a local SSH forward through the named host in
+=~/.ssh/config=.  clutch keeps =:host= / =:port= as the remote database
+endpoint and connects through a local forwarded port automatically.  This
+first version supports structured =:host= / =:port= entries, not raw JDBC
+=:url= strings.
 
 JDBC backends use a driver symbol as =:backend= instead of =mysql=/=pg=.  See
 [[#jdbc-backend-clutch-db-jdbcel][JDBC Backend (clutch-db-jdbc.el)]] for the full list of supported databases and setup.
@@ -181,7 +190,8 @@ M-x clutch-query-console   ;; Select a saved connection → opens *clutch: NAME*
 Repeated calls with the same name switch to the existing buffer instead of
 opening a new one.  Use =clutch-switch-console= to jump between open consoles.
 If no saved connections are configured, =clutch-connect= first prompts for
-=:backend= and then asks for the matching connection fields.
+=:backend= and then asks for the matching connection fields, including an
+optional SSH host alias from =~/.ssh/config= for network backends.
 
 *** 3. Write and execute SQL
 
@@ -262,6 +272,32 @@ If no pass entry matches the connection name, clutch falls back to
 standard =auth-source-search= by =:host=, =:user=, and =:port=.  This
 covers =~/.authinfo=, =~/.authinfo.gpg=, and pass entries named after
 the host.  See the [[https://www.gnu.org/software/emacs/manual/html_node/auth/index.html][auth-source manual]] for details.
+
+** SSH Tunnels via ~/.ssh/config
+
+For bastion-style access, add =:ssh-host= to a saved network connection:
+
+#+begin_src emacs-lisp
+("prod-pg" . (:backend pg
+               :host "pg.internal" :port 5432
+               :user "app" :database "appdb"
+               :ssh-host "bastion-prod"))
+#+end_src
+
+clutch then starts a local SSH tunnel with your normal OpenSSH setup and
+connects the database client through the forwarded local port automatically.
+The SSH authentication itself is expected to come from your existing
+=~/.ssh/config=, =ssh-agent=, host aliases, =ProxyJump=, and known_hosts.
+
+This keeps the Emacs flow simple:
+
+- configure SSH once in OpenSSH
+- keep database passwords in =auth-source=
+- connect with the usual =M-x clutch-connect= or =M-x clutch-query-console=
+
+Current limitation: SSH tunneling is only wired up for structured
+=:host= / =:port= entries, so JDBC profiles that rely on a raw =:url= still
+need a manual tunnel for now.
 
 ** Working with SQL files
 

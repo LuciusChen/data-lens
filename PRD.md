@@ -518,8 +518,9 @@ Connection profile plist keys:
 | `:backend` | symbol | `mysql`, `pg`, `sqlite`, `jdbc`, `clickhouse`, `oracle`, `sqlserver`, `snowflake`, `redshift`, `db2` |
 | `:sql-product` | symbol | SQL highlight product for `sql-mode` |
 | `:pass-entry` | string | Pass store suffix for password lookup |
+| `:ssh-host` | string | OpenSSH host alias from `~/.ssh/config` used for an automatic local tunnel |
 | `:display-name` | string | Friendly backend label shown in the UI |
-| `:url` | string | Full JDBC URL (JDBC backends; overrides host/port/database) |
+| `:url` | string | Full JDBC URL (JDBC backends; overrides host/port/database; not combined with `:ssh-host` in v1) |
 | `:props` | alist | Extra JDBC connection properties |
 | `:manual-commit` | boolean | JDBC only: disable auto-commit for this connection |
 | `:tls` | boolean | Convenience shorthand; maps to backend-native TLS settings |
@@ -632,6 +633,9 @@ user-facing `defcustom`s.
                         :database "main"        :tls t))
     ("dev-pg"        . (:host "localhost"       :port 5432   :user "dev"
                         :database "testdb"      :backend pg))
+    ("prod-pg-ssh"   . (:backend pg             :host "pg.internal"
+                        :port 5432              :user "app"
+                        :database "appdb"       :ssh-host "bastion-prod"))
     ("local-sqlite"  . (:backend sqlite         :database "/tmp/test.db"))
     ("oracle-uat"    . (:backend oracle          :host "oradb.uat.local"
                         :port 1521              :user "scott" :database "ORCL"))

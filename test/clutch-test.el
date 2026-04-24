@@ -6112,6 +6112,22 @@ crashing the UI layer."
       (should (string-match-p "root" key))
       (should (string-match-p "test" key)))))
 
+(ert-deftest clutch-test-connection-display-key-prefers-remote-ssh-endpoint ()
+  "Connection labels should keep the remote endpoint visible when SSH is used."
+  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
+        (conn 'fake-conn))
+    (puthash conn '(:host "db.internal" :port 5432 :ssh-host "bastion-prod")
+             clutch--connection-remote-params-cache)
+    (cl-letf (((symbol-function 'clutch-db-user) (lambda (_conn) "alice"))
+              ((symbol-function 'clutch-db-host) (lambda (_conn) "127.0.0.1"))
+              ((symbol-function 'clutch-db-port) (lambda (_conn) 40123))
+              ((symbol-function 'clutch-db-database) (lambda (_conn) "appdb"))
+              ((symbol-function 'clutch-db-display-name) (lambda (_conn) "PostgreSQL")))
+      (should (equal (clutch--connection-key conn)
+                     "alice@db.internal:5432/appdb"))
+      (should (equal (clutch--connection-display-key conn)
+                     "alice@db.internal via bastion-prod")))))
+
 (ert-deftest clutch-test-build-conn-includes-native-timeouts-for-network-backends ()
   "Test that `clutch--build-conn' passes timeout defaults to mysql/pg."
   (let ((clutch-connect-timeout-seconds 11)
@@ -6132,6 +6148,84 @@ crashing the UI layer."
       (should (equal (plist-get captured :connect-timeout) 11))
       (should (equal (plist-get captured :read-idle-timeout) 42))
       (should (equal (plist-get captured :query-timeout) 13)))))
+
+(ert-deftest clutch-test-build-conn-rewrites-network-endpoint-through-ssh-tunnel ()
+  "SSH-backed connections should target the local forwarded port."
+  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
+        (clutch--connection-ssh-tunnel-cache (make-hash-table :test 'eq))
+        captured)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch--start-ssh-tunnel)
+               (lambda (params)
+                 (should (equal (plist-get params :ssh-host) "bastion-prod"))
+                 '(:process fake-proc :local-port 40123 :ssh-host "bastion-prod")))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (_backend params)
+                 (setq captured params)
+                 'fake-conn)))
+      (should (eq (clutch--build-conn
+                   '(:backend pg
+                     :host "db.internal"
+                     :port 5432
+                     :user "alice"
+                     :database "appdb"
+                     :ssh-host "bastion-prod"))
+                  'fake-conn))
+      (should (equal (plist-get captured :host) "127.0.0.1"))
+      (should (= (plist-get captured :port) 40123))
+      (should (equal (plist-get (gethash 'fake-conn clutch--connection-remote-params-cache)
+                                :host)
+                     "db.internal"))
+      (should (equal (plist-get (gethash 'fake-conn clutch--connection-ssh-tunnel-cache)
+                                :ssh-host)
+                     "bastion-prod")))))
+
+(ert-deftest clutch-test-build-conn-stops-ssh-tunnel-when-db-connect-fails ()
+  "Failed DB connect should tear down the SSH tunnel it just opened."
+  (let (stopped)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch--start-ssh-tunnel)
+               (lambda (_params)
+                 '(:process fake-proc :local-port 40123 :ssh-host "bastion-prod")))
+              ((symbol-function 'process-live-p)
+               (lambda (proc) (eq proc 'fake-proc)))
+              ((symbol-function 'delete-process)
+               (lambda (proc) (setq stopped proc)))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (_backend _params)
+                 (signal 'clutch-db-error '("db connect failed")))))
+      (should-error
+       (clutch--build-conn
+        '(:backend pg
+          :host "db.internal"
+          :port 5432
+          :user "alice"
+          :database "appdb"
+          :ssh-host "bastion-prod"))
+       :type 'user-error)
+      (should (eq stopped 'fake-proc)))))
+
+(ert-deftest clutch-test-start-ssh-tunnel-rejects-jdbc-url ()
+  "SSH tunneling should fail fast when the profile only provides a raw JDBC URL."
+  (let (connect-called)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'executable-find)
+               (lambda (_name) "/usr/bin/ssh"))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (&rest _args)
+                 (setq connect-called t)
+                 'unexpected)))
+      (should-error
+       (clutch--start-ssh-tunnel
+        '(:backend oracle
+          :url "jdbc:oracle:thin:@//db.example.com:1521/ORCL"
+          :user "scott"
+          :ssh-host "bastion-prod"))
+       :type 'user-error)
+      (should-not connect-called))))
 
 (ert-deftest clutch-test-build-conn-includes-jdbc-timeouts ()
   "Test that `clutch--build-conn' passes timeout defaults to JDBC backends."
@@ -6375,6 +6469,7 @@ crashing the UI layer."
                  (pcase prompt
                    ("Host (127.0.0.1): " "db.example.com")
                    ("User: " "alice")
+                   ("SSH host from ~/.ssh/config (optional): " "bastion-prod")
                    ("Database (optional): " "app_db")
                    (_ (or default-value "")))))
               ((symbol-function 'read-number)
@@ -6390,6 +6485,7 @@ crashing the UI layer."
                        :host "db.example.com"
                        :port 5544
                        :user "alice"
+                       :ssh-host "bastion-prod"
                        :password "secret"
                        :database "app_db")))
       (should (string-match-p "Backend" backend-prompt))
@@ -6934,6 +7030,28 @@ crashing the UI layer."
       (should clutch-connection)
       (should (clutch--tx-dirty-p clutch-connection)))))
 
+(ert-deftest clutch-test-do-disconnect-stops-ssh-tunnel ()
+  "Disconnect should stop any SSH tunnel associated with the connection."
+  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
+        (clutch--connection-ssh-tunnel-cache (make-hash-table :test 'eq))
+        disconnected
+        stopped)
+    (puthash 'fake-conn '(:process fake-proc) clutch--connection-ssh-tunnel-cache)
+    (cl-letf (((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
+              ((symbol-function 'clutch--invalidate-derived-buffers) #'ignore)
+              ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
+              ((symbol-function 'clutch--forget-problem-record) #'ignore)
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (_conn) (setq disconnected t)))
+              ((symbol-function 'process-live-p)
+               (lambda (proc) (eq proc 'fake-proc)))
+              ((symbol-function 'delete-process)
+               (lambda (proc) (setq stopped proc))))
+      (clutch--do-disconnect 'fake-conn)
+      (should disconnected)
+      (should (eq stopped 'fake-proc))
+      (should-not (gethash 'fake-conn clutch--connection-ssh-tunnel-cache)))))
+
 (ert-deftest clutch-test-kill-console-disconnects-and-invalidates ()
   "Killing a console buffer disconnects and invalidates derived buffers."
   (let ((disconnected nil)
@@ -7084,6 +7202,30 @@ database.  Only a query re-execution should discard them."
             (should (equal clutch--pending-deletes (list (vector 1))))))
       (kill-buffer result-buf)
       (kill-buffer clutch-buf))))
+
+(ert-deftest clutch-test-try-reconnect-releases-old-ssh-transport ()
+  "Reconnect should stop the old SSH tunnel after the new connection is ready."
+  (let ((released nil))
+    (with-temp-buffer
+      (setq-local clutch-connection 'old-conn
+                  clutch--connection-params '(:backend pg
+                                              :host "db.internal"
+                                              :port 5432
+                                              :ssh-host "bastion-prod")
+                  clutch--conn-sql-product 'pg)
+      (cl-letf (((symbol-function 'clutch--build-conn)
+                 (lambda (_params) 'new-conn))
+                ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
+                ((symbol-function 'clutch--release-connection-transport)
+                 (lambda (conn) (setq released conn)))
+                ((symbol-function 'clutch--rebind-connection-buffers) #'ignore)
+                ((symbol-function 'clutch--finalize-rebound-connection)
+                 (lambda (_conn) 'done))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "alice@db.internal:5432/appdb"))
+                ((symbol-function 'message) #'ignore))
+        (should (clutch--try-reconnect))
+        (should (eq released 'old-conn))))))
 
 (ert-deftest clutch-test-result-buffer-reconnects-using-inherited-context ()
   "Result buffers should inherit reconnect params from their source buffer."

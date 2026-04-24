@@ -10,6 +10,19 @@ Use this document for backend-specific connection, protocol, TLS, timeout, and
 usage notes for the native backends.  The JDBC sidecar has its own document in
 [`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).
 
+## SSH Tunnels
+
+For saved clutch connections, `:ssh-host` starts a local SSH forward through
+the named host in `~/.ssh/config` before the native backend connects.  The
+database `:host` / `:port` remain the remote endpoint as seen from the bastion
+host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT` internally.
+
+This SSH path is intentionally OpenSSH-first:
+
+- use your normal `~/.ssh/config` host aliases
+- let `ssh-agent` or the OpenSSH client handle SSH credentials
+- keep database passwords in `auth-source`
+
 ## MySQL (`mysql`)
 
 ### Scope
