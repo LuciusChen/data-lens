@@ -1724,9 +1724,9 @@ For input like `u.name', returns `u' when BEG starts at `name'."
        (point)))))
 
 (defun clutch--qualified-identifier-table (schema beg)
-  "Return the table referenced by the qualifier before BEG, or nil.
-Resolves both statement aliases like `u.name` and direct qualified table names
-like `orders.id` within the current statement."
+  "Return the table referenced by the qualifier before BEG in SCHEMA, or nil.
+Resolve both statement aliases like `u.name' and direct qualified table names
+like `orders.id' within the current statement."
   (when-let* ((qualifier (and schema
                               (clutch--qualified-identifier-qualifier beg))))
     (or (cdr (assoc-string qualifier

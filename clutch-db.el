@@ -71,6 +71,22 @@ Returns nil when no matching entry is found or auth-source-pass is absent."
     (intern (downcase value)))
    (t value)))
 
+(defun clutch--json-serialize-text (value &optional context)
+  "Return VALUE serialized as normal Emacs JSON text.
+`json-serialize' returns a unibyte UTF-8 string.  Decode it back to a
+regular multibyte Emacs string so non-ASCII JSON content remains readable.
+When CONTEXT is non-nil, use it in the raised `clutch-db-error' message."
+  (condition-case err
+      (let ((json (json-serialize value)))
+        (if (multibyte-string-p json)
+            json
+          (decode-coding-string json 'utf-8 t)))
+    (error
+     (signal 'clutch-db-error
+             (list (format "Cannot serialize %s as JSON: %s"
+                           (or context "value")
+                           (error-message-string err)))))))
+
 (defun clutch-db--normalize-mysql-ssl-mode (ssl-mode)
   "Return canonical MySQL SSL-MODE, or signal `clutch-db-error'."
   (pcase (clutch-db--normalize-symbol-option ssl-mode)
@@ -447,9 +463,7 @@ Substitute PARAMS into SQL before calling `clutch-db-query'."
        ((or (hash-table-p value) (vectorp value))
         (clutch-db-escape-literal
          conn
-         (condition-case nil
-             (json-serialize value)
-           (error (format "%S" value)))))
+         (clutch--json-serialize-text value "parameter value")))
        (t
         (clutch-db-escape-literal conn (format "%S" value))))))))
 

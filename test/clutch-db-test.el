@@ -494,6 +494,125 @@ connection as live and not busy."
       (clutch-db-set-auto-commit conn nil)
       (should (plist-get (clutch-jdbc-conn-params conn) :manual-commit)))))
 
+(ert-deftest clutch-db-test-native-mysql-manual-commit-follows-autocommit ()
+  "Native MySQL manual-commit should mirror session autocommit state."
+  (require 'clutch-db-mysql)
+  (should-not
+   (clutch-db-manual-commit-p
+    (make-mysql-conn :status-flags #x0002)))
+  (should
+   (clutch-db-manual-commit-p
+    (make-mysql-conn :status-flags 0))))
+
+(ert-deftest clutch-db-test-native-mysql-transaction-methods-delegate ()
+  "Native MySQL transaction methods should delegate to mysql.el helpers."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306))
+        captured-auto-commit
+        committed
+        rolled-back)
+    (cl-letf (((symbol-function 'mysql-set-autocommit)
+               (lambda (_conn v)
+                 (setq captured-auto-commit v)))
+              ((symbol-function 'mysql-commit)
+               (lambda (_conn)
+                 (setq committed t)))
+              ((symbol-function 'mysql-rollback)
+               (lambda (_conn)
+                 (setq rolled-back t))))
+      (clutch-db-set-auto-commit conn nil)
+      (should-not captured-auto-commit)
+      (clutch-db-commit conn)
+      (clutch-db-rollback conn)
+      (should committed)
+      (should rolled-back))))
+
+(ert-deftest clutch-db-test-native-pg-toggle-enables-manual-mode ()
+  "Native PostgreSQL should enter manual-commit mode after toggling autocommit off."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test")))
+    (should-not (clutch-db-manual-commit-p conn))
+    (clutch-db-set-auto-commit conn nil)
+    (should (clutch-db-manual-commit-p conn))
+    (clutch-db-set-auto-commit conn t)
+    (should-not (clutch-db-manual-commit-p conn))))
+
+(ert-deftest clutch-db-test-native-pg-manual-mode-lazy-begin ()
+  "Native PostgreSQL manual-commit should lazily BEGIN on the first foreground query."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
+        calls)
+    (clutch-db-set-auto-commit conn nil)
+    (cl-letf (((symbol-function 'pg-exec)
+               (lambda (_conn sql)
+                 (push sql calls)
+                 (pcase sql
+                   ("BEGIN"
+                    (make-pgresult :connection conn :status "BEGIN"))
+                   ("SELECT 1"
+                    (make-pgresult :connection conn
+                                   :status "SELECT 1"
+                                   :attributes '(("n" 23 4))
+                                   :tuples '((1))))
+                   ("SELECT 2"
+                    (make-pgresult :connection conn
+                                   :status "SELECT 1"
+                                   :attributes '(("n" 23 4))
+                                   :tuples '((2))))
+                   (_
+                    (ert-fail (format "Unexpected SQL: %s" sql)))))))
+      (let ((result1 (clutch-db-query conn "SELECT 1"))
+            (result2 (clutch-db-query conn "SELECT 2")))
+        (should (equal (nreverse calls)
+                       '("BEGIN" "SELECT 1" "SELECT 2")))
+        (should (= (caar (clutch-db-result-rows result1)) 1))
+        (should (= (caar (clutch-db-result-rows result2)) 2))))))
+
+(ert-deftest clutch-db-test-native-pg-toggle-auto-commit-rolls-back-failed-transaction ()
+  "Native PostgreSQL should roll back an aborted manual transaction before enabling autocommit."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
+        calls)
+    (clutch-db-set-auto-commit conn nil)
+    (cl-letf (((symbol-function 'pg-exec)
+               (lambda (_conn sql)
+                 (push sql calls)
+                 (pcase sql
+                   ("BEGIN"
+                    (make-pgresult :connection conn :status "BEGIN"))
+                   ("UPDATE demo SET x = 1"
+                    (signal 'pg-error '("statement failed")))
+                   ("ROLLBACK"
+                    (make-pgresult :connection conn :status "ROLLBACK"))
+                   (_
+                    (ert-fail (format "Unexpected SQL: %s" sql)))))))
+      (should-error (clutch-db-query conn "UPDATE demo SET x = 1")
+                    :type 'clutch-db-error)
+      (clutch-db-set-auto-commit conn t)
+      (should (equal (nreverse calls)
+                     '("BEGIN" "UPDATE demo SET x = 1" "ROLLBACK")))
+      (should-not (clutch-db-manual-commit-p conn)))))
+
+(ert-deftest clutch-db-test-native-pg-transaction-control-allows-leading-comments ()
+  "Native PostgreSQL should not inject lazy BEGIN before commented transaction control."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
+        calls)
+    (clutch-db-set-auto-commit conn nil)
+    (cl-letf (((symbol-function 'pg-exec)
+               (lambda (_conn sql)
+                 (push sql calls)
+                 (make-pgresult :connection conn
+                                :status
+                                (cond
+                                 ((string-match-p "COMMIT" sql) "COMMIT")
+                                 ((string-match-p "BEGIN" sql) "BEGIN")
+                                 (t "ROLLBACK"))))))
+      (clutch-db-query conn "/* lead */ COMMIT")
+      (clutch-db-query conn "-- lead\nBEGIN")
+      (should (equal (nreverse calls)
+                     '("/* lead */ COMMIT" "-- lead\nBEGIN"))))))
+
 (ert-deftest clutch-db-test-jdbc-show-create-table-uses-oracle-style-identifiers ()
   "Oracle synthesized JDBC DDL should quote only identifiers that need it."
   (let ((conn (make-clutch-jdbc-conn :conn-id 4
@@ -2673,6 +2792,19 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
 (ert-deftest clutch-db-test-format-value-json-vector ()
   "Format-value serializes a vector (MySQL/PG JSON array) to a JSON string."
   (should (equal (clutch--format-value [1 2 3]) "[1,2,3]")))
+
+(ert-deftest clutch-db-test-format-value-json-serialization-error-surfaces ()
+  "Format-value should signal `clutch-db-error' when JSON serialization fails."
+  (let ((ht (make-hash-table :test 'equal)))
+    (puthash "key" "val" ht)
+    (cl-letf (((symbol-function 'json-serialize)
+               (lambda (_value)
+                 (signal 'wrong-type-argument '("json serialization failed")))))
+      (let ((err (should-error (clutch--format-value ht)
+                               :type 'clutch-db-error)))
+        (should (string-match-p
+                 "Cannot serialize query result value as JSON"
+                 (cadr err)))))))
 
 (ert-deftest clutch-db-test-value-to-literal-json-hash-table ()
   "Value-to-literal escapes a JSON hash-table as a quoted SQL string literal."

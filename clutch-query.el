@@ -237,7 +237,7 @@ hash-tables and vectors (JSON from MySQL/PG) → JSON string."
    ((numberp val) (number-to-string val))
    ((listp val) (or (clutch-db-format-temporal val) (format "%S" val)))
    ((or (hash-table-p val) (vectorp val))
-    (condition-case nil (json-serialize val) (error (format "%S" val))))
+    (clutch--json-serialize-text val "query result value"))
    (t (format "%S" val))))
 
 (defun clutch--truncate-cell (str max-width)
@@ -297,16 +297,6 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
       ;; from SQL NULL when decoding metadata payloads.
       (and (symbolp val)
            (string= (symbol-name val) "clutch-jdbc-json-false"))))
-
-(defun clutch--json-serialize-text (val)
-  "Return VAL serialized as normal Emacs JSON text.
-`json-serialize' returns a unibyte UTF-8 string.  Decode it back to a
-regular multibyte Emacs string so non-ASCII JSON content remains readable
-in edit/view buffers."
-  (let ((json (json-serialize val)))
-    (if (multibyte-string-p json)
-        json
-      (decode-coding-string json 'utf-8 t))))
 
 (defun clutch--json-value-to-string (val)
   "Convert VAL to valid JSON text suitable for JSON editing and viewing."

@@ -768,14 +768,13 @@ Returns a `clutch-jdbc-conn'."
 ;; inside clutch-db-jdbc-connect without requiring a redundant :driver key
 ;; in the user's params plist (:backend is stripped by clutch--build-conn
 ;; before the connect-fn is called).
-(with-eval-after-load 'clutch-db
-  (dolist (driver clutch-jdbc--jdbc-drivers)
-    (unless (alist-get driver clutch-db--backend-features)
-      (let ((drv driver))
-        (push (cons drv
-                    (list :require 'clutch-db-jdbc
-                          :connect-fn (lambda (p) (clutch-db-jdbc-connect drv p))))
-              clutch-db--backend-features)))))
+(dolist (driver clutch-jdbc--jdbc-drivers)
+  (unless (alist-get driver clutch-db--backend-features)
+    (let ((drv driver))
+      (push (cons drv
+                  (list :require 'clutch-db-jdbc
+                        :connect-fn (lambda (p) (clutch-db-jdbc-connect drv p))))
+            clutch-db--backend-features))))
 
 ;;;; Lifecycle methods
 

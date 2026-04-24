@@ -191,6 +191,21 @@ SELECT * FROM users LIMIT 10;
 
 Press =C-c C-c= to execute.  If a region is selected, the selected SQL runs; otherwise the statement at point runs.  Results appear in a split result buffer below.
 
+*** 4. Control transactions
+
+For native MySQL and PostgreSQL, and for JDBC connections that run in
+manual-commit mode, clutch uses the same transaction keys:
+
+- =C-c C-a= toggles auto-commit
+- =C-c C-m= commits
+- =C-c C-u= rolls back
+
+Native MySQL maps =C-c C-a= to the server session's autocommit flag directly.
+Native PostgreSQL uses a clutch-managed manual mode: enabling manual mode does
+not send =BEGIN= immediately, the first foreground statement opens the
+transaction lazily, and transactional DDL also counts as pending work, so
+toggle/disconnect stays blocked until you commit or roll back.
+
 ** Password Management
 
 =:password= is optional in connection entries. When omitted (or nil), the
@@ -934,6 +949,10 @@ backends.  See [[#password-management][Password Management]] for details.
 - Use =C-c C-a= to toggle between manual-commit and auto-commit at any time.
   The toggle is blocked when there are uncommitted changes (matching DataGrip's
   behavior); commit or roll back first, then switch.
+- Native MySQL supports the same commands by toggling the session autocommit
+  flag.
+- Native PostgreSQL supports the same commands through a clutch-managed manual
+  mode with lazy =BEGIN=; transactional DDL counts as pending work there too.
 - The console header-line always shows the current commit mode: =Tx: Auto=,
   =Tx: Manual=, or =Tx: Manual*= (uncommitted changes present).
 - Open DML result buffers show a status banner in their header-line after each
@@ -1158,7 +1177,7 @@ The pure protocol packages (=mysql= and =pg=) and the Org-Babel bridge
 (=ob-clutch=) now live in separate repositories and carry their own focused test
 suites.
 
-See =CLAUDE.md= §Pre-Commit Checklist for exact test commands.
+See =AGENTS.md= §Pre-Commit Checklist for exact test commands.
 
 * Roadmap
 

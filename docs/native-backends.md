@@ -63,10 +63,23 @@ CA or set `mysql-tls-verify-server` to `nil` explicitly.
 
 - `with-mysql-connection`
 - `with-mysql-transaction`
+- `mysql-autocommit-p`
+- `mysql-in-transaction-p`
+- `mysql-set-autocommit`
+- `mysql-commit`
+- `mysql-rollback`
 - `mysql-ping`
 - `mysql-escape-identifier`
 - `mysql-escape-literal`
 - `mysql-connect-uri`
+
+### Transaction Control in clutch
+
+- `C-c C-a` toggles session autocommit with `SET autocommit = 0/1`
+- `C-c C-m` issues `COMMIT`
+- `C-c C-u` issues `ROLLBACK`
+- clutch header-line state (`Tx: Auto` / `Tx: Manual` / `Tx: Manual*`) follows
+  those session semantics
 
 ### Prepared Statements
 
@@ -136,6 +149,16 @@ Relevant variables:
   (pg-exec conn "INSERT INTO users (name) VALUES ('bob')"))
 ```
 
+### Transaction Control in clutch
+
+- PostgreSQL does not expose a session autocommit toggle like MySQL
+- In clutch, `C-c C-a` enables a clutch-managed manual mode
+- Manual mode uses lazy `BEGIN`: the first foreground statement opens the
+  transaction
+- `C-c C-m` issues `COMMIT`; `C-c C-u` issues `ROLLBACK`
+- Transactional DDL also counts as pending work, so `Tx: Manual*` remains
+  accurate for native PostgreSQL
+
 ### Interrupts and Timeouts
 
 - `:query-timeout` maps to PostgreSQL `statement_timeout`.
@@ -192,6 +215,9 @@ Relevant variables:
   them lazily during idle time
 - Native MySQL/PostgreSQL deferred metadata now stays on the Emacs main thread
   via idle callbacks rather than using worker threads
+- Native MySQL and PostgreSQL both support clutch transaction toggling (`C-c C-a`
+  / `C-c C-m` / `C-c C-u`), while SQLite still has no native runtime
+  auto-commit toggle
 
 ### Parameterized DML
 

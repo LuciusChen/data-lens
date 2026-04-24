@@ -37,7 +37,7 @@ list.  If `:done` is `t`, it returns `:rows` directly.  Otherwise it calls
 ### Forward-declaration pattern for `clutch.el` symbols
 
 `clutch-db-jdbc.el` is the JDBC backend and should not `(require 'clutch)`.
-The CLAUDE.md architecture rule is "one-directional dependency flow".
+The AGENTS.md architecture rule is "one-directional dependency flow".
 `clutch--connection-key` lives in `clutch-connection.el`, and
 `clutch--schema-cache` lives in `clutch.el`.
 

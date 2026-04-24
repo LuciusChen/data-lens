@@ -28,7 +28,7 @@ Expose PG's character position as a red wave-underline overlay in the SQL source
 
 **MySQL support**: MySQL's wire-protocol error does not include a character offset. The `near 'TOKEN'` phrase in the message could be used to search the SQL buffer, but the token may appear multiple times, making placement unreliable. Deferred.
 
-**Face colors inline vs. defface**: Using a named face allows users to customize via `M-x customize-face`. Required by CLAUDE.md for all user-visible appearance.
+**Face colors inline vs. defface**: Using a named face allows users to customize via `M-x customize-face`. Required by AGENTS.md for all user-visible appearance.
 
 ## Known Limitations
 

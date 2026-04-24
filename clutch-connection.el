@@ -159,6 +159,11 @@ interactive readers inspect shared customization such as
   (member (clutch--sql-main-op-keyword sql)
           '("INSERT" "UPDATE" "DELETE" "MERGE" "REPLACE")))
 
+(defun clutch--transactional-schema-query-p (conn sql)
+  "Return non-nil when schema-affecting SQL stays pending on CONN."
+  (and (clutch--schema-affecting-query-p sql)
+       (eq (ignore-errors (clutch--backend-key-from-conn conn)) 'pg)))
+
 (defun clutch--transaction-control-query-p (sql)
   "Return non-nil when SQL is explicit transaction control."
   (member (clutch--sql-leading-keyword sql)
@@ -251,6 +256,8 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
      ((and (clutch--connection-oracle-jdbc-p conn)
            (clutch--schema-affecting-query-p sql))
       (clutch--clear-tx-dirty conn))
+     ((clutch--transactional-schema-query-p conn sql)
+      (clutch--set-tx-dirty conn))
      ((clutch--manual-commit-dirtying-query-p sql)
       (clutch--set-tx-dirty conn)))))
 
@@ -971,8 +978,8 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
 ;;;###autoload
 (defun clutch-toggle-auto-commit ()
   "Toggle auto-commit mode for the current connection.
-When switching from manual-commit to auto-commit, the database commits
-any pending transaction per JDBC specification."
+When switching from manual-commit to auto-commit, the backend finishes
+any open transaction according to its own semantics."
   (interactive)
   (clutch--ensure-connection)
   (let ((manual-now (clutch-db-manual-commit-p clutch-connection)))

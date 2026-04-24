@@ -1760,7 +1760,7 @@ When PREDICATE is non-nil, keep only action specs matching it."
 
 (cl-defun clutch--embark-with-resolved-entry
     (&rest rest &key target run &allow-other-keys)
-  "Resolve Embark TARGET string to entry plist for action dispatch.
+  "Resolve Embark TARGET string in REST to an entry plist for action dispatch.
 Looks up TARGET in `clutch--object-completion-entry-map' and binds
 the result to `clutch--object-dispatch-entry' so that action commands
 see the minibuffer candidate rather than the object at point.

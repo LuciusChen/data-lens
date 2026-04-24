@@ -6524,6 +6524,34 @@ crashing the UI layer."
       (clutch--run-db-query conn "UPDATE demo SET x = 1")
       (should (clutch--tx-dirty-p conn)))))
 
+(ert-deftest clutch-test-run-db-query-marks-native-pg-ddl-dirty ()
+  "Transactional PostgreSQL DDL should mark manual-commit connections dirty."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (conn 'fake-conn))
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn _sql) '(:ok t)))
+              ((symbol-function 'clutch-db-manual-commit-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--backend-key-from-conn)
+               (lambda (_conn) 'pg))
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (clutch--run-db-query conn "CREATE TABLE demo (id int)")
+      (should (clutch--tx-dirty-p conn)))))
+
+(ert-deftest clutch-test-run-db-query-keeps-native-mysql-ddl-clean ()
+  "MySQL DDL should not mark manual-commit connections dirty."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (conn 'fake-conn))
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn _sql) '(:ok t)))
+              ((symbol-function 'clutch-db-manual-commit-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--backend-key-from-conn)
+               (lambda (_conn) 'mysql))
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (clutch--run-db-query conn "CREATE TABLE demo (id int)")
+      (should-not (clutch--tx-dirty-p conn)))))
+
 (ert-deftest clutch-test-run-db-query-clears-dirty-on-commit ()
   "Successful COMMIT should clear dirty manual-commit state."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
@@ -8168,6 +8196,29 @@ database.  Only a query re-execution should discard them."
                   'ok))
       (should (equal captured-sql
                      "UPDATE demo SET name = 'alice', age = 7 WHERE note IS NULL")))))
+
+(ert-deftest clutch-test-execute-params-fallback-json-error-surfaces ()
+  "Fallback parameter execution should signal when JSON parameter serialization fails."
+  (let ((payload (make-hash-table :test 'equal))
+        query-called)
+    (puthash "key" "value" payload)
+    (cl-letf (((symbol-function 'json-serialize)
+               (lambda (_value)
+                 (signal 'wrong-type-argument '("json serialization failed"))))
+              ((symbol-function 'clutch-db-query)
+               (lambda (&rest _args)
+                 (setq query-called t)
+                 'unexpected)))
+      (let ((err (should-error
+                  (clutch-db-execute-params
+                   'fake-conn
+                   "INSERT INTO demo(payload) VALUES (?)"
+                   (list payload))
+                  :type 'clutch-db-error)))
+        (should-not query-called)
+        (should (string-match-p
+                 "Cannot serialize parameter value as JSON"
+                 (cadr err)))))))
 
 (ert-deftest clutch-test-execute-statements-remembers-error-details-before-last ()
   "Earlier failing statements should store details and humanized messages."

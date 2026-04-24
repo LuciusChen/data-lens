@@ -16,20 +16,14 @@ so the edit layer reads pre-computed data rather than re-querying.
 Not urgent: the current code works correctly when metadata is available
 and degrades gracefully when it is not.
 
-### JSON serialization fallback (clutch.el)
+### JSON serialization fallback
 
-Two sites fall back when `json-serialize` fails:
-- Line ~1307: `(condition-case nil (json-serialize val) (error (format "%S" val)))`
-- Line ~4231: `(condition-case nil (json-serialize (json-parse-string val)) (error (json-serialize val)))`
-
-These display non-standard JSON values rather than raising errors.
-From a UI resilience perspective this is intentional — a result buffer
-should not crash because one cell has unexpected content.  But it masks
-upstream data quality issues.
-
-Lower priority: only worth addressing when the result ingestion layer
-enforces normalized JSON values.
+Resolved in April 2026.  Core parameter rendering and result formatting now
+signal `clutch-db-error` when JSON serialization fails instead of falling back
+to Lisp printed forms.  JSON edit/view helpers still normalize raw JSON text,
+but they no longer hide serialization failures for parsed object/array values.
 
 ## Status
 
-Recorded as design debt.  Neither item is a current defect or blocker.
+PK/FK late-stage detection remains design debt.  The JSON fallback item is
+closed.

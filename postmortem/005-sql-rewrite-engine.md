@@ -8,7 +8,7 @@ clutch needs to rewrite user SQL for three purposes:
 3. **WHERE filter**: inject a filter clause from the client-side filter UI
 
 Each rewrite had multiple failed iterations before arriving at the
-current approach. The guardrails in CLAUDE.md exist because of these
+current approach. The guardrails in AGENTS.md exist because of these
 failures.
 
 ## Pagination: Top-Level LIMIT Detection
@@ -71,7 +71,7 @@ clause level.
 `clutch--sql-find-top-level-clause` tracks parenthesis depth and string
 literal state to find clauses only at the top level of the query.
 
-## CLAUDE.md Guardrails (Why They Exist)
+## AGENTS.md Guardrails (Why They Exist)
 
 These rules were written after the above failures:
 

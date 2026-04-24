@@ -5,7 +5,7 @@
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (mysql "0.1"))
+;; Package-Requires: ((emacs "28.1") (mysql "0.2.0"))
 ;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
@@ -155,6 +155,25 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
 (cl-defmethod clutch-db-eager-schema-refresh-p ((_conn mysql-conn))
   "MySQL schema refresh should not block connect."
   nil)
+
+;;;; Transaction methods
+
+(cl-defmethod clutch-db-manual-commit-p ((conn mysql-conn))
+  "Return non-nil when MySQL CONN runs with autocommit disabled."
+  (not (mysql-autocommit-p conn)))
+
+(cl-defmethod clutch-db-commit ((conn mysql-conn))
+  "Commit the current transaction on MySQL CONN."
+  (mysql-commit conn))
+
+(cl-defmethod clutch-db-rollback ((conn mysql-conn))
+  "Roll back the current transaction on MySQL CONN."
+  (mysql-rollback conn))
+
+(cl-defmethod clutch-db-set-auto-commit ((conn mysql-conn) auto-commit)
+  "Set autocommit mode on MySQL CONN.
+AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
+  (mysql-set-autocommit conn auto-commit))
 
 ;;;; Query methods
 

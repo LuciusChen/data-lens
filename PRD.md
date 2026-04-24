@@ -1075,7 +1075,7 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | **SQL rewriting** | ORDER BY/LIMIT/OFFSET injection uses top-level clause detection (regex); complex CTEs/UNIONs may rewrite incorrectly |
 | **Mutations without PK** | Edit and delete are disabled when the result table has no primary key |
 | **MySQL query timeout** | `clutch-query-timeout-seconds` is not enforced for MySQL (applied for PostgreSQL and JDBC only) |
-| **Transaction control** | JDBC supports `commit`/`rollback`; Oracle defaults to manual-commit but can be flipped globally via `clutch-jdbc-oracle-manual-commit` or per connection via `:manual-commit` |
+| **Transaction control** | Native MySQL and PostgreSQL support `commit` / `rollback` / runtime auto-commit toggle; JDBC supports the same, with Oracle defaulting to manual-commit and `:manual-commit` remaining JDBC-only at connect time |
 | **Prepared statements** | DML mutations use parameterized execution for native MySQL/PostgreSQL/SQLite backends; JDBC still falls back to literal SQL rendering |
 | **CLOB/BLOB full content** | CLOBs show first 256 chars; BLOBs show length only; full streaming deferred |
 | **Multiple result sets** | Stored procedures returning multiple result sets not supported |
@@ -1091,7 +1091,7 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 
 ## 19. Development Guidelines
 
-See `CLAUDE.md` in both repos for full rules. Key points:
+See `AGENTS.md` in both repos for full rules. Key points:
 
 - **Interface/implementation separation**: protocol layers never include UI; UI never imports protocol layers directly
 - **Single file, single responsibility**: do not split files without a genuinely distinct responsibility
