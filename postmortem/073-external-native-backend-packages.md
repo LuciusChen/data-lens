@@ -1,5 +1,10 @@
 #+TITLE: Postmortem 073: External Native Backend Packages
 
+Update 2026-04-27: this decision was revised for MySQL.  PostgreSQL continues
+to use upstream =pg-el=, while the MySQL protocol layer is bundled as the
+prefixed =clutch-mysql.el=.  See
+=postmortem/089-prefixed-mysql-protocol-layer.md=.
+
 * Why this split happened
 
 Clutch started with three responsibilities in one repository:

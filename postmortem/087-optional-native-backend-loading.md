@@ -1,6 +1,10 @@
 #+title: Optional Native Backend Loading
 #+date: 2026-04-09
 
+Update 2026-04-27: this remains true for PostgreSQL's upstream =pg= package.
+MySQL is now bundled as the prefixed =clutch-mysql.el= protocol layer; see
+=postmortem/089-prefixed-mysql-protocol-layer.md=.
+
 * Context
 
 After splitting =mysql= and =pg= into external protocol packages, =clutch=

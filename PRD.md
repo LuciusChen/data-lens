@@ -14,7 +14,7 @@ Emacs users lack a seamless, integrated database client that operates within the
 ### Solution
 
 clutch integrates directly into Emacs, offering:
-- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages
+- Native MySQL/PostgreSQL backends via pure Elisp protocol layers
 - Interactive SQL editing with completion
 - Unified transient-based mutation workflow (edit/delete/insert with staged preview/commit)
 - Schema caching and intelligent completion
@@ -35,10 +35,10 @@ clutch follows a **layered, interface-based architecture** with clear separation
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  UI Layer (clutch.el)                                   │
+│  UI Layer (clutch.el + clutch-* UI modules)             │
 │  - Interactive modes and transient menus                │
 │  - Result display, editing buffers, object workflow     │
-│  - Query execution, column paging, mutation workflow    │
+│  - Query execution, connection lifecycle, schema caches  │
 └──────────────────────┬──────────────────────────────────┘
                        │
 ┌──────────────────────v──────────────────────────────────┐
@@ -60,25 +60,31 @@ clutch follows a **layered, interface-based architecture** with clear separation
          │             │             │                  │
          v             v             v                  v
     ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌──────────────┐
-    │mysql    │  │ upstream│  │ Emacs    │  │ Java 17+ JVM │
-    │(external │ │ pg-el   │  │ 29.1+    │  │ process +    │
-    │ pure     │ │ package)│  │ -in      │  │ JDBC drivers │
-    │ Elisp)   │ │         │  │ sqlite-* │  │              │
+    │clutch- │  │ upstream│  │ Emacs    │  │ Java 17+ JVM │
+    │mysql.el│  │ pg-el   │  │ 29.1+    │  │ process +    │
+    │bundled │  │ package │  │ built-in │  │ JDBC drivers │
+    │protocol│  │         │  │ sqlite-* │  │              │
     │          │ │         │  │ functions│  │              │
     └─────────┘  └─────────┘  └──────────┘  └──────────────┘
 ```
 
 ### File Responsibilities
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `clutch.el` | ~7800 | Main UI: modes, transient menus, result display, mutation workflow, object-centric schema workflow, schema caching |
-| `clutch-db.el` | ~300 | Generic interface: `cl-defgeneric` definitions, result struct, shared helpers |
-| `clutch-db-mysql.el` | ~320 | MySQL backend adapter, type-category mapping |
-| `clutch-db-pg.el` | ~350 | PostgreSQL backend adapter, OID-to-type mapping |
-| `clutch-db-sqlite.el` | ~330 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
-| `clutch-db-jdbc.el` | ~980 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
-| External dependency: `mysql` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
+| File | Approx. lines | Purpose |
+|------|---------------|---------|
+| `clutch.el` | ~5000 | Package entry point, modes, customizations, dispatch, and shared UI glue |
+| `clutch-connection.el` | ~1400 | Connection lifecycle, transaction commands, backend detection, header-line state, authentication |
+| `clutch-query.el` | ~1500 | SQL execution, result workflow, value formatting, pagination, error details |
+| `clutch-schema.el` | ~900 | Schema refresh state and metadata caches |
+| `clutch-ui.el` | ~1400 | Result rendering, footer/header refresh, icon helpers |
+| `clutch-object.el` | ~1800 | Object discovery, describe/action workflow, Embark helpers |
+| `clutch-edit.el` | ~2100 | Staged edit, insert, delete, preview, and commit workflow |
+| `clutch-db.el` | ~800 | Generic interface: `cl-defgeneric` definitions, result struct, shared helpers |
+| `clutch-db-mysql.el` | ~650 | MySQL backend adapter, type-category mapping, schema/object metadata |
+| `clutch-db-pg.el` | ~1200 | PostgreSQL backend adapter, OID-to-type mapping, transaction state |
+| `clutch-db-sqlite.el` | ~350 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
+| `clutch-db-jdbc.el` | ~1700 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
+| `clutch-mysql.el` | ~1500 | Bundled, prefixed pure Elisp MySQL wire protocol client |
 | External dependency: `pg` | n/a | PostgreSQL client from upstream `pg-el` (separate package) |
 | Optional package: `ob-clutch` | n/a | Org-Babel integration bridge (separate package) |
 
@@ -98,7 +104,7 @@ user queries on the same JDBC session.
 
 | Backend | Emacs Version | Implementation | Notes |
 |---------|---------------|----------------|-------|
-| **MySQL** | 28.1+ | `mysql` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
+| **MySQL** | 28.1+ | `clutch-mysql.el` | Bundled, prefixed pure Elisp protocol layer; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
 | **PostgreSQL** | 28.1+ | `pg` | External `pg-el` package; supports PG 12+ |
 | **SQLite** | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
 
@@ -111,6 +117,7 @@ user queries on the same JDBC session.
 | **SQL Server** | `mssql-jdbc` | 13.4.0.jre11 | Maven Central (auto-download) |
 | **Snowflake** | `snowflake-jdbc` | 3.14.4 | Maven Central (auto-download) |
 | **Amazon Redshift** | `redshift-jdbc42` | 2.1.0.30 | Maven Central (auto-download) |
+| **ClickHouse** | `clickhouse-jdbc` | 0.9.8 `all` classifier | Maven Central (auto-download, with SLF4J companions) |
 | **DB2** | `db2jcc4` | — | Manual installation from IBM |
 | **Generic JDBC** | any | — | Drop jar into `clutch-jdbc-agent-dir/drivers/` |
 
@@ -885,7 +892,7 @@ Field names are read-only (`font-lock-face clutch-insert-field-name-face`, `read
 | Argument | Description |
 |----------|-------------|
 | `:connection NAME` | Use named profile from `clutch-connection-alist`; this supplies the backend when using a saved connection |
-| `:backend SYM` | Backend: `mysql`, `pg`, `postgresql`, `sqlite`, `oracle`, `sqlserver`, `snowflake`, `redshift`; required for inline params when `:connection` is absent |
+| `:backend SYM` | Backend: `mysql`, `pg`, `postgresql`, `sqlite`, `oracle`, `sqlserver`, `snowflake`, `redshift`, `clickhouse`, `db2`, or `jdbc`; required for inline params when `:connection` is absent |
 | `:host HOST` | Database host (inline, without `:connection`) |
 | `:port PORT` | Database port |
 | `:user USER` | Database user |
@@ -958,7 +965,7 @@ Current `clutch-db.el` generic surface, grouped by responsibility:
 |--------|-------------|
 | `clutch-db-query (conn sql)` | Execute SQL and return a `clutch-db-result` |
 | `clutch-db-execute-params (conn sql params)` | Execute parameterized SQL with bound values |
-| `clutch-db-build-paged-sql (conn base-sql page-num page-size &optional order-by where-clause)` | Build paged SQL for a backend |
+| `clutch-db-build-paged-sql (conn base-sql page-num page-size &optional order-by)` | Build paged SQL for a backend |
 | `clutch-db-escape-identifier (conn name)` | Quote/escape identifiers |
 | `clutch-db-escape-literal (conn value)` | Render literal SQL values for preview/fallback paths |
 

@@ -726,7 +726,9 @@ Returns a backend-specific connection object."
                    (require (plist-get feature-plist :require))
                  (file-missing
                   (pcase backend
-                    ('mysql (user-error "MySQL backend requires the mysql package"))
+                    ('mysql
+                     (user-error
+                      "MySQL backend requires bundled clutch-db-mysql.el and clutch-mysql.el"))
                     ('pg (user-error "PostgreSQL backend requires the pg package"))
                     (_ (signal (car err) (cdr err))))))
                (plist-get feature-plist :connect-fn))))

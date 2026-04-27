@@ -2,7 +2,7 @@
 
 `clutch` ships three non-JDBC backends that do not require a sidecar process:
 
-- `mysql` — external pure Emacs Lisp MySQL wire protocol client
+- `clutch-mysql.el` — bundled, prefixed pure Emacs Lisp MySQL wire protocol client
 - `pg` — external PostgreSQL client from `pg-el`
 - `clutch-db-sqlite.el` — SQLite adapter over Emacs 29.1+ built-in `sqlite-*`
 
@@ -33,7 +33,7 @@ interactive `ssh HOST` succeeds but clutch still reports SSH authentication
 failure, configure OpenSSH to authenticate non-interactively too, usually by
 loading the key into `ssh-agent` or enabling `AddKeysToAgent`.
 
-## MySQL (`mysql`)
+## MySQL (`:backend mysql`)
 
 ### Scope
 
@@ -44,22 +44,27 @@ loading the key into `ssh-agent` or enabling `AddKeysToAgent`.
 - Prepared statements via `COM_STMT_PREPARE` / `COM_STMT_EXECUTE`
 - TLS via Emacs GnuTLS
 
+The bundled protocol layer is maintained as `clutch-mysql-*` symbols so it can
+be split into a standalone package later with a mostly mechanical prefix
+change.  Its focused API and protocol notes live in
+[`docs/mysql-protocol.md`](./mysql-protocol.md).
+
 ### Connection Example
 
 ```elisp
-(require 'mysql)
+(require 'clutch-mysql)
 
-(setq conn (mysql-connect :host "127.0.0.1"
-                               :port 3306
-                               :user "root"
-                               :password "secret"
-                               :database "mydb"))
+(setq conn (clutch-mysql-connect :host "127.0.0.1"
+                                  :port 3306
+                                  :user "root"
+                                  :password "secret"
+                                  :database "mydb"))
 
-(let ((result (mysql-query conn "SELECT * FROM users LIMIT 10")))
-  (mysql-result-columns result)
-  (mysql-result-rows result))
+(let ((result (clutch-mysql-query conn "SELECT * FROM users LIMIT 10")))
+  (clutch-mysql-result-columns result)
+  (clutch-mysql-result-rows result))
 
-(mysql-disconnect conn)
+(clutch-mysql-disconnect conn)
 ```
 
 ### TLS
@@ -68,33 +73,33 @@ When `:tls t` is used, certificate and hostname verification are enabled by
 default.  For MySQL, explicit `:ssl-mode disabled` is the canonical plaintext
 opt-out; `:tls nil` remains a shorthand.
 
-For MySQL only, `:ssl-mode disabled` is a compatibility spelling for that same
-plaintext mode.  The older alias `off` is still accepted.  Either spelling
+For MySQL only, `:ssl-mode disabled` is the backend-native spelling for that
+same plaintext mode.  The older alias `off` is still accepted.  Either spelling
 disables the automatic MySQL 8 TLS reconnect path.
 
 Relevant variables:
 
-- `mysql-tls-trustfiles`
-- `mysql-tls-verify-server`
-- `mysql-tls-keylist`
+- `clutch-mysql-tls-trustfiles`
+- `clutch-mysql-tls-verify-server`
+- `clutch-mysql-tls-keylist`
 
 For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS
 for authentication.  For self-signed local dev certificates, either trust the
-CA or set `mysql-tls-verify-server` to `nil` explicitly.
+CA or set `clutch-mysql-tls-verify-server` to `nil` explicitly.
 
 ### Convenience API
 
-- `with-mysql-connection`
-- `with-mysql-transaction`
-- `mysql-autocommit-p`
-- `mysql-in-transaction-p`
-- `mysql-set-autocommit`
-- `mysql-commit`
-- `mysql-rollback`
-- `mysql-ping`
-- `mysql-escape-identifier`
-- `mysql-escape-literal`
-- `mysql-connect-uri`
+- `with-clutch-mysql-connection`
+- `with-clutch-mysql-transaction`
+- `clutch-mysql-autocommit-p`
+- `clutch-mysql-in-transaction-p`
+- `clutch-mysql-set-autocommit`
+- `clutch-mysql-commit`
+- `clutch-mysql-rollback`
+- `clutch-mysql-ping`
+- `clutch-mysql-escape-identifier`
+- `clutch-mysql-escape-literal`
+- `clutch-mysql-connect-uri`
 
 ### Transaction Control in clutch
 
@@ -107,10 +112,10 @@ CA or set `mysql-tls-verify-server` to `nil` explicitly.
 ### Prepared Statements
 
 ```elisp
-(let ((stmt (mysql-prepare conn "SELECT * FROM users WHERE id = ?")))
-  (let ((result (mysql-execute stmt 42)))
-    (mysql-result-rows result))
-  (mysql-stmt-close stmt))
+(let ((stmt (clutch-mysql-prepare conn "SELECT * FROM users WHERE id = ?")))
+  (let ((result (clutch-mysql-execute stmt 42)))
+    (clutch-mysql-result-rows result))
+  (clutch-mysql-stmt-close stmt))
 ```
 
 ## PostgreSQL (`pg`)

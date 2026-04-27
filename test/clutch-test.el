@@ -31,7 +31,7 @@
 
 (require 'clutch)
 
-(defvar mysql-tls-verify-server)
+(defvar clutch-mysql-tls-verify-server)
 
 (defvar clutch-column-displayers)
 
@@ -39,7 +39,7 @@
 
 (declare-function make-clutch-jdbc-conn "clutch-db-jdbc" (&rest slot-value-pairs))
 
-(declare-function make-mysql-conn "mysql" (&rest args))
+(declare-function make-clutch-mysql-conn "clutch-mysql" (&rest args))
 
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
 
@@ -291,9 +291,9 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
 (ert-deftest clutch-test-value-to-literal-string ()
   "Test string literal conversion (requires connection)."
   (require 'clutch-db-mysql)
-  (require 'mysql)
+  (require 'clutch-mysql)
   ;; String escaping requires a connection
-  (let ((clutch-connection (make-mysql-conn :host "localhost")))
+  (let ((clutch-connection (make-clutch-mysql-conn :host "localhost")))
     (let ((result (clutch--value-to-literal "hello")))
       (should (stringp result))
       (should (string-prefix-p "'" result)))
@@ -6102,8 +6102,8 @@ crashing the UI layer."
 (ert-deftest clutch-test-connection-key ()
   "Test connection key generation."
   (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "localhost" :port 3306
+  (require 'clutch-mysql)
+  (let ((conn (make-clutch-mysql-conn :host "localhost" :port 3306
                                     :user "root" :database "test")))
     (let ((key (clutch--connection-key conn)))
       (should (stringp key))
@@ -10905,7 +10905,7 @@ Skips if `clutch-test-password' is nil."
   (declare (indent 1))
   `(if (null clutch-test-password)
        (ert-skip "Set clutch-test-password to enable live tests")
-     (let ((mysql-tls-verify-server nil))
+     (let ((clutch-mysql-tls-verify-server nil))
        (let ((,var (clutch-db-connect
                     clutch-test-backend
                     (list :host clutch-test-host

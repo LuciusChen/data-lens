@@ -17,7 +17,7 @@
 ;; Note: MySQL 8 defaults to `caching_sha2_password'.  The native mysql
 ;; client retries with TLS when the server requires a secure channel; local
 ;; container certificates are typically self-signed, so the MySQL live helpers
-;; bind `mysql-tls-verify-server' to nil unless the test environment installs a
+;; bind `clutch-mysql-tls-verify-server' to nil unless the test environment installs a
 ;; trusted CA.
 ;;
 ;; Run unit tests:
@@ -47,25 +47,25 @@
 ;; that the bytecode in clutch-db-jdbc.el can see.
 (defvar clutch--schema-cache (make-hash-table :test 'equal))
 (defvar clutch-debug-buffer-name "*clutch-debug*")
-;; `mysql-tls-verify-server' is defined in mysql.el; declare it
+;; `clutch-mysql-tls-verify-server' is defined in clutch-mysql.el; declare it
 ;; special here so local test bindings remain dynamic even before the backend
-;; requires mysql.el.
-(defvar mysql-tls-verify-server)
+;; requires clutch-mysql.el.
+(defvar clutch-mysql-tls-verify-server)
 (defvar clutch-connection)
 (defvar clutch-jdbc--error-details-by-conn)
 (defvar clutch-jdbc--busy-request-ids)
 (defvar clutch-jdbc--ignored-response-ids)
-(defvar mysql-type-long)
-(defvar mysql-type-float)
-(defvar mysql-type-double)
-(defvar mysql-type-decimal)
-(defvar mysql-type-longlong)
-(defvar mysql-type-date)
-(defvar mysql-type-time)
-(defvar mysql-type-datetime)
-(defvar mysql-type-timestamp)
-(defvar mysql-type-blob)
-(defvar mysql-type-json)
+(defvar clutch-mysql-type-long)
+(defvar clutch-mysql-type-float)
+(defvar clutch-mysql-type-double)
+(defvar clutch-mysql-type-decimal)
+(defvar clutch-mysql-type-longlong)
+(defvar clutch-mysql-type-date)
+(defvar clutch-mysql-type-time)
+(defvar clutch-mysql-type-datetime)
+(defvar clutch-mysql-type-timestamp)
+(defvar clutch-mysql-type-blob)
+(defvar clutch-mysql-type-json)
 (declare-function clutch-db-mysql--type-category "clutch-db-mysql" (type character-set))
 (declare-function clutch-db-mysql--convert-columns "clutch-db-mysql" (columns))
 (declare-function clutch-db-mysql-connect "clutch-db-mysql" (params))
@@ -78,9 +78,9 @@
 (declare-function clutch--build-conn "clutch" (params))
 (declare-function clutch--format-value "clutch" (value))
 (declare-function clutch--value-to-literal "clutch" (value))
-(declare-function make-mysql-conn "mysql" (&rest args))
-(declare-function make-mysql-result "mysql" (&rest args))
-(declare-function mysql-conn-database "mysql" (conn))
+(declare-function make-clutch-mysql-conn "clutch-mysql" (&rest args))
+(declare-function make-clutch-mysql-result "clutch-mysql" (&rest args))
+(declare-function clutch-mysql-conn-database "clutch-mysql" (conn))
 (declare-function make-pgcon "pg" (&rest args))
 (declare-function make-pgresult "pg" (&rest args))
 (declare-function pgcon-connect-plist "pg" (conn))
@@ -131,8 +131,8 @@
   "Run BODY with MySQL TLS verification disabled for local self-signed certs."
   (declare (indent 0))
   `(progn
-     (require 'mysql)
-     (cl-letf (((symbol-value 'mysql-tls-verify-server) nil))
+     (require 'clutch-mysql)
+     (cl-letf (((symbol-value 'clutch-mysql-tls-verify-server) nil))
        ,@body)))
 
 (defmacro clutch-db-test--with-immediate-idle-metadata (scheduled-var &rest body)
@@ -499,25 +499,25 @@ connection as live and not busy."
   (require 'clutch-db-mysql)
   (should-not
    (clutch-db-manual-commit-p
-    (make-mysql-conn :status-flags #x0002)))
+    (make-clutch-mysql-conn :status-flags #x0002)))
   (should
    (clutch-db-manual-commit-p
-    (make-mysql-conn :status-flags 0))))
+    (make-clutch-mysql-conn :status-flags 0))))
 
 (ert-deftest clutch-db-test-native-mysql-transaction-methods-delegate ()
-  "Native MySQL transaction methods should delegate to mysql.el helpers."
+  "Native MySQL transaction methods should delegate to clutch-mysql.el helpers."
   (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306))
+  (let ((conn (make-clutch-mysql-conn :host "127.0.0.1" :port 3306))
         captured-auto-commit
         committed
         rolled-back)
-    (cl-letf (((symbol-function 'mysql-set-autocommit)
+    (cl-letf (((symbol-function 'clutch-mysql-set-autocommit)
                (lambda (_conn v)
                  (setq captured-auto-commit v)))
-              ((symbol-function 'mysql-commit)
+              ((symbol-function 'clutch-mysql-commit)
                (lambda (_conn)
                  (setq committed t)))
-              ((symbol-function 'mysql-rollback)
+              ((symbol-function 'clutch-mysql-rollback)
                (lambda (_conn)
                  (setq rolled-back t))))
       (clutch-db-set-auto-commit conn nil)
@@ -687,7 +687,7 @@ connection as live and not busy."
 (ert-deftest clutch-db-test-mysql-refresh-schema-async-schedules-idle-call ()
   "Native MySQL schema refresh should schedule idle work on the main thread."
   (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+  (let ((conn (make-clutch-mysql-conn :host "127.0.0.1" :port 3306
                                     :user "root" :database "mysql"))
         callback-result
         scheduled)
@@ -762,7 +762,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mysql-list-columns-async-schedules-idle-call ()
   "Native MySQL column-name preheat should schedule idle work."
   (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+  (let ((conn (make-clutch-mysql-conn :host "127.0.0.1" :port 3306
                                     :user "root" :database "mysql"))
         callback-result
         scheduled)
@@ -783,7 +783,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mysql-column-details-async-schedules-idle-call ()
   "Native MySQL column-detail preheat should schedule idle work."
   (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+  (let ((conn (make-clutch-mysql-conn :host "127.0.0.1" :port 3306
                                     :user "root" :database "mysql"))
         callback-result
         scheduled)
@@ -805,7 +805,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mysql-table-comment-async-schedules-idle-call ()
   "Native MySQL table-comment preheat should schedule idle work."
   (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+  (let ((conn (make-clutch-mysql-conn :host "127.0.0.1" :port 3306
                                     :user "root" :database "mysql"))
         callback-result
         scheduled)
@@ -826,7 +826,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mysql-list-objects-async-schedules-idle-call ()
   "Native MySQL object warmup should schedule idle work."
   (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+  (let ((conn (make-clutch-mysql-conn :host "127.0.0.1" :port 3306
                                     :user "root" :database "mysql"))
         callback-result
         scheduled)
@@ -1566,7 +1566,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-mysql-set-current-schema-updates-connection-database ()
   "MySQL schema switching should execute USE and update the connection database."
-  (let ((conn (make-mysql-conn :database "zj_test"))
+  (let ((conn (make-clutch-mysql-conn :database "zj_test"))
         executed-sql)
     (cl-letf (((symbol-function 'clutch-db-query)
                (lambda (_conn sql)
@@ -1574,7 +1574,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                  (make-clutch-db-result :connection conn :affected-rows 0))))
       (should (equal (clutch-db-set-current-schema conn "cjh_test") "cjh_test"))
       (should (equal executed-sql "USE `cjh_test`"))
-      (should (equal (mysql-conn-database conn) "cjh_test")))))
+      (should (equal (clutch-mysql-conn-database conn) "cjh_test")))))
 
 ;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
 
@@ -1607,13 +1607,13 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-backend-features ()
   "Test that backend features are correctly registered."
-  (let ((mysql-features (alist-get 'mysql clutch-db--backend-features))
+  (let ((clutch-mysql-features (alist-get 'mysql clutch-db--backend-features))
         (pg-features (alist-get 'pg clutch-db--backend-features))
         (jdbc-features (alist-get 'jdbc clutch-db--backend-features)))
     ;; MySQL backend
-    (should mysql-features)
-    (should (eq (plist-get mysql-features :require) 'clutch-db-mysql))
-    (should (eq (plist-get mysql-features :connect-fn) 'clutch-db-mysql-connect))
+    (should clutch-mysql-features)
+    (should (eq (plist-get clutch-mysql-features :require) 'clutch-db-mysql))
+    (should (eq (plist-get clutch-mysql-features :connect-fn) 'clutch-db-mysql-connect))
     ;; PostgreSQL backend
     (should pg-features)
     (should (eq (plist-get pg-features :require) 'clutch-db-pg))
@@ -1666,9 +1666,9 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
    (clutch-db-connect 'unknown '(:host "localhost"))
    :type 'user-error))
 
-(ert-deftest clutch-db-test-native-backend-missing-package-errors-clearly ()
-  "Missing native backend packages should raise a direct user error."
-  (dolist (case '((mysql clutch-db-mysql "mysql package")
+(ert-deftest clutch-db-test-native-backend-missing-feature-errors-clearly ()
+  "Missing native backend features should raise a direct user error."
+  (dolist (case '((mysql clutch-db-mysql "bundled clutch-db-mysql.el")
                   (pg clutch-db-pg "pg package")))
     (pcase-let ((`(,backend ,feature ,expected) case))
       (ert-info ((symbol-name backend))
@@ -1721,36 +1721,37 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mysql-type-categories ()
   "Test MySQL type to category mapping."
   (require 'clutch-db-mysql)
-  (require 'mysql)
+  (require 'clutch-mysql)
   ;; Numeric types
-  (should (eq (clutch-db-mysql--type-category mysql-type-long 33) 'numeric))
-  (should (eq (clutch-db-mysql--type-category mysql-type-float 33) 'numeric))
-  (should (eq (clutch-db-mysql--type-category mysql-type-double 33) 'numeric))
-  (should (eq (clutch-db-mysql--type-category mysql-type-decimal 33) 'numeric))
-  (should (eq (clutch-db-mysql--type-category mysql-type-longlong 33) 'numeric))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-long 33) 'numeric))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-float 33) 'numeric))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-double 33) 'numeric))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-decimal 33) 'numeric))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-longlong 33) 'numeric))
   ;; Date/time types
-  (should (eq (clutch-db-mysql--type-category mysql-type-date 33) 'date))
-  (should (eq (clutch-db-mysql--type-category mysql-type-time 33) 'time))
-  (should (eq (clutch-db-mysql--type-category mysql-type-datetime 33) 'datetime))
-  (should (eq (clutch-db-mysql--type-category mysql-type-timestamp 33) 'datetime))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-date 33) 'date))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-time 33) 'time))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-datetime 33) 'datetime))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-timestamp 33) 'datetime))
   ;; BLOB/TEXT split by charset
-  (should (eq (clutch-db-mysql--type-category mysql-type-blob 63) 'blob))
-  (should (eq (clutch-db-mysql--type-category mysql-type-blob 33) 'text))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-blob 63) 'blob))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-blob 33) 'text))
   ;; JSON
-  (should (eq (clutch-db-mysql--type-category mysql-type-json 63) 'json))
+  (should (eq (clutch-db-mysql--type-category clutch-mysql-type-json 63) 'json))
   ;; Unknown type defaults to text
   (should (eq (clutch-db-mysql--type-category 9999 0) 'text)))
 
 (ert-deftest clutch-db-test-mysql-convert-columns ()
   "Test MySQL column conversion."
   (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let* ((mysql-cols (list (list :name "id" :type mysql-type-long :character-set 33)
-                           (list :name "data" :type mysql-type-json :character-set 63)
-                           (list :name "blob_bin" :type mysql-type-blob :character-set 63)
-                           (list :name "blob_txt" :type mysql-type-blob :character-set 33)
-                           (list :name "created" :type mysql-type-datetime :character-set 33)))
-         (converted (clutch-db-mysql--convert-columns mysql-cols)))
+  (require 'clutch-mysql)
+  (let* ((clutch-mysql-cols
+          (list (list :name "id" :type clutch-mysql-type-long :character-set 33)
+                (list :name "data" :type clutch-mysql-type-json :character-set 63)
+                (list :name "blob_bin" :type clutch-mysql-type-blob :character-set 63)
+                (list :name "blob_txt" :type clutch-mysql-type-blob :character-set 33)
+                (list :name "created" :type clutch-mysql-type-datetime :character-set 33)))
+         (converted (clutch-db-mysql--convert-columns clutch-mysql-cols)))
     (should (= (length converted) 5))
     (should (equal (plist-get (nth 0 converted) :name) "id"))
     (should (eq (plist-get (nth 0 converted) :type-category) 'numeric))
@@ -1832,8 +1833,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mysql-build-paged-sql ()
   "Test MySQL paged SQL generation."
   (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "localhost")))
+  (require 'clutch-mysql)
+  (let ((conn (make-clutch-mysql-conn :host "localhost")))
     ;; Basic pagination
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10)))
       (should (string-match-p "LIMIT 10" sql))
@@ -1905,8 +1906,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mysql-escape ()
   "Test MySQL identifier and literal escaping via generic interface."
   (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "localhost")))
+  (require 'clutch-mysql)
+  (let ((conn (make-clutch-mysql-conn :host "localhost")))
     ;; Identifier escaping
     (should (equal (clutch-db-escape-identifier conn "table")
                    "`table`"))
@@ -1948,8 +1949,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mysql-metadata ()
   "Test MySQL metadata accessors."
   (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "example.com" :port 3307
+  (require 'clutch-mysql)
+  (let ((conn (make-clutch-mysql-conn :host "example.com" :port 3307
                                 :user "testuser" :database "testdb")))
     (should (equal (clutch-db-host conn) "example.com"))
     (should (= (clutch-db-port conn) 3307))
@@ -2053,15 +2054,15 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should-not (plist-member (nthcdr 2 captured-args) :tls)))))
 
 (ert-deftest clutch-db-test-mysql-connect-normalizes-tls-nil-to-ssl-mode ()
-  "MySQL backend connect should pass canonical `:ssl-mode' to `mysql-connect'."
+  "MySQL backend connect should pass canonical `:ssl-mode' to `clutch-mysql-connect'."
   (require 'clutch-db-mysql)
-  (require 'mysql)
+  (require 'clutch-mysql)
   (let (captured-args)
-    (cl-letf (((symbol-function 'mysql-connect)
+    (cl-letf (((symbol-function 'clutch-mysql-connect)
                (lambda (&rest args)
                  (setq captured-args args)
-                 (make-mysql-conn :host "127.0.0.1" :port 3306
-                                  :user "root" :database "mysql-wire"))))
+                 (make-clutch-mysql-conn :host "127.0.0.1" :port 3306
+                                  :user "root" :database "clutch-mysql-wire"))))
       (clutch-db-mysql-connect
        '(:host "127.0.0.1"
          :port 3306
@@ -2074,15 +2075,15 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should-not (plist-member captured-args :tls)))))
 
 (ert-deftest clutch-db-test-mysql-connect-strips-pass-entry-before-wire-connect ()
-  "MySQL backend connect should not pass `:pass-entry' to `mysql-connect'."
+  "MySQL backend connect should not pass `:pass-entry' to `clutch-mysql-connect'."
   (require 'clutch-db-mysql)
-  (require 'mysql)
+  (require 'clutch-mysql)
   (let (captured-args)
-    (cl-letf (((symbol-function 'mysql-connect)
+    (cl-letf (((symbol-function 'clutch-mysql-connect)
                (lambda (&rest args)
                  (setq captured-args args)
-                 (make-mysql-conn :host "127.0.0.1" :port 3306
-                                       :user "root" :database "mysql-wire"))))
+                 (make-clutch-mysql-conn :host "127.0.0.1" :port 3306
+                                       :user "root" :database "clutch-mysql-wire"))))
       (clutch-db-mysql-connect
        '(:host "127.0.0.1"
          :port 3306
@@ -2199,11 +2200,11 @@ Skips if `clutch-db-test-mysql-password' is nil."
 (clutch-db-test--define-live-basic-tests
  clutch-db-test-mysql
  clutch-db-test--with-mysql
- (:db-live :mysql-live)
+ (:db-live :clutch-mysql-live)
  "MySQL")
 
 (ert-deftest clutch-db-test-mysql-live-schema ()
-  :tags '(:db-live :mysql-live)
+  :tags '(:db-live :clutch-mysql-live)
   "Test MySQL schema introspection."
   (clutch-db-test--with-mysql conn
     ;; list-tables
@@ -2221,10 +2222,10 @@ Skips if `clutch-db-test-mysql-password' is nil."
 
 (ert-deftest clutch-db-test-mysql-show-create-table-empty-rows-errors-cleanly ()
   "MySQL show-create-table should signal `clutch-db-error' on empty row sets."
-  (let ((conn (make-mysql-conn :host "localhost")))
-    (cl-letf (((symbol-function 'mysql-query)
+  (let ((conn (make-clutch-mysql-conn :host "localhost")))
+    (cl-letf (((symbol-function 'clutch-mysql-query)
                (lambda (_conn _sql)
-                 (make-mysql-result :rows nil))))
+                 (make-clutch-mysql-result :rows nil))))
       (should-error (clutch-db-show-create-table conn "missing_table")
                     :type 'clutch-db-error))))
 
@@ -2832,14 +2833,14 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
 ;;;; Cross-backend consistency tests
 
 (ert-deftest clutch-db-test-cross-type-categories ()
-  :tags '(:db-live :mysql-live :pg-live)
+  :tags '(:db-live :clutch-mysql-live :pg-live)
   "Test that both backends use consistent type categories."
   (when (and (null clutch-db-test-mysql-password)
              (null clutch-db-test-pg-password))
     (ert-skip "Need both MySQL and PostgreSQL for cross-backend tests"))
   ;; Test numeric
   (clutch-db-test--with-local-mysql-tls
-    (let ((mysql-conn (when clutch-db-test-mysql-password
+    (let ((clutch-mysql-conn (when clutch-db-test-mysql-password
                         (clutch-db-connect
                          'mysql
                          (list :host clutch-db-test-mysql-host
@@ -2858,19 +2859,19 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
       (unwind-protect
           (progn
             ;; Both should return numeric type-category for integers
-            (when mysql-conn
-              (let* ((result (clutch-db-query mysql-conn "SELECT 42 AS n"))
+            (when clutch-mysql-conn
+              (let* ((result (clutch-db-query clutch-mysql-conn "SELECT 42 AS n"))
                      (cols (clutch-db-result-columns result)))
                 (should (eq (plist-get (car cols) :type-category) 'numeric))))
             (when pg-conn
               (let* ((result (clutch-db-query pg-conn "SELECT 42 AS n"))
                      (cols (clutch-db-result-columns result)))
                 (should (eq (plist-get (car cols) :type-category) 'numeric)))))
-        (when mysql-conn (clutch-db-disconnect mysql-conn))
+        (when clutch-mysql-conn (clutch-db-disconnect clutch-mysql-conn))
         (when pg-conn (clutch-db-disconnect pg-conn))))))
 
 (ert-deftest clutch-db-test-cross-null-handling ()
-  :tags '(:db-live :mysql-live :pg-live)
+  :tags '(:db-live :clutch-mysql-live :pg-live)
   "Test that both backends handle NULL values consistently."
   (when (and (null clutch-db-test-mysql-password)
              (null clutch-db-test-pg-password))

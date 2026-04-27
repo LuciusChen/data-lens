@@ -236,8 +236,8 @@ NAME is a string used for `completing-read'.
 an explicit `:tls nil' forces plaintext and suppresses the automatic
 MySQL 8 TLS retry path; for PostgreSQL, `:tls t' maps to `:sslmode require'
 and `:tls nil' maps to `:sslmode disable'.
-:ssl-mode is currently MySQL-only; `disabled' is a compatibility spelling for
-the same explicit plaintext mode.  The older alias `off' is also accepted.
+:ssl-mode is currently MySQL-only; `disabled' is the backend-native spelling
+for explicit plaintext mode.  The older alias `off' is also accepted.
 :sslmode is PostgreSQL-only and follows the upstream naming.  Supported values
 are `disable', `prefer', `require', and `verify-full'.
 :ssh-host enables a local SSH tunnel using the named host from ~/.ssh/config.

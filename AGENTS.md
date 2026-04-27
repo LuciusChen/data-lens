@@ -32,8 +32,8 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Architecture and Implementation
 
-- **Interface / implementation separation**: `mysql` and upstream `pg` are external protocol libraries with no UI. `clutch.el` depends on `clutch-db.el`, not protocol layers directly.
-- **External dependency boundaries stay explicit**: `mysql` and `pg` are required package dependencies. `ob-clutch` is a separate optional package and must not drift back into the `clutch` repo.
+- **Interface / implementation separation**: `clutch-mysql.el` and upstream `pg` are protocol libraries with no UI. `clutch.el` depends on `clutch-db.el`, not protocol layers directly.
+- **External dependency boundaries stay explicit**: `pg` is the external PostgreSQL protocol dependency. MySQL is bundled as the prefixed `clutch-mysql.el` protocol layer until it has enough maintenance history to split cleanly. `ob-clutch` is a separate optional package and must not drift back into the `clutch` repo.
 - **Single responsibility per file**: Do not mix protocol code with rendering code.
 - **Keep `clutch.el` as the entry point**: External consumers should continue to load `(require 'clutch)`. When implementation moves out, `clutch.el` becomes the assembler, not a grab bag.
 - **Split by stable workflow boundaries**: Prefer modules such as result UI, object workflow, staged mutation flow, or schema/cache lifecycle. Do not split by vague internal labels like `common`, `utils`, or `helpers`.
@@ -44,7 +44,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Favor incremental modularization**: Move the smallest coherent slice first, then reload, byte-compile, and rerun focused tests before attempting the next extraction.
 - **No behavioral side effects on load**: Loading a file must not alter Emacs editing behavior (no modes enabled, no hooks fired). Package-level registration side effects are allowed: fringe bitmaps, `auto-mode-alist` entries, backend registrations, Embark action registrations, and `kill-emacs-hook` cleanup.
 - **Reuse Emacs infrastructure**: Use `completing-read`, `special-mode`, `text-property-search-forward`, standard hooks, and other stock primitives.
-- **Public naming**: `clutch-` for the clutch package. External protocol packages keep their own public namespaces (`mysql-` / upstream `pg-`). No double dash for public API.
+- **Public naming**: `clutch-` for the clutch package. The bundled MySQL protocol layer uses `clutch-mysql-` while it lives in this repo; upstream `pg` keeps its own public namespace. No double dash for public API.
 - **Private naming**: `clutch--` inside the clutch repo. Never call private symbols across subsystem boundaries. Files split from the same subsystem (e.g., `clutch-query.el`, `clutch-object.el`, `clutch-edit.el`, `clutch-schema.el` all belong to the `clutch` subsystem) may call each other's `clutch--` symbols, but must add `declare-function` / `defvar` declarations for byte-compilation.
 - **Predicates**: Multi-word predicate names end in `-p`.
 - **Unused args**: Prefix with `_`.
@@ -140,7 +140,7 @@ These rules keep the package compatible with MELPA submission requirements
 
 ### Naming
 
-- Public symbols use `clutch-` prefix (or `mysql-` / `pg-` for protocol).
+- Public symbols use `clutch-` prefix (including `clutch-mysql-` for the bundled MySQL protocol layer; upstream `pg` keeps its own namespace).
 - Internal mode names, maps, and hooks that are not part of the user-facing API should use double-dash `clutch--` to avoid `package-lint` "not prefixed" warnings.
 - Every `define-derived-mode` and `define-minor-mode` that is **not** user-facing should be private (`clutch--foo-mode`), or have `;;;###autoload` if it is user-facing.
 - `defcustom` `:type` must be specified.
@@ -177,15 +177,19 @@ Read every changed line before committing.
 ### 2. Run all test files
 
 ```bash
-# Ensure external package dependencies (`mysql` and `pg`) are installed or on load-path.
+# Ensure external package dependency (`pg`) is installed or on load-path.
 
 # Main UI/logic tests
-emacs -batch -L . -L ../mysql.el -L ../pg-el -l ert -l clutch \
+emacs -batch -L . -L ../pg-el -l ert -l clutch \
   -l test/clutch-test.el \
   --eval '(ert-run-tests-batch-and-exit)'
 
+# MySQL protocol tests
+emacs -batch -L . -l ert -l test/clutch-mysql-test.el \
+  --eval '(ert-run-tests-batch-and-exit)'
+
 # JDBC backend tests
-emacs -batch -L . -L ../mysql.el -L ../pg-el -l ert -l clutch-db-jdbc \
+emacs -batch -L . -L ../pg-el -l ert -l clutch-db-jdbc \
   -l test/clutch-db-test.el \
   --eval '(ert-run-tests-batch-and-exit "clutch-db-test-jdbc")'
 ```
@@ -193,7 +197,7 @@ emacs -batch -L . -L ../mysql.el -L ../pg-el -l ert -l clutch-db-jdbc \
 ### 3. Byte-compile with zero warnings
 
 ```bash
-emacs -batch -L . -L ../mysql.el -L ../pg-el \
+emacs -batch -L . -L ../pg-el \
   -f batch-byte-compile *.el
 ```
 
@@ -202,7 +206,7 @@ emacs -batch -L . -L ../mysql.el -L ../pg-el \
 `clutch` is one package split across multiple implementation files, so
 `package-lint` should run on the package entry file rather than on extracted
 modules as if they were standalone packages.  For local straight checkouts,
-make sure package metadata for external deps (`transient`, `mysql`, `pg`) is
+make sure package metadata for external deps (`transient`, `pg`) is
 available to `package.el` in the batch session before running the command.
 
 ```bash

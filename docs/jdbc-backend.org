@@ -17,9 +17,10 @@ semantics, see [[file:jdbc-agent-protocol.md][jdbc-agent-protocol.md]].
 | =sqlserver=    | Microsoft SQL Server| Maven Central       | 1433         |
 | =redshift=     | Amazon Redshift     | Maven Central       | 5439         |
 | =snowflake=    | Snowflake           | Maven Central       | —            |
+| =clickhouse=   | ClickHouse          | Maven Central       | 8123         |
 | =db2=          | IBM DB2             | Manual download     | 50000        |
 
-Any other JDBC-compatible database (ClickHouse, TiDB, Hive, KingbaseES, etc.)
+Any other JDBC-compatible database (TiDB, Hive, KingbaseES, etc.)
 can be used through the generic =jdbc= backend by passing
 =:url "jdbc:xxx://..."= directly and placing the driver jar in the drivers
 directory.  Use =:display-name= if you want the UI to show a friendly backend
@@ -38,12 +39,13 @@ If you prefer to pre-install everything up front:
 ;; Download clutch-jdbc-agent.jar:
 (clutch-jdbc-ensure-agent)
 
-;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift):
+;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift, ClickHouse):
 (clutch-jdbc-install-driver 'oracle)      ; ojdbc8.jar + orai18n.jar from Maven Central
 (clutch-jdbc-install-driver 'oracle-11)   ; ojdbc11.jar + orai18n.jar for newer Oracle-only setups
 (clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar (JRE-classified SQL Server driver) from Maven Central
 (clutch-jdbc-install-driver 'snowflake)   ; snowflake-jdbc.jar from Maven Central
 (clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc.jar from Maven Central
+(clutch-jdbc-install-driver 'clickhouse)  ; clickhouse-jdbc.jar + SLF4J companions from Maven Central
 ;; DB2: download db2jcc4.jar from IBM manually and place in clutch-jdbc-agent-dir/drivers/
 #+end_src
 
