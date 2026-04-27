@@ -1155,7 +1155,8 @@ All field types use the same delay so feedback timing is consistent."
          (plain-width (string-width (concat col-name tag-text)))
          (gap-width (max 0 (- clutch-result-insert--label-width plain-width)))
          (name-part (clutch--string-pad
-                     (propertize col-name 'face 'clutch-insert-field-name-face)
+                     (propertize col-name
+                                 'face 'clutch-field-name-face)
                      (+ (string-width col-name) gap-width)))
          (tag-part (when tags
                      (propertize tag-text
