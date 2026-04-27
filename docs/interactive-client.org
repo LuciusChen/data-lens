@@ -50,9 +50,9 @@ CAPF keys such as =TAB= / =M-TAB= inherited from Emacs.
 | =i=            | Stage new row for insertion                   |
 | =I=            | Clone current row into a prefilled insert form (without PK values) |
 | =d=            | Stage row(s) for deletion (supports region)   |
-| =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
-| =C-c C-k=     | Discard pending change at point               |
-| =C-c C-p=      | Preview execution (pending batch if any; otherwise effective query) |
+| =C-c C-c=     | Commit all staged changes (INSERT/UPDATE/DELETE) |
+| =C-c C-k=     | Discard staged change at point                |
+| =C-c C-p=      | Preview execution (staged batch if any; otherwise effective query) |
 | =c=            | Open copy transient menu (choose TSV / CSV / INSERT / UPDATE; toggle =-r= to refine) |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
 | =V=            | Open live value viewer (follows point; =f= freeze, =g= refresh, =q= quit) |
@@ -66,7 +66,7 @@ Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
 Tip: =v= keeps a static snapshot of the current cell; =V= opens =*clutch-live-view*=,
 which follows point until you press =f= to freeze it or =q= to close it.
 Tip: the result-buffer status line uses compact staged-change tokens:
-=E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts.
+=E-<n>= for staged edits, =D-<n>= for staged deletions, and =I-<n>= for staged inserts.
 When a query result is not updateable because no primary key was detected,
 the same line shows =PK missing= and =E/D off=; =C-c '= also errors
 immediately instead of opening an edit buffer that cannot be committed.
@@ -74,7 +74,7 @@ Tip: SQL-backed result refreshes (=g=, =W=, sort, paging) keep the column
 header visible; busy state temporarily replaces the elapsed-time segment in the
 footer with a spinner instead of replacing the table header with the query-console
 connection header.
-Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the
+Tip: staged changes can be previewed with =C-c C-p= and copied/saved from the
 result transient as the exact staged SQL batch.
 Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result
 queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong
@@ -137,7 +137,7 @@ mistakes are shown inline on the current field before staging.
 
 =C-c C-y= imports delimited text directly into the form.  A single imported row
 prefills the current insert buffer; multiple rows are staged immediately as
-pending inserts.  Header-based imports map by column name; otherwise clutch maps
+staged inserts.  Header-based imports map by column name; otherwise clutch maps
 positionally using the fields currently visible in the insert form.
 
 JSON fields still support direct editing in the insert buffer, but =C-c '= opens
@@ -274,13 +274,13 @@ Typical flow:
                                staged rows appear as ghost rows in result buffer
                                left marker shows =I= and status line shows =I-<n>=
                                missing generated/defaulted columns render as <generated> / <default>
-12. C-c ' on a pending insert row → re-open that staged insert with its previous values
+12. C-c ' on a staged insert row → re-open that staged insert with its previous values
 13. Use normal Emacs region selection to select rows
 14. d                          → stage current row or selected region for deletion
                                left marker shows =D= and status line shows =D-<n>=
                                deleted rows are visually marked in the result buffer
-15. C-c C-k                   → discard pending change at point
-16. g with pending changes    → prompts "Discard pending changes and re-run query?"
+15. C-c C-k                   → discard staged change at point
+16. g with staged changes     → prompts "Discard staged changes and re-run query?"
 17. C-c C-c in result buffer → confirmation prompt showing all statements
                                commits in order: INSERT → UPDATE → DELETE
                                edited rows show =E= in the left marker column and =E-<n>= in the status line
@@ -288,8 +288,8 @@ Typical flow:
 
 The confirmation preview always shows fully rendered SQL text.  Native MySQL,
 PostgreSQL, and SQLite backends still execute staged DML through parameterized
-prepared/bound values under the hood; JDBC keeps the current literal-SQL
-fallback until the sidecar grows a dedicated prepared-execute op.
+prepared/bound values under the hood; JDBC uses literal SQL until the sidecar
+supports prepared execution.
 
 * REPL Mode
 
@@ -475,7 +475,9 @@ The *Connection* group contains =Connect=, =Prepare SSH= (=S=), =Disconnect=,
 interactive OpenSSH setup session for host-key confirmation or key passphrase
 entry before retrying the normal non-interactive connect path.
 
-In the result buffer, the *Edit* group in the transient menu provides the unified staged-commit workflow: =i= stages an insert, =d= stages a deletion, =C-c C-k= discards a pending change at point, and =C-c C-c= commits all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
+In the result buffer, the *Edit* group provides the staged-commit workflow:
+=i= stages an insert, =d= stages a deletion, =C-c C-k= discards the staged
+change at point, and =C-c C-c= commits all staged changes.
 
 The result and record transients also expose an *Inspect* group: =v= opens the
 static cell viewer, while =V= opens the live viewer that follows point.  Once

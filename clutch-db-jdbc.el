@@ -584,7 +584,7 @@ TIMEOUT-SECONDS overrides the default wait time.  Signals
 
 (defun clutch-jdbc--remember-error-response (conn op response)
   "Remember JDBC error RESPONSE for CONN and OP, and return its details plist.
-When CONN is nil, just return the details snapshot for the current failure."
+When CONN is nil, return the details snapshot for the current failure."
   (when-let* ((details (clutch-jdbc--error-details-from-response op response)))
     (when conn
       (puthash conn details clutch-jdbc--error-details-by-conn))

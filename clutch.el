@@ -171,7 +171,7 @@
     (((class color) (background dark))
      :inherit warning :background "#3d2b00")
     (t :inherit warning))
-  "Face for pending-edit cell values."
+  "Face for staged-edit cell values."
   :group 'clutch)
 
 (defface clutch-fk-face
@@ -2486,7 +2486,7 @@ Priority: region rows > current row."
         (setq clutch--pending-inserts
               (delq (nth iidx clutch--pending-inserts) clutch--pending-inserts))
         (clutch--refresh-display)
-        (message "Pending insertion discarded")))
+        (message "Staged insert discarded")))
      (t
       (let* ((pk-indices (or clutch--cached-pk-indices
                              (clutch-result--detect-primary-key)))
@@ -2506,16 +2506,16 @@ Priority: region rows > current row."
           (clutch--replace-row-at-index ridx)
           (clutch--refresh-footer-line)
           (force-mode-line-update)
-          (message "Pending edit discarded"))
+          (message "Staged edit discarded"))
          (was-delete
           (setq clutch--pending-deletes
                 (cl-remove pv clutch--pending-deletes :test #'equal))
           (clutch--replace-row-at-index ridx)
           (clutch--refresh-footer-line)
           (force-mode-line-update)
-          (message "Pending deletion discarded"))
+          (message "Staged deletion discarded"))
          (t
-          (user-error "No pending change at point"))))))))
+          (user-error "No staged change at point"))))))))
 
 ;;;; clutch-result-mode
 
@@ -2670,7 +2670,7 @@ Inspect:
   \\[clutch-result-live-view-value]	Open live viewer that follows point
 Edit:
   \\[clutch-result-edit-cell]	Edit / re-edit at point
-  \\[clutch-result-commit]	Commit pending changes
+  \\[clutch-result-commit]	Commit staged changes
   \\[clutch-result-apply-filter]	Apply WHERE filter
   \\[clutch-result-sort-by-column]	Sort ascending (SQL ORDER BY)
   \\[clutch-result-sort-by-column-desc]	Sort descending (SQL ORDER BY)
@@ -2757,8 +2757,7 @@ Triggers a COUNT(*) query if total rows are not yet known."
 
 (defun clutch--sql-rewrite (sql op &optional arg)
   "Rewrite SQL for OP with optional ARG.
-Current implementation uses top-level clause awareness and keeps a
-fallback path; AST-based rewrite can replace this later."
+Uses top-level clause awareness with a derived-table fallback for complex SQL."
   (condition-case nil
       (let ((normalized (clutch--sql-normalize-for-rewrite sql)))
         (pcase op
@@ -3675,7 +3674,7 @@ Uses xmllint for pretty-printing when available; shows a message otherwise."
 
 (defun clutch--view-spec (val col-def &optional quiet)
   "Return rendering spec for VAL with column metadata COL-DEF.
-When QUIET is non-nil, suppress viewer fallback chatter where possible."
+When QUIET is non-nil, suppress nonessential viewer messages."
   (let ((cat (plist-get col-def :type-category)))
     (cond
      ((or (eq cat 'json)
@@ -4394,7 +4393,7 @@ Report success with MESSAGE-FMT and MESSAGE-ARGS."
 (defun clutch-result--pending-sql-statements ()
   "Return the staged SQL statements that would run on commit."
   (unless (or clutch--pending-inserts clutch--pending-edits clutch--pending-deletes)
-    (user-error "No pending SQL"))
+    (user-error "No staged SQL"))
   (clutch-result--render-statements
    (append
     (when clutch--pending-inserts
@@ -4406,7 +4405,7 @@ Report success with MESSAGE-FMT and MESSAGE-ARGS."
 
 (defun clutch-result--pending-sql-content (&optional stmts)
   "Return STMTS as a trailing-newline-terminated staged SQL batch string.
-When STMTS is nil, build statements from the current pending state."
+When STMTS is nil, build statements from the current staged state."
   (let ((stmts (or stmts (clutch-result--pending-sql-statements))))
     (if stmts
         (concat (mapconcat (lambda (s) (concat s ";")) stmts "\n") "\n")
@@ -4418,7 +4417,7 @@ When STMTS is nil, build statements from the current pending state."
   (interactive)
   (let ((stmts (clutch-result--pending-sql-statements)))
     (kill-new (clutch-result--pending-sql-content stmts))
-    (message "Copied %d pending SQL statement%s"
+    (message "Copied %d staged SQL statement%s"
              (length stmts) (if (= (length stmts) 1) "" "s"))))
 
 ;;;###autoload
@@ -4427,11 +4426,11 @@ When STMTS is nil, build statements from the current pending state."
   (interactive)
   (let* ((stmts (clutch-result--pending-sql-statements))
          (sql (clutch-result--pending-sql-content stmts))
-         (path (read-file-name "Save pending SQL to file: " nil nil nil "pending.sql")))
+         (path (read-file-name "Save staged SQL to file: " nil nil nil "staged.sql")))
     (with-temp-buffer
       (insert sql)
       (write-region (point-min) (point-max) path nil 'silent))
-    (message "Saved %d pending SQL statement%s to %s"
+    (message "Saved %d staged SQL statement%s to %s"
              (length stmts) (if (= (length stmts) 1) "" "s")
              path)))
 
@@ -4913,9 +4912,9 @@ Accumulates input until a semicolon is found, then executes."
     ("x" "Preview execution" clutch-preview-execution-sql)
     ("#" "Count total"       clutch-result-count-total)
     ("A" "Aggregate"         clutch-result-aggregate)]
-   ["Pending"
-    ("y" "Copy pending SQL"  clutch-result-copy-pending-sql)
-    ("Y" "Save pending SQL"  clutch-result-save-pending-sql)]
+   ["Staged"
+    ("y" "Copy staged SQL"  clutch-result-copy-pending-sql)
+    ("Y" "Save staged SQL"  clutch-result-save-pending-sql)]
    ["Filter / Sort"
     ("/" "Filter rows"       clutch-result-filter)
     ("W" "WHERE filter"      clutch-result-apply-filter)
@@ -4934,8 +4933,8 @@ Accumulates input until a semicolon is found, then executes."
     ("i" "Stage insert"      clutch-result-insert-row)
     ("I" "Clone row → insert" clutch-clone-row-to-insert)
     ("d" "Stage delete"      clutch-result-delete-rows)
-    ("C-c C-c" "Commit pending" clutch-result-commit)
-    ("C-c C-k" "Discard pending at point" clutch-result-discard-pending-at-point)]
+    ("C-c C-c" "Commit staged" clutch-result-commit)
+    ("C-c C-k" "Discard staged at point" clutch-result-discard-pending-at-point)]
    ["Layout"
     ("=" "Widen column"      clutch-result-widen-column)
     ("-" "Narrow column"     clutch-result-narrow-column)

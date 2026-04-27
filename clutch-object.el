@@ -82,9 +82,7 @@ When ALLOWED-TYPES is nil, return ENTRIES unchanged."
      entries)))
 
 (defun clutch--object-cache-key (conn)
-  "Return the cache key for object discovery on CONN.
-This currently matches the connection identity and is structured as a helper so
-future schema switching can widen the key without touching all call sites."
+  "Return the object-discovery cache key for CONN."
   (or (clutch--connection-key conn)
       (format "%S" conn)))
 

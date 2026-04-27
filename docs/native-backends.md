@@ -10,6 +10,38 @@ Use this document for backend-specific connection, protocol, TLS, timeout, and
 usage notes for the native backends.  The JDBC sidecar has its own document in
 [`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).
 
+## Live Testing
+
+Live tests use ordinary host/port connection variables, so any local database
+or Docker-compatible runtime works.  The examples below use Docker only as a
+portable way to start test servers.
+
+```sh
+docker run --name clutch-mysql-80 -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql:8.0
+docker run --name clutch-pg-16 -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16
+```
+
+Run the MySQL protocol live suite:
+
+```sh
+emacs -Q --batch -L . -l ert -l test/clutch-mysql-test.el \
+  --eval '(setq clutch-mysql-test-password "test")' \
+  --eval "(ert-run-tests-batch-and-exit '(tag :clutch-mysql-live))"
+```
+
+Run native adapter live tests for MySQL and PostgreSQL:
+
+```sh
+emacs -Q --batch -L . -L ../pg-el -l ert -l test/clutch-db-test.el \
+  --eval '(setq clutch-db-test-mysql-password "test")' \
+  --eval '(setq clutch-db-test-pg-password "test")' \
+  --eval "(ert-run-tests-batch-and-exit '(tag :db-live))"
+```
+
+Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and
+MariaDB 10.11.  Re-run MySQL 8.0/8.4 TLS auth tests after touching handshake,
+capability, or password-plugin code.
+
 ## SSH Tunnels
 
 For saved clutch connections, `:ssh-host` starts a local SSH forward through
@@ -44,9 +76,9 @@ loading the key into `ssh-agent` or enabling `AddKeysToAgent`.
 - Prepared statements via `COM_STMT_PREPARE` / `COM_STMT_EXECUTE`
 - TLS via Emacs GnuTLS
 
-The bundled protocol layer is maintained as `clutch-mysql-*` symbols so it can
-be split into a standalone package later with a mostly mechanical prefix
-change.  Its focused API and protocol notes live in
+The bundled protocol layer is maintained as `clutch-mysql-*` symbols so a
+standalone package split remains mostly mechanical.  Its focused API and
+protocol notes live in
 [`docs/mysql-protocol.md`](./mysql-protocol.md).
 
 ### Connection Example
@@ -184,7 +216,7 @@ Relevant variables:
 - Manual mode uses lazy `BEGIN`: the first foreground statement opens the
   transaction
 - `C-c C-m` issues `COMMIT`; `C-c C-u` issues `ROLLBACK`
-- Transactional DDL also counts as pending work, so `Tx: Manual*` remains
+- Transactional DDL also counts as uncommitted work, so `Tx: Manual*` remains
   accurate for native PostgreSQL
 
 ### Interrupts and Timeouts
@@ -252,8 +284,7 @@ Relevant variables:
 - clutch preview buffers still show fully rendered SQL text for readability
 - Native MySQL/PostgreSQL/SQLite staged `INSERT` / `UPDATE` / `DELETE` execute
   through backend parameter binding instead of literal SQL interpolation
-- JDBC currently keeps its literal-SQL fallback until the sidecar grows a
-  prepared-execute operation
+- JDBC uses literal SQL until the sidecar supports prepared execution
 
 ### UI Layer
 

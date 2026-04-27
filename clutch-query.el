@@ -532,7 +532,7 @@ Signals an error if pagination is not available."
     (when (and (or clutch--pending-edits
                    clutch--pending-deletes
                    clutch--pending-inserts)
-               (not (yes-or-no-p "Discard pending changes and change page? ")))
+               (not (yes-or-no-p "Discard staged changes and change page? ")))
       (user-error "Page change cancelled"))
     (let* ((paged-sql (clutch--build-paged-sql
                        effective-sql page-num
@@ -790,14 +790,14 @@ This avoids brittle clause injection for CTE/UNION/subquery-heavy SQL."
   (clutch--sql-rewrite sql 'where filter))
 
 (defun clutch--check-pending-changes ()
-  "Prompt to discard pending changes in the result buffer, if any.
+  "Prompt to discard staged changes in the result buffer, if any.
 Signals `user-error' if the user declines."
   (when-let* ((result-buf (get-buffer (clutch--result-buffer-name))))
     (with-current-buffer result-buf
       (when (and (or clutch--pending-edits
                      clutch--pending-deletes
                      clutch--pending-inserts)
-                 (not (yes-or-no-p "Discard pending changes and re-run query? ")))
+                 (not (yes-or-no-p "Discard staged changes and re-run query? ")))
         (user-error "Execution cancelled")))))
 
 (defun clutch--abandon-query-connection (connection)

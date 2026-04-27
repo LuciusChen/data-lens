@@ -193,7 +193,7 @@ backends.  See [[file:../README.org::*Password Management][Password Management]]
 - Native MySQL supports the same commands by toggling the session autocommit
   flag.
 - Native PostgreSQL supports the same commands through a clutch-managed manual
-  mode with lazy =BEGIN=; transactional DDL counts as pending work there too.
+  mode with lazy =BEGIN=; transactional DDL counts as uncommitted work there too.
 - The console header-line always shows the current commit mode: =Tx: Auto=,
   =Tx: Manual=, or =Tx: Manual*= (uncommitted changes present).
 - Open DML result buffers show a status banner in their header-line after each

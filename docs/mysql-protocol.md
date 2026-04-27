@@ -17,9 +17,8 @@ The split boundary is:
 - Private protocol helpers use `clutch-mysql--*`.
 - Adapter-only helpers keep the `clutch-db-mysql-*` prefix.
 
-If this layer is split into a separate package later, the intended rename is
-mostly mechanical: `clutch-mysql-*` to `mysql-*` and `clutch-mysql--*` to
-`mysql--*`.
+If this layer becomes a separate package, the intended rename is mostly
+mechanical: `clutch-mysql-*` to `mysql-*` and `clutch-mysql--*` to `mysql--*`.
 
 ## API
 

@@ -7,6 +7,8 @@
 - Keep PostgreSQL on upstream `pg-el`, while MySQL is maintained inside
   `clutch` until the protocol layer has enough maintenance history to split.
 - Add focused MySQL protocol API and compatibility documentation.
+- Document concise native MySQL/PostgreSQL live-test commands.
+- Normalize user-facing staged-change wording across result workflows.
 - Carry forward the `feature/package-split` work on optional backend loading,
   transaction toggles, metadata warmup, SSH tunnels, UI polish, and test
   consolidation.

@@ -4048,7 +4048,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-pending-insert-renders-generated-and-default-placeholders ()
-  "Pending insert rows should show generated/default placeholders when known."
+  "Staged insert rows should show generated/default placeholders when known."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
                 clutch--result-columns '("id" "name" "created_at" "notes")
@@ -4075,7 +4075,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should (string-match-p "alice" rendered)))))))
 
 (ert-deftest clutch-test-pending-insert-uses-insert-markers ()
-  "Pending insert rows should use insert semantics in the left prefix."
+  "Staged insert rows should use insert semantics in the left prefix."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name")
                 clutch--result-column-defs '((:name "id" :type-category numeric)
@@ -4389,7 +4389,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-insert-import-delimited-stages-multi-row-header-mapping ()
-  "Multi-row delimited import should stage pending inserts by header names."
+  "Multi-row delimited import should stage inserts by header names."
   (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
         insert-buf)
     (unwind-protect
@@ -4446,7 +4446,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-build-render-state-creates-fast-lookups ()
-  "Render-state tables should preserve pending edit/delete/mark semantics."
+  "Render-state tables should preserve staged edit/delete/mark semantics."
   (with-temp-buffer
     (setq-local clutch--pending-edits '((([1] . 1) . "edited")))
     (setq-local clutch--pending-deletes '([1]))
@@ -4616,7 +4616,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (equal (cdar stmts) '("carol" 7)))))))
 
 (ert-deftest clutch-test-discard-delete-removes-pk-entry ()
-  "Discarding a delete should remove the matching pk-vec from pending-deletes."
+  "Discarding a delete should remove the matching staged delete."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name"))
     (setq-local clutch--result-rows (list (list 42 "alice")))
@@ -4631,7 +4631,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (null clutch--pending-deletes)))))
 
 (ert-deftest clutch-test-discard-insert-removes-entry ()
-  "Discarding a ghost insert row should remove it from pending-inserts."
+  "Discarding a ghost insert row should remove the staged insert."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name"))
     (setq-local clutch--result-rows (list (list 1 "x")))
@@ -4645,7 +4645,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (null clutch--pending-inserts)))))
 
 (ert-deftest clutch-test-discard-edit-removes-cell-entry ()
-  "Discarding an edited cell should remove the matching pending edit."
+  "Discarding an edited cell should remove the matching staged edit."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name")
                 clutch--result-rows (list (list 42 "alice"))
@@ -4661,7 +4661,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (null clutch--pending-edits)))))
 
 (ert-deftest clutch-test-check-pending-changes-blocks-when-deletes-pending ()
-  "Clutch--check-pending-changes should signal user-error when the user declines to discard."
+  "`clutch--check-pending-changes' should signal when discard is declined."
   (let ((buf (generate-new-buffer "*clutch-result*")))
     (unwind-protect
         (with-current-buffer buf
@@ -5428,7 +5428,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (error-message-string err)))))))
 
 (ert-deftest clutch-test-copy-pending-sql-copies-current-batch ()
-  "Pending SQL copy should mirror the staged commit batch."
+  "Staged SQL copy should mirror the staged commit batch."
   (with-temp-buffer
     (let (copied)
       (setq-local clutch--pending-inserts '(a)
@@ -5447,7 +5447,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        "INSERT INTO t VALUES (1);\nUPDATE t SET name='' WHERE id=1;\nDELETE FROM t WHERE id=1;\n"))))))
 
 (ert-deftest clutch-test-save-pending-sql-writes-current-batch ()
-  "Pending SQL save should write the staged commit batch to disk."
+  "Staged SQL save should write the staged commit batch to disk."
   (let ((path (make-temp-file "clutch-pending-" nil ".sql")))
     (unwind-protect
         (with-temp-buffer
@@ -7349,9 +7349,7 @@ This applies when the buffer owns the connection."
     (should-not disconnected)))
 
 (ert-deftest clutch-test-reconnect-preserves-pending ()
-  "Reconnect preserves pending staged changes in result buffers.
-Pending changes are client-side SQL that has not been sent to the
-database.  Only a query re-execution should discard them."
+  "Reconnect preserves staged changes in result buffers."
   (let ((result-buf (generate-new-buffer "*clutch-test-result*"))
         (clutch-buf (generate-new-buffer "*clutch-test*")))
     (unwind-protect

@@ -1623,6 +1623,28 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (should (eq (plist-get jdbc-features :require) 'clutch-db-jdbc))
     (should (functionp (plist-get jdbc-features :connect-fn)))))
 
+(ert-deftest clutch-db-test-connect-requires-selected-backend-only ()
+  "`clutch-db-connect' should require only the selected adapter."
+  (let ((clutch-db--backend-features
+         '((mysql . (:require clutch-db-mysql :connect-fn clutch-db-mysql-connect))
+           (pg . (:require clutch-db-pg :connect-fn clutch-db-pg-connect))))
+        required)
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional _filename _noerror)
+                 (push feature required)
+                 t))
+              ((symbol-function 'clutch-db-mysql-connect)
+               (lambda (params)
+                 (cons 'mysql-conn params)))
+              ((symbol-function 'clutch-db-pg-connect)
+               (lambda (params)
+                 (cons 'pg-conn params)))
+              ((symbol-function 'clutch-db-init-connection)
+               #'ignore))
+      (should (equal (clutch-db-connect 'mysql '(:database "app"))
+                     '(mysql-conn :database "app")))
+      (should (equal (nreverse required) '(clutch-db-mysql))))))
+
 (ert-deftest clutch-db-test-generic-jdbc-display-name-prefers-custom-label ()
   "Generic JDBC connections should honor a user-facing display label."
   (require 'clutch)
