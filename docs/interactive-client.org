@@ -488,7 +488,8 @@ Customize these through =M-x customize-group RET clutch RET=:
 
 | Face | Purpose |
 |------+---------|
-| =clutch-header-face= / =clutch-header-active-face= | Result-table headers and the active header cell |
+| =clutch-field-name-face= | Shared field/column-name face used by result headers, insert labels, and record labels |
+| =clutch-header-face= / =clutch-header-active-face= | Non-field header text and the active result header cell |
 | =clutch-border-face= | Table borders and separators |
 | =clutch-null-face= | NULL cell values |
 | =clutch-modified-face= / =clutch-pending-delete-face= / =clutch-pending-insert-face= | Staged edit/delete/insert markers in result buffers |
@@ -497,7 +498,7 @@ Customize these through =M-x customize-group RET clutch RET=:
 | =clutch-error-position-face= / =clutch-error-banner-face= | SQL execution error highlights |
 | =clutch-object-type-face= | Object type labels in describe/object UIs |
 | =clutch-object-source-face= / =clutch-object-public-source-face= | Object source/schema annotations |
-| =clutch-insert-field-name-face= / =clutch-insert-field-tag-face= | Insert-form labels and metadata tags |
+| =clutch-insert-field-tag-face= | Insert-form metadata tags |
 | =clutch-insert-field-error-face= / =clutch-insert-inline-error-face= | Insert/edit validation feedback |
 | =clutch-insert-active-field-face= / =clutch-insert-active-field-name-face= | Active field highlighting in insert buffers |
 

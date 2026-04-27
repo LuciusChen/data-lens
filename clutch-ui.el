@@ -433,7 +433,7 @@ column-local commands still work from padded whitespace."
              (lead (make-string (car pads) ?\s))
              (trail (make-string (cdr pads) ?\s))
              (cell (concat lead truncated trail))
-             (face 'clutch-header-face)
+             (face 'clutch-field-name-face)
              (pad-str (make-string padding ?\s))
              (body nil))
         ;; Append base face so icon-specific face (e.g. pin color) is preserved.
@@ -931,26 +931,27 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (lead (make-string (car pads) ?\s))
          (trail (make-string (cdr pads) ?\s))
          (label (copy-sequence truncated))
-         (face (cond
-                ((eql cidx active-cidx) 'clutch-header-active-face)
-                (t 'clutch-header-face)))
+         (active-p (eql cidx active-cidx))
+         (base-face 'clutch-field-name-face)
          (pad-str (make-string clutch-column-padding ?\s))
          (body nil))
     ;; Append base/underline style without overwriting icon-specific face.
-    (add-face-text-property 0 (length label)
-                            (list :inherit face :underline t)
-                            'append label)
+    (add-face-text-property 0 (length label) base-face 'append label)
+    (when active-p
+      (add-face-text-property 0 (length label) 'clutch-header-active-face
+                              'append label))
+    (add-face-text-property 0 (length label) '(:underline t) 'append label)
     ;; Keep sort/pin icons un-underlined for cleaner visual hierarchy.
     (dotimes (i (length label))
       (when (get-text-property i 'clutch-header-icon label)
-        (let ((icon-face (or (get-text-property i 'face label) face)))
+        (let ((icon-face (or (get-text-property i 'face label) base-face)))
           (put-text-property i (1+ i) 'face
                              (list '(:underline nil) icon-face)
                              label))))
     (setq body (concat pad-str
-                       (propertize lead 'face face)
+                       (propertize lead 'face base-face)
                        label
-                       (propertize trail 'face face)
+                       (propertize trail 'face base-face)
                        pad-str))
     (add-text-properties 0 (length body)
                          `(clutch-header-col ,cidx)

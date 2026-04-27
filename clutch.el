@@ -78,14 +78,18 @@
   :group 'comm
   :prefix "clutch-")
 
-(defface clutch-header-face
-  '((t :inherit bold))
-  "Face for column headers in result tables."
+(defface clutch-field-name-face
+  '((((class color) (background light))
+     :weight bold :foreground "#2563eb")
+    (((class color) (background dark))
+     :weight bold :foreground "#b8d7ec")
+    (t :weight bold))
+  "Face for database field and column names."
   :group 'clutch)
 
-(defface clutch-insert-field-name-face
-  '((t :inherit clutch-header-face :foreground "#b8d7ec"))
-  "Face for `insert-buffer' field names."
+(defface clutch-header-face
+  '((t :weight bold))
+  "Face for header text that is not a database field name."
   :group 'clutch)
 
 (defface clutch-insert-field-tag-face
@@ -113,12 +117,20 @@
   :group 'clutch)
 
 (defface clutch-insert-active-field-name-face
-  '((t :inherit (clutch-header-active-face clutch-insert-field-name-face)))
+  '((((class color) (background light))
+     :weight bold :foreground "#2563eb")
+    (((class color) (background dark))
+     :weight bold :foreground "#b8d7ec")
+    (t :weight bold))
   "Face for the active `insert-buffer' field prefix."
   :group 'clutch)
 
 (defface clutch-header-active-face
-  '((t :inherit hl-line :weight bold))
+  '((((class color) (background light))
+     :background "#e5e7eb" :weight bold)
+    (((class color) (background dark))
+     :background "#263238" :weight bold)
+    (t :weight bold))
   "Face for the column header under the cursor."
   :group 'clutch)
 
@@ -4593,7 +4605,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
                      (fk 'clutch-fk-face)
                      (t nil))))
     (insert (propertize (clutch--string-pad name max-name-w)
-                        'face 'clutch-header-face)
+                        'face 'clutch-field-name-face)
             (propertize " : " 'face 'clutch-border-face)
             (propertize display
                         'clutch-row-idx ridx
