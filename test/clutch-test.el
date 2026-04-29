@@ -7070,6 +7070,29 @@ crashing the UI layer."
     (should (equal (clutch--icon '(devicon . "nf-dev-mysql") "fallback")
                    "dev:nf-dev-mysql"))))
 
+(ert-deftest clutch-test-connected-header-line-uses-backend-direction-separator ()
+  "Connected header line should group backend and connection identity."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--connection-backend-segment)
+               (lambda (&rest _args) "[db]"))
+              ((symbol-function 'clutch--connection-state-icon)
+               (lambda (_connected) "[ok]"))
+              ((symbol-function 'clutch--connection-display-key)
+               (lambda (_conn) "user@host"))
+              ((symbol-function 'clutch--current-schema-header-line-segment)
+               (lambda (_conn) "[schema] app"))
+              ((symbol-function 'clutch--schema-status-header-line-segment)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--tx-header-line-segment)
+               (lambda (_conn) "Tx: Auto"))
+              ((symbol-function 'clutch--header-line-indent) (lambda () "")))
+      (let ((line (substring-no-properties
+                   (clutch--build-connection-header-line))))
+        (should (equal line
+                       "[db]  ›  [ok] user@host  •  [schema] app  •  Tx: Auto"))))))
+
 (ert-deftest clutch-test-header-line-shows-schema-even-when-redundant ()
   "Connection header line should show the effective schema whenever available."
   (with-temp-buffer
