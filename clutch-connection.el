@@ -615,18 +615,26 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
                   (if parts
                       (mapconcat #'identity parts sep)
                     disconnect)))
-      (let* ((sep     (propertize "  •  " 'face 'shadow))
-             (backend (clutch--connection-backend-segment clutch-connection))
-             (key     (concat (clutch--connection-state-icon t)
-                              " "
-                              (clutch--connection-display-key clutch-connection)))
+      (let* ((sep         (propertize "  •  " 'face 'shadow))
+             (backend-sep (propertize "  ›  " 'face 'shadow))
+             (backend     (clutch--connection-backend-segment clutch-connection))
+             (key         (concat (clutch--connection-state-icon t)
+                                  " "
+                                  (clutch--connection-display-key clutch-connection)))
              (current-schema
               (clutch--current-schema-header-line-segment clutch-connection))
-             (schema  (clutch--schema-status-header-line-segment clutch-connection))
-             (tx      (clutch--tx-header-line-segment clutch-connection))
-             (parts   (delq nil (list backend
-                                      key current-schema schema tx))))
-        (concat indent (mapconcat #'identity parts sep))))))
+             (schema      (clutch--schema-status-header-line-segment clutch-connection))
+             (tx          (clutch--tx-header-line-segment clutch-connection))
+             (tail        (delq nil (list current-schema schema tx))))
+        (concat indent
+                (cond
+                 ((and backend key)
+                  (concat backend backend-sep key
+                          (when tail
+                            (concat sep (mapconcat #'identity tail sep)))))
+                 (backend backend)
+                 (key (mapconcat #'identity (cons key tail) sep))
+                 (t (mapconcat #'identity tail sep))))))))
 
 (defun clutch--spinner-start ()
   "Start the spinner timer if not already running."
