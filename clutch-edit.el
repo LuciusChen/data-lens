@@ -55,15 +55,10 @@
 
 (defun clutch--quit-window-or-kill-buffer ()
   "Quit the current window, or kill the current buffer if it is undisplayed."
-  (let ((buf (current-buffer)))
-    (condition-case nil
-        (quit-window 'kill)
-      (error
-       (when (eq (current-buffer) buf)
-         (set-buffer (or (other-buffer buf t)
-                         (get-buffer-create " *clutch-orphan*"))))
-       (when (buffer-live-p buf)
-         (kill-buffer buf))))))
+  (condition-case nil
+      (quit-window 'kill)
+    (error
+     (kill-buffer (current-buffer)))))
 
 ;;;; Cell editing (C-c ')
 
