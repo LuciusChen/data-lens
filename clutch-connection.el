@@ -223,7 +223,7 @@ interactive readers inspect shared customization such as
           '("INSERT" "UPDATE" "DELETE" "MERGE" "REPLACE")))
 
 (defun clutch--transactional-schema-query-p (conn sql)
-  "Return non-nil when schema-affecting SQL stays pending on CONN."
+  "Return non-nil when schema-affecting SQL leaves uncommitted work on CONN."
   (and (clutch--schema-affecting-query-p sql)
        (eq (ignore-errors (clutch--backend-key-from-conn conn)) 'pg)))
 
@@ -259,7 +259,7 @@ interactive readers inspect shared customization such as
     (clutch--refresh-transaction-ui conn)))
 
 (defun clutch--clear-tx-dirty (conn)
-  "Forget any pending transaction state for CONN."
+  "Forget uncommitted transaction state for CONN."
   (when conn
     (remhash conn clutch--tx-dirty-cache)
     (clutch--refresh-transaction-ui conn)))
@@ -408,10 +408,8 @@ Also remember PARAMS and PRODUCT."
 Find reconnect params from the current buffer or any attached buffer that
 still references the same dead connection, then rebind all attached buffers
 to the new connection on success.
-Pending staged changes in result buffers are preserved — they are
-client-side SQL that has not been sent to the database, so they remain
-valid on the new connection.  Only a query re-execution (which changes
-the underlying result rows) should discard pending changes.
+Staged result-buffer changes are preserved across reconnects because
+they are client-side DML.  Only query re-execution should discard them.
 Returns non-nil on success, nil on failure."
   (when-let* ((old-conn clutch-connection)
               (context (clutch--connection-context old-conn))
@@ -956,7 +954,7 @@ cannot be read."
        ssh-host ssh-host))
      ((string-match-p "permission denied" cleaned)
       (format
-       "SSH authentication to %s was rejected. Run M-x clutch-prepare-ssh-host once to complete any key, passphrase, or host-key setup; if SSH already works interactively, check the remote username and ~/.ssh/authorized_keys"
+       "SSH authentication to %s was rejected. Run M-x clutch-prepare-ssh-host once, or check the remote username and ~/.ssh/authorized_keys"
        ssh-host))
      ((or (string-match-p "could not resolve hostname" cleaned)
           (string-match-p "name or service not known" cleaned))
@@ -1430,7 +1428,7 @@ any open transaction according to its own semantics."
   (clutch--ensure-connection)
   (let ((manual-now (clutch-db-manual-commit-p clutch-connection)))
     (when (and manual-now (clutch--tx-dirty-p clutch-connection))
-      (user-error "Cannot toggle: commit or roll back pending changes first"))
+      (user-error "Cannot toggle: commit or roll back staged changes first"))
     (clutch-db-set-auto-commit clutch-connection manual-now)
     (when manual-now
       (clutch--clear-tx-dirty clutch-connection))

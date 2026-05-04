@@ -411,7 +411,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
   (let* ((nrows (length clutch--result-rows))
          (iidx (- ridx nrows)))
     (unless (and (>= iidx 0) (< iidx (length clutch--pending-inserts)))
-      (user-error "No pending insertion at this row"))
+      (user-error "No staged insert at this row"))
     (let ((table (or (clutch-result--detect-table)
                      (user-error "Cannot detect source table")))
           (fields (nth iidx clutch--pending-inserts)))
@@ -506,12 +506,12 @@ Refresh the affected row and footer in place when possible."
   (clutch--refresh-footer-line)
   (force-mode-line-update)
   (if clutch--pending-edits
-      (message "%d pending edit%s — C-c C-c to commit"
+      (message "%d staged edit%s — C-c C-c to commit"
                (length clutch--pending-edits)
                (if (= (length clutch--pending-edits) 1) "" "s"))
     (message "Edit reverted to original")))
 
-;;;; Commit pending changes
+;;;; Commit staged changes
 
 (defun clutch-result--table-from-sql (sql)
   "Extract the first table name from the FROM clause of SQL.
@@ -640,9 +640,9 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
             (append (nreverse set-params) (cdr where-spec))))))
 
 (defun clutch-result--build-update-statements ()
-  "Build UPDATE statement specs from `clutch--pending-edits'."
+  "Build UPDATE statement specs from staged edits."
   (unless clutch--pending-edits
-    (user-error "No pending edits"))
+    (user-error "No staged edits"))
   (let* ((table (clutch--result-source-table-or-user-error "Build UPDATE"))
          (pk-indices (clutch--result-pk-indices-or-user-error table "Build UPDATE"))
          (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
@@ -658,7 +658,7 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
     statements))
 
 (defun clutch-result--build-pending-insert-statements ()
-  "Build INSERT statement specs from `clutch--pending-inserts'."
+  "Build INSERT statement specs from staged inserts."
   (let ((table (or (clutch-result--detect-table)
                    (user-error "Cannot detect source table"))))
     (mapcar (lambda (fields)
@@ -666,7 +666,7 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
             clutch--pending-inserts)))
 
 (defun clutch-result--build-pending-delete-statements ()
-  "Build DELETE statement specs from `clutch--pending-deletes'."
+  "Build DELETE statement specs from staged deletes."
   (let* ((table (clutch--result-source-table-or-user-error "Build DELETE"))
          (pk-indices (clutch--result-pk-indices-or-user-error table "Build DELETE"))
          (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
@@ -682,11 +682,11 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
 
 ;;;###autoload
 (defun clutch-result-commit ()
-  "Commit all pending changes: INSERT new rows, UPDATE edits, DELETE staged rows.
+  "Commit all staged changes: INSERT new rows, UPDATE edits, DELETE rows.
 Executes in order: INSERTs first, then UPDATEs, then DELETEs."
   (interactive)
   (unless (or clutch--pending-edits clutch--pending-deletes clutch--pending-inserts)
-    (user-error "No pending changes"))
+    (user-error "No staged changes"))
   (let* ((insert-stmts (when clutch--pending-inserts
                          (clutch-result--build-pending-insert-statements)))
          (update-stmts (when clutch--pending-edits
@@ -843,7 +843,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   "Cached schema detail plists keyed by column name for the insert buffer.")
 
 (defvar-local clutch-result-insert--pending-index nil
-  "Pending insert index being edited, or nil for a new staged insertion.")
+  "Staged insert index being edited, or nil for a new insert.")
 
 (defvar-local clutch-result-insert--fields nil
   "Structured field state for the current insert buffer.")
@@ -1686,7 +1686,7 @@ fields until the user expands to all columns."
           (clutch-result-insert--filter-clone-fields
            table
            (or (nth (- ridx nrows) clutch--pending-inserts)
-               (user-error "No pending insertion at this row")))
+               (user-error "No staged insert at this row")))
         (let* ((display-rows (or clutch--filtered-rows clutch--result-rows))
                (row (or (nth ridx display-rows)
                         (user-error "No row at point")))
@@ -1847,7 +1847,7 @@ ROWS is a list of string lists."
                nil)))
 
 (defun clutch-result-insert--stage-imported-rows (rows)
-  "Stage imported ROWS as pending inserts in the parent result buffer."
+  "Stage imported ROWS as inserts in the parent result buffer."
   (unless (buffer-live-p clutch-result-insert--result-buffer)
     (user-error "Result buffer no longer exists"))
   (with-current-buffer clutch-result-insert--result-buffer
@@ -1864,8 +1864,8 @@ ROWS is a list of string lists."
   "Import TSV or CSV into the current insert buffer.
 Uses TEXT when non-nil.
 Otherwise reads from the active region or the current kill.
-Single-row imports prefill the current form.  Multi-row imports stage pending
-inserts immediately."
+Single-row imports prefill the current form.  Multi-row imports stage inserts
+immediately."
   (interactive)
   (clutch-result-insert--sync-fields-from-buffer)
   (pcase-let* ((raw (or text (clutch-result-insert--read-import-text)))
@@ -2047,12 +2047,12 @@ Use \\[clutch-result-commit] in the result buffer to commit."
       (if pending-index
           (if-let* ((cell (nthcdr pending-index clutch--pending-inserts)))
               (setcar cell fields)
-            (user-error "Pending insertion no longer exists"))
+            (user-error "Staged insert no longer exists"))
         (setq clutch--pending-inserts
               (append clutch--pending-inserts (list fields))))
       (clutch--refresh-display)
       (if pending-index
-          (message "Pending insertion updated — C-c C-c to commit")
+          (message "Staged insert updated — C-c C-c to commit")
         (message "%d insertion%s staged — C-c C-c to commit"
                  (length clutch--pending-inserts)
                  (if (= (length clutch--pending-inserts) 1) "" "s"))))))

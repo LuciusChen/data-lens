@@ -65,7 +65,7 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
 (defvar-local clutch--pending-deletes nil
   "List of pk-value vectors staged for deletion.")
 (defvar-local clutch--pending-edits nil
-  "Alist of pending edits: ((PK-VEC . COL-IDX) . NEW-VALUE).")
+  "Alist of staged edits: ((PK-VEC . COL-IDX) . NEW-VALUE).")
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.")
 (defvar-local clutch--query-elapsed nil
@@ -458,7 +458,7 @@ column-local commands still work from padded whitespace."
 
 (defun clutch--cell-display-content (val w col-def edited)
   "Return the unpadded display string for a cell value VAL in width W.
-COL-DEF is the column definition plist, EDITED is the pending edit cons or nil."
+COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
   (let* ((display-val (if edited (cdr edited) val))
          (custom (clutch--cell-custom-display display-val col-def))
          (special-placeholder (and (not custom)
@@ -495,7 +495,7 @@ COL-DEF is the column definition plist, EDITED is the pending edit cons or nil."
 
 (defun clutch--build-render-state ()
   "Return hash-table lookups for the current result render.
-These tables avoid repeated linear scans through pending UI state while
+These tables avoid repeated linear scans through staged UI state while
 rendering large result pages."
   (let ((edit-table (make-hash-table :test 'equal))
         (edit-row-table (make-hash-table :test 'equal))
@@ -516,7 +516,7 @@ rendering large result pages."
           :pk-indices clutch--cached-pk-indices)))
 
 (defun clutch--render-edit-entry (row _ridx cidx render-state)
-  "Return pending edit entry for ROW/CIDX from RENDER-STATE, or nil."
+  "Return staged edit entry for ROW/CIDX from RENDER-STATE, or nil."
   (let* ((edits (plist-get render-state :edits))
          (pk-indices (plist-get render-state :pk-indices)))
     (and pk-indices
@@ -524,7 +524,7 @@ rendering large result pages."
                   edits))))
 
 (defun clutch--row-pending-edit-p (row _ridx render-state)
-  "Return non-nil when ROW has any pending edit in RENDER-STATE."
+  "Return non-nil when ROW has any staged edit in RENDER-STATE."
   (let* ((edit-rows (plist-get render-state :edit-rows))
          (pk-indices (plist-get render-state :pk-indices)))
     (and pk-indices
@@ -574,7 +574,7 @@ Returns a propertized string."
 
 (defun clutch--render-row-line (ridx render-state)
   "Return the rendered buffer line string for row RIDX.
-RENDER-STATE carries cached lookup tables for pending row state."
+RENDER-STATE carries cached lookup tables for staged row state."
   (let* ((rows (or clutch--filtered-rows clutch--result-rows))
          (row (nth ridx rows))
          (visible-cols (clutch--visible-columns))
@@ -995,7 +995,7 @@ The header-line should track body hscroll exactly."
 (defun clutch--insert-data-rows (rows row-positions render-state)
   "Insert data ROWS into the current buffer.
 ROW-POSITIONS stores line starts keyed by rendered row index.
-RENDER-STATE contains render lookup tables for pending UI state."
+RENDER-STATE contains render lookup tables for staged UI state."
   (cl-loop for _row in rows
            for ridx from 0
            do (aset row-positions ridx (point))
@@ -1003,11 +1003,11 @@ RENDER-STATE contains render lookup tables for pending UI state."
 
 (defun clutch--insert-pending-insert-rows (visible-cols widths nw nrows row-positions
                                                         render-state)
-  "Append ghost rows for pending inserts below the real data rows.
+  "Append ghost rows for staged inserts below the real data rows.
 VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
 NROWS is the count of real rows (used to compute ghost row indices).
 ROW-POSITIONS stores line starts keyed by rendered row index.
-RENDER-STATE contains render lookup tables for pending UI state."
+RENDER-STATE contains render lookup tables for staged UI state."
   (let ((bface 'clutch-border-face)
         (pad-str (make-string clutch-column-padding ?\s))
         (insert-placeholders (plist-get render-state :insert-placeholders)))
@@ -1284,8 +1284,7 @@ IGNORE-BUFFER, when non-nil, is excluded from the check."
            (buffer-list)))
 
 (defun clutch--disable-window-size-hook-if-unused (&optional ignore-buffer)
-  "Remove the global `window-size-change-functions' hook.
-Do so when no result buffers remain.
+  "Remove the window-size hook when no result buffers remain.
 IGNORE-BUFFER is excluded from liveness checks."
   (when (and clutch--window-size-hook-enabled
              (not (clutch--has-live-result-buffer-p ignore-buffer)))

@@ -403,6 +403,38 @@
     ((or 'require 'prefer) t)
     (_ nil)))
 
+(defun clutch-db-pg--connect-args (params)
+  "Return `pg-connect-plist' keyword arguments from PARAMS."
+  (cl-loop for key in '(:password :host :port)
+           when (plist-member params key)
+           append (list key (plist-get params key))))
+
+(defun clutch-db-pg--connect-with-sslmode (dbname user connect-args sslmode)
+  "Connect to DBNAME as USER using CONNECT-ARGS and SSLMODE."
+  (pcase sslmode
+    ('prefer
+     (if (and (fboundp 'gnutls-available-p)
+              (gnutls-available-p))
+         (condition-case err
+             (apply #'pg-connect-plist
+                    dbname user
+                    (append connect-args
+                            (list :tls-options
+                                  (clutch-db-pg--tls-options sslmode))))
+           (pg-protocol-error
+            (if (clutch-db-pg--prefer-fallback-p err)
+                (apply #'pg-connect-plist dbname user connect-args)
+              (signal (car err) (cdr err)))))
+       (apply #'pg-connect-plist dbname user connect-args)))
+    ((or 'require 'verify-full)
+     (apply #'pg-connect-plist
+            dbname user
+            (append connect-args
+                    (list :tls-options
+                          (clutch-db-pg--tls-options sslmode)))))
+    (_
+     (apply #'pg-connect-plist dbname user connect-args))))
+
 ;;;; Connect function
 
 (defun clutch-db-pg-connect (params)
@@ -423,34 +455,10 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
                  (pg-read-timeout (or read-idle-timeout pg-read-timeout))
                  (dbname (plist-get params :database))
                  (user (plist-get params :user))
-                 (connect-args
-                  (cl-loop for key in '(:password :host :port)
-                           when (plist-member params key)
-                           append (list key (plist-get params key)))))
+                 (connect-args (clutch-db-pg--connect-args params)))
             (setq conn
-                  (pcase sslmode
-                    ('prefer
-                     (if (and (fboundp 'gnutls-available-p)
-                              (gnutls-available-p))
-                         (condition-case tls-err
-                             (apply #'pg-connect-plist
-                                    dbname user
-                                    (append connect-args
-                                            (list :tls-options
-                                                  (clutch-db-pg--tls-options sslmode))))
-                           (pg-protocol-error
-                            (if (clutch-db-pg--prefer-fallback-p tls-err)
-                                (apply #'pg-connect-plist dbname user connect-args)
-                              (signal (car tls-err) (cdr tls-err)))))
-                       (apply #'pg-connect-plist dbname user connect-args)))
-                    ((or 'require 'verify-full)
-                     (apply #'pg-connect-plist
-                            dbname user
-                            (append connect-args
-                                    (list :tls-options
-                                          (clutch-db-pg--tls-options sslmode)))))
-                    (_
-                     (apply #'pg-connect-plist dbname user connect-args)))))
+                  (clutch-db-pg--connect-with-sslmode dbname user
+                                                      connect-args sslmode)))
           (when query-timeout
             (clutch-db-pg--set-statement-timeout conn query-timeout))
           (when schema

@@ -59,7 +59,7 @@ For backend-specific notes, see
 - Record buffer for single-row detail view
 - Foreign key detection and navigation
 - Inline cell editing with staged UPDATE generation
-- Staged INSERT (=i=), DELETE (=d=), and pending-batch preview/commit
+- Staged INSERT (=i=), DELETE (=d=), and staged SQL preview/commit
 - WHERE filtering (=W=), client-side fuzzy filter (=/=), SQL =ORDER BY= sorting (=s=)
 - Column-aligned horizontal paging via =[= / =]=, plus column width adjustment via =-= / ===
 - CSV / INSERT / UPDATE export, plus TSV / CSV / INSERT / UPDATE copy
@@ -222,7 +222,7 @@ manual-commit mode, clutch uses the same transaction keys:
 Native MySQL maps =C-c C-a= to the server session's autocommit flag directly.
 Native PostgreSQL uses a clutch-managed manual mode: enabling manual mode does
 not send =BEGIN= immediately, the first foreground statement opens the
-transaction lazily, and transactional DDL also counts as pending work, so
+transaction lazily, and transactional DDL also counts as uncommitted work, so
 toggle/disconnect stays blocked until you commit or roll back.
 
 ** Password Management
