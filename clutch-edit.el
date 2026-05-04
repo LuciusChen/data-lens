@@ -1178,10 +1178,13 @@ All field types use the same delay so feedback timing is consistent."
 
 (defun clutch-result-insert--json-editor-mode ()
   "Select the best available major mode for JSON field editing."
-  (cond
-   ((fboundp 'json-ts-mode) (json-ts-mode))
-   ((fboundp 'js-mode) (js-mode))
-   (t (text-mode))))
+  (unless (and (fboundp 'json-ts-mode)
+               (condition-case nil
+                   (progn (json-ts-mode) t)
+                 (error nil)))
+    (cond
+     ((fboundp 'js-mode) (js-mode))
+     (t (text-mode)))))
 
 (defun clutch--open-json-sub-editor (buffer-name initial-text field-name finish-fn cancel-fn)
   "Open a shared JSON sub-editor buffer and return it.

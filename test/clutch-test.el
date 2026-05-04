@@ -167,6 +167,20 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
       (should (equal seen "{\"name\":\"张三\"}"))
       (should-not serialize-called))))
 
+(ert-deftest clutch-test-json-view-mode-falls-back-when-json-ts-errors ()
+  "JSON viewers should tolerate missing tree-sitter grammars."
+  (let (selected-mode)
+    (with-temp-buffer
+      (insert "{\"ok\":true}")
+      (cl-letf (((symbol-function 'json-ts-mode)
+                 (lambda () (error "missing JSON grammar")))
+                ((symbol-function 'json-mode)
+                 (lambda () (setq selected-mode 'json-mode)))
+                ((symbol-function 'js-mode)
+                 (lambda () (setq selected-mode 'js-mode))))
+        (clutch--setup-json-view-buffer)))
+    (should (eq selected-mode 'json-mode))))
+
 (ert-deftest clutch-test-dispatch-view-fallback-to-plain ()
   "Unknown values should open plain viewer rather than JSON viewer."
   (let ((plain-called nil)
@@ -5063,6 +5077,17 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (kill-buffer result-buf))))
 
 ;;;; Edit — JSON sub-editor
+
+(ert-deftest clutch-test-json-editor-mode-falls-back-when-json-ts-errors ()
+  "JSON editors should tolerate missing tree-sitter grammars."
+  (let (selected-mode)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'json-ts-mode)
+                 (lambda () (error "missing JSON grammar")))
+                ((symbol-function 'js-mode)
+                 (lambda () (setq selected-mode 'js-mode))))
+        (clutch-result-insert--json-editor-mode)))
+    (should (eq selected-mode 'js-mode))))
 
 (ert-deftest clutch-test-insert-json-editor-save-roundtrip ()
   "Saving a JSON child editor should write compact JSON back to the insert field."

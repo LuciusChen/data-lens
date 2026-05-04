@@ -3514,9 +3514,13 @@ reformat the current buffer."
 (defun clutch--setup-json-view-buffer ()
   "Enable JSON display mode for the current buffer."
   (condition-case nil (json-pretty-print-buffer) (error nil))
-  (cond ((fboundp 'json-ts-mode) (json-ts-mode))
-        ((fboundp 'json-mode)    (json-mode))
-        (t                       (special-mode))))
+  (unless (and (fboundp 'json-ts-mode)
+               (condition-case nil
+                   (progn (json-ts-mode) t)
+                 (error nil)))
+    (cond ((fboundp 'json-mode) (json-mode))
+          ((fboundp 'js-mode)   (js-mode))
+          (t                    (special-mode)))))
 
 (defun clutch--decode-xml-char-refs-string (text)
   "Return TEXT with numeric XML character references decoded for display."
