@@ -4448,7 +4448,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (unwind-protect
         (with-current-buffer result-buf
           (setq-local clutch--pending-inserts '((("severity" . "low"))))
-          (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
+          (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore)
+                    ((symbol-function 'quit-window) #'ignore))
             (with-temp-buffer
               (insert "severity: high\n")
               (clutch-result-insert-mode 1)
