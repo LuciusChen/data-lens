@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/package-split
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  elisp:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs-version:
+          - "28.2"
+          - "29.4"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs-version }}
+
+      - name: Install package dependencies
+        run: |
+          emacs -Q --batch \
+            --eval "(require 'package)" \
+            --eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\") t)" \
+            --eval "(add-to-list 'package-archives '(\"gnu\" . \"https://elpa.gnu.org/packages/\") t)" \
+            --eval "(package-initialize)" \
+            --eval "(package-refresh-contents)" \
+            --eval "(dolist (pkg '(transient mysql pg package-lint)) (unless (package-installed-p pkg) (package-install pkg)))"
+
+      - name: Run main ERT suite
+        run: |
+          emacs -Q --batch \
+            --eval "(require 'package)" \
+            --eval "(package-initialize)" \
+            -L . \
+            -l ert \
+            -l clutch \
+            -l test/clutch-test.el \
+            --eval "(ert-run-tests-batch-and-exit)"
+
+      - name: Run JDBC backend ERT suite
+        run: |
+          emacs -Q --batch \
+            --eval "(require 'package)" \
+            --eval "(package-initialize)" \
+            -L . \
+            -l ert \
+            -l clutch-db-jdbc \
+            -l test/clutch-db-test.el \
+            --eval "(ert-run-tests-batch-and-exit \"clutch-db-test-jdbc\")"
+
+      - name: Byte compile
+        run: |
+          emacs -Q --batch \
+            --eval "(require 'package)" \
+            --eval "(package-initialize)" \
+            -L . \
+            -f batch-byte-compile \
+            *.el
+
+      - name: Package lint
+        run: |
+          emacs -Q --batch \
+            --eval "(require 'package)" \
+            --eval "(package-initialize)" \
+            -L . \
+            -l package-lint \
+            -f package-lint-batch-and-exit \
+            clutch.el
+
+      - name: Checkdoc entry file
+        run: |
+          emacs -Q --batch \
+            --eval "(require 'package)" \
+            --eval "(package-initialize)" \
+            -L . \
+            --eval "(require 'checkdoc)" \
+            --eval "(checkdoc-file \"clutch.el\")" \
+            --eval "(when (get-buffer \"*warn*\") (with-current-buffer \"*warn*\" (goto-char (point-min)) (when (re-search-forward \"^Warning\" nil t) (princ (buffer-string)) (kill-emacs 1))))"

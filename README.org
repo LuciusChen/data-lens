@@ -130,6 +130,37 @@ SQLite support is built in on Emacs 29.1+, and JDBC support ships inside
 =clutch= itself (the runtime still needs Java 17+ and =clutch-jdbc-agent.jar=).
 For Org-Babel support, install the separate =ob-clutch= package.
 
+* Package Split Migration
+
+This release separates optional protocol and Org-Babel packages from the main
+=clutch= package.  If you are upgrading from an older checkout that bundled
+everything in one repository, this is a breaking packaging change:
+
+- =mysql.el= is no longer bundled; install the =mysql= package for
+  =:backend mysql=.
+- =pg.el= is no longer bundled; install the =pg= package for =:backend pg=.
+- =ob-clutch.el= is no longer bundled; install =ob-clutch= separately for
+  Org-Babel source blocks.
+- Saved connections must specify =:backend= explicitly.
+
+For package-manager installs, install the pieces you use:
+
+#+begin_src emacs-lisp
+(package-install 'clutch)
+(package-install 'mysql)     ;; only for :backend mysql
+(package-install 'pg)        ;; only for :backend pg
+;; (package-install 'ob-clutch)  ;; Org-Babel integration, once available
+#+end_src
+
+For source checkouts, add each checkout to =load-path= explicitly:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "/path/to/clutch")
+(add-to-list 'load-path "/path/to/mysql.el") ; only for :backend mysql
+(add-to-list 'load-path "/path/to/pg-el")    ; only for :backend pg
+(require 'clutch)
+#+end_src
+
 * Interactive Client
 
 ** Quick Start
@@ -242,7 +273,9 @@ machine 127.0.0.1 login root password secret port 3306
 Connection entry without hardcoded password:
 
 #+begin_src emacs-lisp
-("dev-mysql" . (:host "127.0.0.1" :port 3306 :user "root" :database "mydb"))
+("dev-mysql" . (:backend mysql
+                :host "127.0.0.1" :port 3306
+                :user "root" :database "mydb"))
 #+end_src
 
 *** pass example — connection name as entry name (recommended)
