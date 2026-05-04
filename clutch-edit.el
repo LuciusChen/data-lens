@@ -53,6 +53,13 @@
 (declare-function clutch-db-foreign-keys "clutch-db" (conn table))
 (declare-function clutch-db-primary-key-columns "clutch-db" (conn table))
 
+(defun clutch--quit-window-or-kill-buffer ()
+  "Quit the current window, or kill the current buffer if it is undisplayed."
+  (condition-case nil
+      (quit-window 'kill)
+    (error
+     (kill-buffer (current-buffer)))))
+
 ;;;; Cell editing (C-c ')
 
 (defun clutch-result--cell-at (pos)
@@ -367,7 +374,7 @@ Signal MISSING-MESSAGE when PARENT is dead.  UPDATER runs in PARENT.
 When SUCCESS-MESSAGE is non-nil, echo it after returning to PARENT."
   (unless (buffer-live-p parent)
     (user-error "%s" missing-message))
-  (quit-window 'kill)
+  (clutch--quit-window-or-kill-buffer)
   (with-current-buffer parent
     (funcall updater))
   (pop-to-buffer parent)
@@ -377,7 +384,7 @@ When SUCCESS-MESSAGE is non-nil, echo it after returning to PARENT."
 (defun clutch--cancel-json-sub-editor (parent &optional restorer)
   "Close the current JSON sub-editor and return to live PARENT.
 When RESTORER is non-nil, run it in PARENT before switching back."
-  (quit-window 'kill)
+  (clutch--quit-window-or-kill-buffer)
   (when (buffer-live-p parent)
     (with-current-buffer parent
       (when restorer
@@ -474,7 +481,7 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
      clutch-result-edit--column-def
      clutch-result-edit--column-detail)
     (setq-local clutch-result-edit--error-message nil)
-    (quit-window 'kill)
+    (clutch--quit-window-or-kill-buffer)
     (when cb
       (funcall cb new-value))))
 
@@ -483,7 +490,7 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
   "Cancel the edit and return to the result buffer."
   (interactive)
   (clutch-result-edit--cancel-validation-timer)
-  (quit-window 'kill))
+  (clutch--quit-window-or-kill-buffer))
 
 (defun clutch-result--apply-edit (ridx cidx new-value)
   "Record edit for row RIDX, column CIDX with NEW-VALUE.
@@ -2045,7 +2052,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
     (clutch-result-insert--validate-fields fields)
-    (quit-window 'kill)
+    (clutch--quit-window-or-kill-buffer)
     (with-current-buffer result-buf
       (if pending-index
           (if-let* ((cell (nthcdr pending-index clutch--pending-inserts)))
@@ -2064,7 +2071,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 (defun clutch-result-insert-cancel ()
   "Cancel the INSERT and close the edit buffer."
   (interactive)
-  (quit-window 'kill))
+  (clutch--quit-window-or-kill-buffer))
 
 
 (provide 'clutch-edit)
