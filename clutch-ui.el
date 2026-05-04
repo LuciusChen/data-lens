@@ -14,6 +14,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'clutch-compat)
 
 (defvar clutch--executing-p)
 (declare-function clutch--spinner-string "clutch-connection" ())
