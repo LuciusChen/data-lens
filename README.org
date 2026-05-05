@@ -114,14 +114,14 @@ Clone this repository and add it to your =load-path=
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "/path/to/clutch")
-;; Add the native backend packages you actually use:
-;; (add-to-list 'load-path "/path/to/mysql")  ; for :backend mysql
+;; Add source checkouts for native backends you use:
+;; (add-to-list 'load-path "/path/to/mysql.el") ; for :backend mysql
 ;; (add-to-list 'load-path "/path/to/pg-el")  ; for :backend pg
 (require 'clutch)
 #+end_src
 
-When installed from MELPA, install =clutch= plus the native backend packages
-you actually use:
+When installed from MELPA, installing =clutch= also installs the core native
+backend protocol packages:
 
 - =mysql= for =:backend mysql=
 - =pg= for =:backend pg=
@@ -132,27 +132,29 @@ For Org-Babel support, install the separate =ob-clutch= package.
 
 * Package Split Migration
 
-This release separates optional protocol and Org-Babel packages from the main
+This release separates protocol and Org-Babel packages from the main
 =clutch= package.  If you are upgrading from an older checkout that bundled
 everything in one repository, this is a breaking packaging change:
 
-- =mysql.el= is no longer bundled; install the =mysql= package for
-  =:backend mysql=.
-- =pg.el= is no longer bundled; install the =pg= package for =:backend pg=.
+- =mysql.el= is no longer bundled in this repository.  Package-manager installs
+  of =clutch= install the =mysql= package as a dependency; source checkouts must
+  add =mysql.el= to =load-path= for =:backend mysql=.
+- =pg.el= is no longer bundled in this repository.  Package-manager installs of
+  =clutch= install the =pg= package as a dependency; source checkouts must add
+  =pg-el= to =load-path= for =:backend pg=.
 - =ob-clutch.el= is no longer bundled; install =ob-clutch= separately for
   Org-Babel source blocks.
 - Saved connections must specify =:backend= explicitly.
 
-For package-manager installs, install the pieces you use:
+For package-manager installs, install =clutch=:
 
 #+begin_src emacs-lisp
 (package-install 'clutch)
-(package-install 'mysql)     ;; only for :backend mysql
-(package-install 'pg)        ;; only for :backend pg
 ;; (package-install 'ob-clutch)  ;; Org-Babel integration, once available
 #+end_src
 
-For source checkouts, add each checkout to =load-path= explicitly:
+For source checkouts, add each backend checkout you use to =load-path=
+explicitly:
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "/path/to/clutch")
