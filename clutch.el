@@ -4874,7 +4874,7 @@ Accumulates input until a semicolon is found, then executes."
   (interactive)
   (call-interactively #'clutch-toggle-auto-commit))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-dispatch "clutch" nil t)
 (transient-define-prefix clutch-dispatch ()
   "Main dispatch menu for clutch."
   [ :pad-keys t
