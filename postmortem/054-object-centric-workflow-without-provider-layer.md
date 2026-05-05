@@ -47,7 +47,7 @@ problem:
 Adding a second `provider` or `introspection` layer would mostly rename the
 same boundary while making the call chain longer and harder to reason about.
 
-This also follows the project rule in `CLAUDE.md`: question every abstraction
+This also follows the project rule in `AGENTS.md`: question every abstraction
 and split only when a boundary is already real.
 
 The object workflow therefore favors:

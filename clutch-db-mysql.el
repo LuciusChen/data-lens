@@ -2,6 +2,13 @@
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1") (mysql "0.2.0"))
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;; This file is part of clutch.
 
 ;; clutch is free software: you can redistribute it and/or modify
@@ -27,6 +34,9 @@
 (require 'cl-lib)
 (require 'clutch-db)
 (require 'mysql)
+
+(declare-function clutch-db--schedule-idle-metadata-call "clutch-db"
+                  (conn callback errback fn &rest args))
 
 ;;;; Type-category mapping
 
@@ -114,7 +124,7 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
     (condition-case err
         (apply #'mysql-connect
                (cl-loop for (k v) on params by #'cddr
-                        unless (memq k '(:sql-product :backend))
+                        unless (memq k '(:sql-product :backend :pass-entry))
                         append (list k v)))
       (mysql-error
        (signal 'clutch-db-error
@@ -142,6 +152,29 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
      (signal 'clutch-db-error
              (list (format "Init failed: %s" (error-message-string err)))))))
 
+(cl-defmethod clutch-db-eager-schema-refresh-p ((_conn mysql-conn))
+  "MySQL schema refresh should not block connect."
+  nil)
+
+;;;; Transaction methods
+
+(cl-defmethod clutch-db-manual-commit-p ((conn mysql-conn))
+  "Return non-nil when MySQL CONN runs with autocommit disabled."
+  (not (mysql-autocommit-p conn)))
+
+(cl-defmethod clutch-db-commit ((conn mysql-conn))
+  "Commit the current transaction on MySQL CONN."
+  (mysql-commit conn))
+
+(cl-defmethod clutch-db-rollback ((conn mysql-conn))
+  "Roll back the current transaction on MySQL CONN."
+  (mysql-rollback conn))
+
+(cl-defmethod clutch-db-set-auto-commit ((conn mysql-conn) auto-commit)
+  "Set autocommit mode on MySQL CONN.
+AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
+  (mysql-set-autocommit conn auto-commit))
+
 ;;;; Query methods
 
 (cl-defmethod clutch-db-query ((conn mysql-conn) sql)
@@ -151,6 +184,31 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
     (mysql-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-execute-params ((conn mysql-conn) sql params)
+  "Execute parameterized SQL on MySQL CONN with PARAMS."
+  (let (stmt result pending-error)
+    (condition-case err
+        (setq stmt (mysql-prepare conn sql))
+      (mysql-error
+       (setq pending-error err)))
+    (when stmt
+      (unwind-protect
+          (condition-case err
+              (setq result
+                    (clutch-db-mysql--wrap-result
+                     (apply #'mysql-execute stmt params)))
+            (mysql-error
+             (setq pending-error err)))
+        (condition-case err
+            (mysql-stmt-close stmt)
+          (mysql-error
+           (unless pending-error
+             (setq pending-error err))))))
+    (if pending-error
+        (signal 'clutch-db-error
+                (list (error-message-string pending-error)))
+      result)))
 
 (cl-defmethod clutch-db-build-paged-sql ((_conn mysql-conn) base-sql
                                              page-num page-size
@@ -172,6 +230,38 @@ controls the optional sort clause."
   (mysql-escape-literal value))
 
 ;;;; Schema methods
+
+(cl-defmethod clutch-db-refresh-schema-async ((conn mysql-conn) callback
+                                              &optional errback)
+  "Refresh MySQL schema names for CONN via CALLBACK on the main thread.
+Call ERRBACK if the metadata refresh fails."
+  (clutch-db--schedule-idle-metadata-call
+   conn callback errback
+   #'clutch-db-list-tables))
+
+(cl-defmethod clutch-db-list-columns-async ((conn mysql-conn) table callback
+                                            &optional errback)
+  "Fetch MySQL column names for TABLE on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
+   conn callback errback
+   #'clutch-db-list-columns
+   table))
+
+(cl-defmethod clutch-db-column-details-async ((conn mysql-conn) table callback
+                                              &optional errback)
+  "Fetch MySQL column details for TABLE on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
+   conn callback errback
+   #'clutch-db-column-details
+   table))
+
+(cl-defmethod clutch-db-table-comment-async ((conn mysql-conn) table callback
+                                             &optional errback)
+  "Fetch the MySQL comment for TABLE on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
+   conn callback errback
+   #'clutch-db-table-comment
+   table))
 
 (cl-defmethod clutch-db-list-tables ((conn mysql-conn))
   "Return table names for the current MySQL database on CONN."
@@ -312,6 +402,14 @@ ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME")))
     (mysql-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-list-objects-async ((conn mysql-conn) category callback
+                                            &optional errback)
+  "Fetch MySQL object entries for CATEGORY on CONN on the main thread when idle."
+  (clutch-db--schedule-idle-metadata-call
+   conn callback errback
+   #'clutch-db-list-objects
+   category))
 
 (cl-defmethod clutch-db-object-details ((conn mysql-conn) entry)
   "Return detail plists for MySQL object ENTRY on CONN."

@@ -4,6 +4,9 @@
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1"))
+;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
@@ -55,16 +58,12 @@
 (defvar clutch-result-window-height 0.33)
 (defvar clutch-result-max-rows 500)
 (defvar clutch-column-width-max 30)
-(defvar clutch-column-padding 1)
 (defvar clutch-console-yank-cleanup t)
-(defvar clutch-console-directory
-  (expand-file-name "clutch" user-emacs-directory))
 
 ;; Forward declarations — variables defined in clutch-ui / clutch-edit
 (defvar clutch--aggregate-summary)
 (defvar clutch--cached-pk-indices)
 (defvar clutch--column-widths)
-(defvar clutch--dml-result)
 (defvar clutch--filter-pattern)
 (defvar clutch--filtered-rows)
 (defvar clutch--fk-info)
@@ -78,6 +77,7 @@
 (defvar clutch--query-elapsed)
 (defvar clutch--result-column-defs)
 (defvar clutch--result-columns)
+(defvar clutch--result-source-table)
 (defvar clutch--result-rows)
 (defvar clutch--sort-column)
 (defvar clutch--sort-descending)
@@ -129,6 +129,7 @@
 (declare-function clutch-result--build-pending-insert-statements "clutch-edit" ())
 (declare-function clutch-result--build-update-statements "clutch-edit" ())
 (declare-function clutch-result--build-pending-delete-statements "clutch-edit" ())
+(declare-function clutch-result--render-statements "clutch-edit" (statements))
 (declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
 
 ;; Forward declarations — functions from clutch-db
@@ -236,7 +237,7 @@ hash-tables and vectors (JSON from MySQL/PG) → JSON string."
    ((numberp val) (number-to-string val))
    ((listp val) (or (clutch-db-format-temporal val) (format "%S" val)))
    ((or (hash-table-p val) (vectorp val))
-    (condition-case nil (json-serialize val) (error (format "%S" val))))
+    (clutch--json-serialize-text val "query result value"))
    (t (format "%S" val))))
 
 (defun clutch--truncate-cell (str max-width)
@@ -306,8 +307,8 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
          (fboundp 'json-serialize)
          (fboundp 'json-parse-string))
     (condition-case nil
-        (json-serialize (json-parse-string val))
-      (error (json-serialize val))))
+        (clutch--json-serialize-text (json-parse-string val))
+      (error (clutch--json-serialize-text val))))
    ((clutch--json-false-value-p val)
     "false")
    ((and (fboundp 'json-serialize)
@@ -317,7 +318,8 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
              (vectorp val)
              (listp val)))
     (condition-case nil
-        (json-serialize (if (clutch--json-false-value-p val) :false val))
+        (clutch--json-serialize-text
+         (if (clutch--json-false-value-p val) :false val))
       (error (clutch--format-value val))))
    (t (clutch--format-value val))))
 
@@ -440,6 +442,7 @@ COLUMN-DEFS, if provided, is used for long-field detection.
 Returns a string (with text properties)."
   (let* ((clutch--result-columns col-names)
          (clutch--result-column-defs column-defs)
+         (clutch--result-source-table nil)
          (clutch--pending-edits nil)
          (clutch--fk-info nil)
          (ncols (length col-names))
@@ -529,7 +532,7 @@ Signals an error if pagination is not available."
     (when (and (or clutch--pending-edits
                    clutch--pending-deletes
                    clutch--pending-inserts)
-               (not (yes-or-no-p "Discard pending changes and change page? ")))
+               (not (yes-or-no-p "Discard staged changes and change page? ")))
       (user-error "Page change cancelled"))
     (let* ((paged-sql (clutch--build-paged-sql
                        effective-sql page-num
@@ -787,14 +790,14 @@ This avoids brittle clause injection for CTE/UNION/subquery-heavy SQL."
   (clutch--sql-rewrite sql 'where filter))
 
 (defun clutch--check-pending-changes ()
-  "Prompt to discard pending changes in the result buffer, if any.
+  "Prompt to discard staged changes in the result buffer, if any.
 Signals `user-error' if the user declines."
   (when-let* ((result-buf (get-buffer (clutch--result-buffer-name))))
     (with-current-buffer result-buf
       (when (and (or clutch--pending-edits
                      clutch--pending-deletes
                      clutch--pending-inserts)
-                 (not (yes-or-no-p "Discard pending changes and re-run query? ")))
+                 (not (yes-or-no-p "Discard staged changes and re-run query? ")))
         (user-error "Execution cancelled")))))
 
 (defun clutch--abandon-query-connection (connection)
@@ -1195,13 +1198,14 @@ Semicolons inside strings, line comments, and block comments do not count."
                    clutch--pending-edits
                    clutch--pending-deletes)
                (mapconcat (lambda (s) (concat s ";"))
-                          (append
-                           (when clutch--pending-inserts
-                             (clutch-result--build-pending-insert-statements))
-                           (when clutch--pending-edits
-                             (clutch-result--build-update-statements))
-                           (when clutch--pending-deletes
-                             (clutch-result--build-pending-delete-statements)))
+                          (clutch-result--render-statements
+                           (append
+                            (when clutch--pending-inserts
+                              (clutch-result--build-pending-insert-statements))
+                            (when clutch--pending-edits
+                              (clutch-result--build-update-statements))
+                            (when clutch--pending-deletes
+                              (clutch-result--build-pending-delete-statements))))
                           "\n")
              (clutch-result--effective-query)))
           ((use-region-p)
@@ -1449,17 +1453,16 @@ Go, Ruby, etc.)."
           (forward-sexp 1)
           (buffer-substring-no-properties (1+ str-start) (1- (point))))))))
 
-(defvar clutch-indirect-mode-map
+(defvar clutch--indirect-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c '") #'clutch-indirect-execute)
     (define-key map (kbd "C-c C-k") #'clutch-indirect-abort)
     map)
-  "Keymap for `clutch-indirect-mode'.")
+  "Keymap for `clutch--indirect-mode'.")
 
-;;;###autoload
-(define-minor-mode clutch-indirect-mode
+(define-minor-mode clutch--indirect-mode
   "Minor mode active in indirect SQL edit buffers.
-\\<clutch-indirect-mode-map>
+\\<clutch--indirect-mode-map>
 Key bindings:
   \\[clutch-indirect-execute]	Execute and close
   \\[clutch-indirect-abort]	Abort and close"
@@ -1513,7 +1516,7 @@ Otherwise use the current line.
 
 The indirect buffer inherits the connection from any live
 `clutch-mode' buffer.  Edit the SQL freely, then press
-\\<clutch-indirect-mode-map>\\[clutch-indirect-execute] \
+\\<clutch--indirect-mode-map>\\[clutch-indirect-execute] \
 to execute or \\[clutch-indirect-abort] to abort."
   (interactive)
   (let* ((text (clutch--extract-indirect-sql-text))
@@ -1527,7 +1530,7 @@ to execute or \\[clutch-indirect-abort] to abort."
     (when conn
       (clutch--bind-connection-context conn params product)
       (clutch--update-mode-line))
-    (clutch-indirect-mode 1)
+    (clutch--indirect-mode 1)
     (insert text)
     (goto-char (point-min))
     (message "Edit SQL, then C-c ' to execute, C-c C-k to abort")))

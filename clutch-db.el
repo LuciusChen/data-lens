@@ -2,6 +2,13 @@
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1"))
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;; This file is part of clutch.
 
 ;; clutch is free software: you can redistribute it and/or modify
@@ -42,8 +49,8 @@
 
 ;;;; Shared helpers
 
-(defun clutch-db--pass-secret-by-suffix (suffix)
-  "Return pass secret from the first entry whose path ends with SUFFIX.
+(defun clutch-db--pass-entry-by-suffix (suffix)
+  "Return the first pass entry path whose tail matches SUFFIX.
 Matches e.g. `dev-mysql' against `mysql/dev-mysql'.
 Returns nil when no matching entry is found or auth-source-pass is absent."
   (when (and (fboundp 'auth-source-pass-entries)
@@ -51,8 +58,7 @@ Returns nil when no matching entry is found or auth-source-pass is absent."
     (let* ((re (format "\\(^\\|/\\)%s$" (regexp-quote suffix)))
            (entry (cl-find-if (lambda (e) (string-match-p re e))
                               (auth-source-pass-entries))))
-      (when entry
-        (cdr (assq 'secret (auth-source-pass-parse-entry entry)))))))
+      entry)))
 
 (defun clutch-db--normalize-symbol-option (value)
   "Return VALUE normalized to a lowercase symbol, or nil when absent."
@@ -63,6 +69,22 @@ Returns nil when no matching entry is found or auth-source-pass is absent."
    ((stringp value)
     (intern (downcase value)))
    (t value)))
+
+(defun clutch--json-serialize-text (value &optional context)
+  "Return VALUE serialized as normal Emacs JSON text.
+`json-serialize' returns a unibyte UTF-8 string.  Decode it back to a
+regular multibyte Emacs string so non-ASCII JSON content remains readable.
+When CONTEXT is non-nil, use it in the raised `clutch-db-error' message."
+  (condition-case err
+      (let ((json (json-serialize value)))
+        (if (multibyte-string-p json)
+            json
+          (decode-coding-string json 'utf-8 t)))
+    (error
+     (signal 'clutch-db-error
+             (list (format "Cannot serialize %s as JSON: %s"
+                           (or context "value")
+                           (error-message-string err)))))))
 
 (defun clutch-db--normalize-mysql-ssl-mode (ssl-mode)
   "Return canonical MySQL SSL-MODE, or signal `clutch-db-error'."
@@ -166,9 +188,9 @@ ROWS is a list of lists (one per row).
 AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   connection columns rows affected-rows last-insert-id warnings)
 
-;;;; SQL helpers (literal/comment awareness)
+;;;; SQL helpers (literal-or-comment awareness)
 
-(defun clutch-db-sql-skip-literal/comment (sql pos)
+(defun clutch-db-sql-skip-literal-or-comment (sql pos)
   "If POS in SQL starts a string literal or comment, return position past it.
 Handles single-quoted strings (with '' escape), -- line comments, and
 /* block comments */.  Double-quoted identifiers and backticks are NOT
@@ -198,7 +220,7 @@ treated as literals.  Returns nil when POS is at normal code."
              (or end len))
          nil)))))
 
-(defun clutch-db-sql-mask-literal/comment (sql)
+(defun clutch-db-sql-mask-literal-or-comment (sql)
   "Return a string the same length as SQL with literals/comments blanked.
 Single-quoted content (between the quotes) and comment text become spaces.
 Quote delimiters are preserved.  Double-quoted identifiers and backticks
@@ -208,7 +230,7 @@ are left intact.  Safe for multibyte strings (avoids `aset')."
         (pos 0)
         (len (length sql)))
     (while (< pos len)
-      (if-let* ((skip (clutch-db-sql-skip-literal/comment sql pos)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
           (if (= (aref sql pos) ?\')
               ;; String literal: preserve quote delimiters, blank content.
               (let* ((has-close (and (> skip (1+ pos))
@@ -239,7 +261,7 @@ START defaults to 0."
         (re (format "\\b%s\\b" pattern))
         found)
     (while (and (< pos len) (not found))
-      (if-let* ((skip (clutch-db-sql-skip-literal/comment sql pos)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
           (setq pos skip)
         (let ((ch (aref sql pos)))
           (cond
@@ -381,10 +403,68 @@ fetch was started, nil when unsupported.")
   "Backends without asynchronous column detail support return nil."
   nil)
 
+(cl-defgeneric clutch-db-list-columns-async (conn table callback &optional errback)
+  "Start an asynchronous column-name fetch for TABLE on CONN.
+CALLBACK receives the column name list on success.  ERRBACK receives an
+error message string on failure.  Return non-nil when async fetch was
+started, nil when unsupported.")
+
+(cl-defmethod clutch-db-list-columns-async ((_conn t) _table _callback
+                                            &optional _errback)
+  "Backends without asynchronous column-name support return nil."
+  nil)
+
+(defun clutch-db--schedule-idle-metadata-call (conn callback errback fn
+                                                    &rest args)
+  "Schedule metadata FN for CONN on the main thread once Emacs is idle.
+CALLBACK receives the result of calling FN with CONN and ARGS.
+ERRBACK receives an error-message string when the work fails."
+  (cl-labels
+      ((run ()
+         (if (clutch-db-live-p conn)
+             (if (clutch-db-busy-p conn)
+                 (run-with-idle-timer 0.1 nil #'run)
+               (condition-case err
+                   (when callback
+                     (funcall callback (apply fn conn args)))
+                 (error
+                  (when errback
+                    (funcall errback (error-message-string err))))))
+           (when errback
+             (funcall errback "Connection closed")))))
+    (run-with-idle-timer 0 nil #'run)))
+
 ;; Query
 
 (cl-defgeneric clutch-db-query (conn sql)
   "Execute SQL on CONN and return a `clutch-db-result'.")
+
+(cl-defgeneric clutch-db-execute-params (conn sql params)
+  "Execute SQL on CONN with positional PARAMS.
+SQL uses `?' placeholders.  PARAMS is a list of Elisp values.
+Return the same shape as `clutch-db-query'.")
+
+(cl-defmethod clutch-db-execute-params ((conn t) sql params)
+  "Fallback parameter execution for CONN by literal substitution.
+Substitute PARAMS into SQL before calling `clutch-db-query'."
+  (clutch-db-query
+   conn
+   (clutch-db-substitute-params
+    sql params
+    (lambda (value)
+      (cond
+       ((null value) "NULL")
+       ((numberp value) (number-to-string value))
+       ((stringp value) (clutch-db-escape-literal conn value))
+       ((and (listp value)
+             (clutch-db-format-temporal value))
+        (clutch-db-escape-literal conn (clutch-db-format-temporal value)))
+       ((or (hash-table-p value) (vectorp value))
+        (clutch-db-escape-literal
+         conn
+         (clutch--json-serialize-text value "parameter value")))
+       (t
+        (clutch-db-escape-literal conn (format "%S" value))))))))
 
 (cl-defgeneric clutch-db-interrupt-query (conn)
   "Interrupt the current query on CONN.
@@ -408,6 +488,35 @@ the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
 
 (cl-defgeneric clutch-db-escape-literal (conn value)
   "Escape VALUE as a SQL string literal for CONN's dialect.")
+
+(defun clutch-db-substitute-params (sql params render-fn)
+  "Return SQL with PARAMS substituted using RENDER-FN.
+SQL uses `?' positional placeholders.  PARAMS is a list of parameter values.
+RENDER-FN is called once per parameter and must return the replacement string."
+  (let ((len (length sql))
+        (pos 0)
+        (remaining params)
+        parts)
+    (while (< pos len)
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+          (progn
+            (push (substring sql pos skip) parts)
+            (setq pos skip))
+        (let ((ch (aref sql pos)))
+          (if (= ch ??)
+              (progn
+                (unless remaining
+                  (signal 'clutch-db-error
+                          (list (format "Not enough parameters for SQL template: %s" sql))))
+                (push (funcall render-fn (car remaining)) parts)
+                (setq remaining (cdr remaining))
+                (cl-incf pos))
+            (push (string ch) parts)
+            (cl-incf pos)))))
+    (when remaining
+      (signal 'clutch-db-error
+              (list (format "Too many parameters for SQL template: %s" sql))))
+    (apply #'concat (nreverse parts))))
 
 ;; Schema
 
@@ -531,6 +640,17 @@ other backend-specific keys as needed.")
 (cl-defgeneric clutch-db-table-comment (conn table)
   "Return the comment string for TABLE on CONN, or nil if none.")
 
+(cl-defgeneric clutch-db-table-comment-async (conn table callback &optional errback)
+  "Start an asynchronous table-comment fetch for TABLE on CONN.
+CALLBACK receives the comment string or nil on success.  ERRBACK receives an
+error message string on failure.  Return non-nil when async fetch was started,
+nil when unsupported.")
+
+(cl-defmethod clutch-db-table-comment-async ((_conn t) _table _callback
+                                             &optional _errback)
+  "Backends without asynchronous table-comment support return nil."
+  nil)
+
 (cl-defgeneric clutch-db-primary-key-columns (conn table)
   "Return a list of primary key column name strings for TABLE on CONN.")
 
@@ -595,10 +715,21 @@ BACKEND is a symbol (e.g., \\='mysql, \\='pg).
 PARAMS is a plist of connection parameters (:host, :port, :user,
 :password, :database, etc.).
 Returns a backend-specific connection object."
-  (if-let* ((feature-plist (alist-get backend clutch-db--backend-features))
-             (connect-fn (progn
-                           (require (plist-get feature-plist :require))
-                           (plist-get feature-plist :connect-fn))))
+  (if-let* ((feature-plist
+             (or (alist-get backend clutch-db--backend-features)
+                 (progn
+                   (require 'clutch-db-jdbc nil t)
+                   (alist-get backend clutch-db--backend-features))))
+            (connect-fn
+             (progn
+               (condition-case err
+                   (require (plist-get feature-plist :require))
+                 (file-missing
+                  (pcase backend
+                    ('mysql (user-error "MySQL backend requires the mysql package"))
+                    ('pg (user-error "PostgreSQL backend requires the pg package"))
+                    (_ (signal (car err) (cdr err))))))
+               (plist-get feature-plist :connect-fn))))
       (condition-case err
           (let ((conn (funcall connect-fn params)))
             (clutch-db-init-connection conn)

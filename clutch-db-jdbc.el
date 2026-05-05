@@ -2,6 +2,13 @@
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1"))
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;; This file is part of clutch.
 
 ;; clutch is free software: you can redistribute it and/or modify
@@ -577,7 +584,7 @@ TIMEOUT-SECONDS overrides the default wait time.  Signals
 
 (defun clutch-jdbc--remember-error-response (conn op response)
   "Remember JDBC error RESPONSE for CONN and OP, and return its details plist.
-When CONN is nil, just return the details snapshot for the current failure."
+When CONN is nil, return the details snapshot for the current failure."
   (when-let* ((details (clutch-jdbc--error-details-from-response op response)))
     (when conn
       (puthash conn details clutch-jdbc--error-details-by-conn))
@@ -701,22 +708,19 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
     p))
 
 (defun clutch-jdbc--setup-prerequisites (driver)
-  "Ensure agent jar and DRIVER jar are present, offering to download if missing."
+  "Ensure agent jar and DRIVER jar are present."
   (let ((jar (clutch-jdbc--agent-jar)))
     (unless (and (file-exists-p jar) (clutch-jdbc--agent-jar-valid-p jar))
-      (if (y-or-n-p "JDBC agent not found.  Download from GitHub? ")
-          (clutch-jdbc--download-agent-jar)
-        (user-error "Run M-x clutch-jdbc-ensure-agent to install the JDBC agent"))))
+      (user-error "JDBC agent not found.  Run M-x clutch-jdbc-ensure-agent")))
   (when-let* ((spec (alist-get driver clutch-jdbc--driver-sources))
               (filename (plist-get spec :filename))
               (dest (expand-file-name filename (clutch-jdbc--drivers-dir))))
     (unless (file-exists-p dest)
       (cond
        ((plist-get spec :maven)
-        (if (y-or-n-p (format "%s driver not found.  Download from Maven Central? "
-                              (capitalize (symbol-name driver))))
-            (clutch-jdbc-install-driver driver)
-          (user-error "Run M-x clutch-jdbc-install-driver RET %s" driver)))
+        (user-error "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
+                    (capitalize (symbol-name driver))
+                    driver))
        ((plist-get spec :manual)
         (user-error "%s driver requires manual download.\nURL: %s\nPlace as: %s"
                     (capitalize (symbol-name driver))
@@ -764,14 +768,13 @@ Returns a `clutch-jdbc-conn'."
 ;; inside clutch-db-jdbc-connect without requiring a redundant :driver key
 ;; in the user's params plist (:backend is stripped by clutch--build-conn
 ;; before the connect-fn is called).
-(with-eval-after-load 'clutch-db
-  (dolist (driver clutch-jdbc--jdbc-drivers)
-    (unless (alist-get driver clutch-db--backend-features)
-      (let ((drv driver))
-        (push (cons drv
-                    (list :require 'clutch-db-jdbc
-                          :connect-fn (lambda (p) (clutch-db-jdbc-connect drv p))))
-              clutch-db--backend-features)))))
+(dolist (driver clutch-jdbc--jdbc-drivers)
+  (unless (alist-get driver clutch-db--backend-features)
+    (let ((drv driver))
+      (push (cons drv
+                  (list :require 'clutch-db-jdbc
+                        :connect-fn (lambda (p) (clutch-db-jdbc-connect drv p))))
+            clutch-db--backend-features))))
 
 ;;;; Lifecycle methods
 
@@ -1287,6 +1290,25 @@ Call CALLBACK on success or ERRBACK on failure."
      (lambda (result)
        (when callback
          (funcall callback (plist-get result :columns))))
+     errback
+     rpc-timeout
+     conn)
+    t))
+
+(cl-defmethod clutch-db-list-columns-async ((conn clutch-jdbc-conn) table callback
+                                            &optional errback)
+  "Fetch JDBC column names for TABLE on CONN asynchronously."
+  (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
+    (clutch-jdbc--rpc-async
+     "get-columns"
+     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+       (table . ,table)
+       ,@(clutch-jdbc--metadata-scope-params conn))
+     (lambda (result)
+       (when callback
+         (funcall callback
+                  (mapcar (lambda (col) (plist-get col :name))
+                          (plist-get result :columns)))))
      errback
      rpc-timeout
      conn)

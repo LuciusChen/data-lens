@@ -1,5 +1,12 @@
 ;;; clutch-edit.el --- Staged result edit and insert workflow -*- lexical-binding: t; -*-
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1"))
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;;; Commentary:
 
 ;; Internal result editing, insert, and staged mutation helpers loaded from `clutch.el'.
@@ -30,17 +37,19 @@
 (declare-function clutch--execute "clutch-query" (sql &optional conn))
 (declare-function clutch--format-value "clutch-query" (value))
 (declare-function clutch--json-value-to-string "clutch-query" (value))
-(declare-function clutch--run-db-query "clutch-connection" (conn sql))
+(declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
 (declare-function clutch--sql-find-top-level-clause "clutch-query"
                   (sql pattern &optional start))
 (declare-function clutch--sql-normalize-for-rewrite "clutch-query" (sql))
 (declare-function clutch--string-pad "clutch-query" (s width &optional pad-left numeric))
 (declare-function clutch--value-to-literal "clutch" (val))
 (declare-function clutch--humanize-db-error "clutch-query" (msg))
+(declare-function clutch--refresh-footer-line "clutch-ui" ())
 (declare-function clutch--refresh-display "clutch-ui" ())
+(declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
 (declare-function clutch-result--selected-row-indices "clutch" ())
 (declare-function clutch-db-escape-identifier "clutch-db" (conn name))
-(declare-function clutch-db-escape-literal "clutch-db" (conn value))
+(declare-function clutch-db-substitute-params "clutch-db" (sql params render-fn))
 (declare-function clutch-db-foreign-keys "clutch-db" (conn table))
 (declare-function clutch-db-primary-key-columns "clutch-db" (conn table))
 
@@ -112,7 +121,7 @@ Scans text properties across the line."
 (defvar-local clutch-result-edit-json--field-name nil
   "Field name for the current JSON sub-editor.")
 
-(defvar clutch-result-edit-mode-map
+(defvar clutch--result-edit-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'clutch-result-edit-finish)
     (define-key map (kbd "C-c C-k") #'clutch-result-edit-cancel)
@@ -123,18 +132,17 @@ Scans text properties across the line."
     map)
   "Keymap for the cell edit buffer.")
 
-;;;###autoload
-(define-minor-mode clutch-result-edit-mode
+(define-minor-mode clutch--result-edit-mode
   "Minor mode for editing a database cell value.
-\\<clutch-result-edit-mode-map>
+\\<clutch--result-edit-mode-map>
 \\[clutch-result-edit-finish]  Accept edit
 \\[clutch-result-edit-cancel]  Cancel
 \\[clutch-result-edit-complete-field]  Complete enum/bool-like values
 \\[clutch-result-edit-set-current-time]  Set temporal field to now
 \\[clutch-result-edit-json-field]  Open JSON editor"
   :lighter " DB-Edit"
-  :keymap clutch-result-edit-mode-map
-  (if clutch-result-edit-mode
+  :keymap clutch--result-edit-mode-map
+  (if clutch--result-edit-mode
       (add-hook 'after-change-functions #'clutch-result-edit--after-change nil t)
     (remove-hook 'after-change-functions #'clutch-result-edit--after-change t)
     (clutch-result-edit--cancel-validation-timer)
@@ -403,7 +411,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
   (let* ((nrows (length clutch--result-rows))
          (iidx (- ridx nrows)))
     (unless (and (>= iidx 0) (< iidx (length clutch--pending-inserts)))
-      (user-error "No pending insertion at this row"))
+      (user-error "No staged insert at this row"))
     (let ((table (or (clutch-result--detect-table)
                      (user-error "Cannot detect source table")))
           (fields (nth iidx clutch--pending-inserts)))
@@ -417,7 +425,10 @@ When RESTORER is non-nil, run it in PARENT before switching back."
                                         (user-error "No cell at point"))))
     (if (>= ridx (length clutch--result-rows))
         (clutch-result--edit-pending-insert ridx)
-      (let* ((col-name (nth cidx clutch--result-columns))
+      (let* ((op "edit cell")
+             (table (clutch--result-source-table-or-user-error op))
+             (_pk-indices (clutch--result-pk-indices-or-user-error table op))
+             (col-name (nth cidx clutch--result-columns))
              (col-def (nth cidx clutch--result-column-defs))
              (detail (clutch-result--column-detail (current-buffer) col-name))
              (result-buf (current-buffer))
@@ -427,7 +438,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
           (erase-buffer)
           (insert (clutch-result--editable-field-string val col-def detail))
           (goto-char (point-min))
-          (clutch-result-edit-mode 1)
+          (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name col-name
                       clutch-result-edit--column-def col-def
                       clutch-result-edit--column-detail detail
@@ -475,7 +486,8 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
   (quit-window 'kill))
 
 (defun clutch-result--apply-edit (ridx cidx new-value)
-  "Record edit for row RIDX, column CIDX with NEW-VALUE and refresh display."
+  "Record edit for row RIDX, column CIDX with NEW-VALUE.
+Refresh the affected row and footer in place when possible."
   (let* ((table (clutch--result-source-table-or-user-error "Stage UPDATE"))
          (pk-indices (clutch--result-pk-indices-or-user-error table "Stage UPDATE"))
          (display-rows (or clutch--filtered-rows clutch--result-rows))
@@ -490,14 +502,16 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
         (if existing
             (setcdr existing new-value)
           (push (cons key new-value) clutch--pending-edits)))))
-  (clutch--refresh-display)
+  (clutch--replace-row-at-index ridx)
+  (clutch--refresh-footer-line)
+  (force-mode-line-update)
   (if clutch--pending-edits
-      (message "%d pending edit%s — C-c C-c to commit"
+      (message "%d staged edit%s — C-c C-c to commit"
                (length clutch--pending-edits)
                (if (= (length clutch--pending-edits) 1) "" "s"))
     (message "Edit reverted to original")))
 
-;;;; Commit pending changes
+;;;; Commit staged changes
 
 (defun clutch-result--table-from-sql (sql)
   "Extract the first table name from the FROM clause of SQL.
@@ -574,50 +588,61 @@ Returns hash-table mapping pk-vec -> list of (cidx . new-value)."
       (push (cons cidx val) (gethash pk-vec ht)))
     ht))
 
-(defun clutch--sql-has-top-level-where-p (sql)
-  "Return non-nil if SQL has a top-level WHERE clause."
-  (clutch--sql-find-top-level-clause
-   (clutch--sql-normalize-for-rewrite sql) "WHERE"))
-
 (defun clutch-result--ensure-where-guard (statements op-name)
   "Ensure every statement in STATEMENTS has a top-level WHERE for OP-NAME."
   (dolist (stmt statements)
-    (unless (clutch--sql-has-top-level-where-p stmt)
+    (unless (clutch--sql-find-top-level-clause
+             (clutch--sql-normalize-for-rewrite stmt) "WHERE")
       (user-error "%s blocked: statement without WHERE: %s"
                   op-name
                   (truncate-string-to-width (string-trim stmt) 120 nil nil "…")))))
 
 (defun clutch--pk-where-parts (conn pk-names pk-values)
-  "Build WHERE clause parts for PK-NAMES with PK-VALUES using CONN."
-  (cl-mapcar (lambda (col val)
-               (format "%s %s"
-                       (clutch-db-escape-identifier conn col)
-                       (if (null val) "IS NULL"
-                         (format "= %s" (clutch--value-to-literal val)))))
-             pk-names pk-values))
+  "Return `(PARTS . PARAMS)' for PK-NAMES with PK-VALUES using CONN.
+NULL primary-key values stay literal as `IS NULL' and are not added to
+the parameter list."
+  (let (parts params)
+    (cl-mapc
+     (lambda (col val)
+       (let ((column-sql (clutch-db-escape-identifier conn col)))
+         (if (null val)
+             (push (format "%s IS NULL" column-sql) parts)
+           (push (format "%s = ?" column-sql) parts)
+           (push val params))))
+     pk-names pk-values)
+    (cons (nreverse parts) (nreverse params))))
+
+(defun clutch-result--render-statements (statements)
+  "Return preview SQL strings for mutation STATEMENTS."
+  (mapcar (lambda (statement)
+            (pcase-let ((`(,sql . ,params) statement))
+              (clutch-db-substitute-params sql params #'clutch--value-to-literal)))
+          statements))
 
 (defun clutch-result--build-update-stmt (table pk-vec edits col-names pk-names)
-  "Build an UPDATE statement for TABLE.
+  "Build an UPDATE statement spec for TABLE.
 PK-VEC is the primary key vector, EDITS is a list of (cidx . value),
 COL-NAMES are column names, PK-NAMES are primary key column names."
   (let ((conn clutch-connection))
-    (let ((set-parts
-           (mapcar (lambda (e)
-                     (format "%s = %s"
-                             (clutch-db-escape-identifier
-                              conn (nth (car e) col-names))
-                             (clutch--value-to-literal (cdr e))))
-                   edits))
-          (where-parts (clutch--pk-where-parts conn pk-names (append pk-vec nil))))
-      (format "UPDATE %s SET %s WHERE %s"
-              (clutch-db-escape-identifier conn table)
-              (mapconcat #'identity set-parts ", ")
-              (mapconcat #'identity where-parts " AND ")))))
+    (let ((set-parts nil)
+          (set-params nil)
+          (where-spec (clutch--pk-where-parts conn pk-names (append pk-vec nil))))
+      (dolist (edit edits)
+        (push (format "%s = ?"
+                      (clutch-db-escape-identifier
+                       conn (nth (car edit) col-names)))
+              set-parts)
+        (push (cdr edit) set-params))
+      (cons (format "UPDATE %s SET %s WHERE %s"
+                    (clutch-db-escape-identifier conn table)
+                    (mapconcat #'identity (nreverse set-parts) ", ")
+                    (mapconcat #'identity (car where-spec) " AND "))
+            (append (nreverse set-params) (cdr where-spec))))))
 
 (defun clutch-result--build-update-statements ()
-  "Build UPDATE statements from `clutch--pending-edits'."
+  "Build UPDATE statement specs from staged edits."
   (unless clutch--pending-edits
-    (user-error "No pending edits"))
+    (user-error "No staged edits"))
   (let* ((table (clutch--result-source-table-or-user-error "Build UPDATE"))
          (pk-indices (clutch--result-pk-indices-or-user-error table "Build UPDATE"))
          (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
@@ -633,7 +658,7 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
     statements))
 
 (defun clutch-result--build-pending-insert-statements ()
-  "Build INSERT statements from `clutch--pending-inserts'."
+  "Build INSERT statement specs from staged inserts."
   (let ((table (or (clutch-result--detect-table)
                    (user-error "Cannot detect source table"))))
     (mapcar (lambda (fields)
@@ -641,45 +666,54 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
             clutch--pending-inserts)))
 
 (defun clutch-result--build-pending-delete-statements ()
-  "Build DELETE statements from `clutch--pending-deletes'."
+  "Build DELETE statement specs from staged deletes."
   (let* ((table (clutch--result-source-table-or-user-error "Build DELETE"))
          (pk-indices (clutch--result-pk-indices-or-user-error table "Build DELETE"))
          (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
          (conn clutch-connection))
     (mapcar (lambda (pk-vec)
-              (let ((where-parts
+              (let ((where-spec
                      (clutch--pk-where-parts conn pk-names (append pk-vec nil))))
-                (format "DELETE FROM %s WHERE %s"
-                        (clutch-db-escape-identifier conn table)
-                        (mapconcat #'identity where-parts " AND "))))
+                (cons (format "DELETE FROM %s WHERE %s"
+                              (clutch-db-escape-identifier conn table)
+                              (mapconcat #'identity (car where-spec) " AND "))
+                      (cdr where-spec))))
             clutch--pending-deletes)))
 
 ;;;###autoload
 (defun clutch-result-commit ()
-  "Commit all pending changes: INSERT new rows, UPDATE edits, DELETE staged rows.
+  "Commit all staged changes: INSERT new rows, UPDATE edits, DELETE rows.
 Executes in order: INSERTs first, then UPDATEs, then DELETEs."
   (interactive)
   (unless (or clutch--pending-edits clutch--pending-deletes clutch--pending-inserts)
-    (user-error "No pending changes"))
+    (user-error "No staged changes"))
   (let* ((insert-stmts (when clutch--pending-inserts
                          (clutch-result--build-pending-insert-statements)))
          (update-stmts (when clutch--pending-edits
                          (clutch-result--build-update-statements)))
          (delete-stmts (when clutch--pending-deletes
                          (clutch-result--build-pending-delete-statements)))
+         (insert-preview (when insert-stmts
+                           (clutch-result--render-statements insert-stmts)))
+         (update-preview (when update-stmts
+                           (clutch-result--render-statements update-stmts)))
+         (delete-preview (when delete-stmts
+                           (clutch-result--render-statements delete-stmts)))
          (all-stmts (append insert-stmts update-stmts delete-stmts))
-         (sql-text (mapconcat (lambda (s) (concat s ";")) all-stmts "\n")))
-    (clutch-result--ensure-where-guard delete-stmts "DELETE")
-    (clutch-result--ensure-where-guard update-stmts "UPDATE")
+         (preview-stmts (append insert-preview update-preview delete-preview))
+         (sql-text (mapconcat (lambda (s) (concat s ";")) preview-stmts "\n")))
+    (clutch-result--ensure-where-guard delete-preview "DELETE")
+    (clutch-result--ensure-where-guard update-preview "UPDATE")
     (when (yes-or-no-p (format "Execute %d statement%s?\n\n%s\n\nProceed? "
                                (length all-stmts)
                                (if (= (length all-stmts) 1) "" "s")
                                sql-text))
       (dolist (stmt all-stmts)
-        (condition-case err
-            (clutch--run-db-query clutch-connection stmt)
+        (pcase-let ((`(,sql . ,params) stmt))
+          (condition-case err
+              (clutch--run-db-query clutch-connection sql params)
           (clutch-db-error
-           (user-error "%s" (clutch--humanize-db-error (error-message-string err))))))
+           (user-error "%s" (clutch--humanize-db-error (error-message-string err)))))))
       (setq clutch--pending-edits nil
             clutch--pending-deletes nil
             clutch--pending-inserts nil
@@ -692,16 +726,17 @@ Executes in order: INSERTs first, then UPDATEs, then DELETEs."
 ;;;; Delete rows
 
 (defun clutch-result--build-delete-stmt (table row col-names pk-indices)
-  "Build a DELETE statement for TABLE.
+  "Build a DELETE statement spec for TABLE.
 ROW is the row data, COL-NAMES are column names,
 PK-INDICES are primary key column indices."
   (let* ((conn clutch-connection)
          (pk-names (mapcar (lambda (pki) (nth pki col-names)) pk-indices))
          (pk-values (mapcar (lambda (pki) (nth pki row)) pk-indices))
-         (where-parts (clutch--pk-where-parts conn pk-names pk-values)))
-    (format "DELETE FROM %s WHERE %s"
-            (clutch-db-escape-identifier conn table)
-            (mapconcat #'identity where-parts " AND "))))
+         (where-spec (clutch--pk-where-parts conn pk-names pk-values)))
+    (cons (format "DELETE FROM %s WHERE %s"
+                  (clutch-db-escape-identifier conn table)
+                  (mapconcat #'identity (car where-spec) " AND "))
+          (cdr where-spec))))
 
 ;;;###autoload
 (defun clutch-result-delete-rows ()
@@ -716,7 +751,10 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     (dolist (ridx indices)
       (let ((pv (clutch-result--extract-pk-vec (nth ridx display-rows) pk-indices)))
         (cl-pushnew pv clutch--pending-deletes :test #'equal)))
-    (clutch--refresh-display)
+    (dolist (ridx indices)
+      (clutch--replace-row-at-index ridx))
+    (clutch--refresh-footer-line)
+    (force-mode-line-update)
     (message "%d row%s staged for deletion — C-c C-c to commit"
              (length indices)
              (if (= (length indices) 1) "" "s"))))
@@ -747,26 +785,25 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 (defvar clutch-result-insert-mode-hook nil
   "Hook run after `clutch-result-insert-mode' is enabled.")
 
-(defvar clutch-result-insert-major-mode-map clutch-result-insert-mode-map
-  "Keymap used internally by `clutch-result-insert-major-mode'.")
+(defvar clutch--result-insert-major-mode-map clutch-result-insert-mode-map
+  "Keymap used internally by `clutch--result-insert-major-mode'.")
 
-(defvar clutch-result-insert-major-mode-hook nil
-  "Internal hook run after `clutch-result-insert-major-mode' is enabled.")
+(defvar clutch--result-insert-major-mode-hook nil
+  "Internal hook run after `clutch--result-insert-major-mode' is enabled.")
 
-(defvar clutch-result-insert-json-mode-map
+(defvar clutch--result-insert-json-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'clutch-result-insert-json-finish)
     (define-key map (kbd "C-c C-k") #'clutch-result-insert-json-cancel)
     map)
   "Keymap for the `insert-buffer' JSON editor.")
 
-;;;###autoload
-(define-minor-mode clutch-result-insert-json-mode
+(define-minor-mode clutch--result-insert-json-mode
   "Minor mode for editing JSON values from the insert buffer."
   :lighter " DB-Insert-JSON"
-  :keymap clutch-result-insert-json-mode-map)
+  :keymap clutch--result-insert-json-mode-map)
 
-(define-derived-mode clutch-result-insert-major-mode text-mode "clutch-insert"
+(define-derived-mode clutch--result-insert-major-mode text-mode "clutch-insert"
   "Major mode for editing a new row to INSERT.
 \\<clutch-result-insert-mode-map>
 \\[clutch-result-insert-commit]	stage row insertion
@@ -779,9 +816,9 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 ;;;###autoload
 (defun clutch-result-insert-mode (&optional _arg)
-  "Activate `clutch-result-insert-major-mode', ignoring optional ARG."
+  "Activate `clutch--result-insert-major-mode', ignoring optional ARG."
   (interactive)
-  (clutch-result-insert-major-mode)
+  (clutch--result-insert-major-mode)
   (run-hooks 'clutch-result-insert-mode-hook))
 
 (defvar-local clutch-result-insert--result-buffer nil
@@ -806,7 +843,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   "Cached schema detail plists keyed by column name for the insert buffer.")
 
 (defvar-local clutch-result-insert--pending-index nil
-  "Pending insert index being edited, or nil for a new staged insertion.")
+  "Staged insert index being edited, or nil for a new insert.")
 
 (defvar-local clutch-result-insert--fields nil
   "Structured field state for the current insert buffer.")
@@ -1118,7 +1155,8 @@ All field types use the same delay so feedback timing is consistent."
          (plain-width (string-width (concat col-name tag-text)))
          (gap-width (max 0 (- clutch-result-insert--label-width plain-width)))
          (name-part (clutch--string-pad
-                     (propertize col-name 'face 'clutch-insert-field-name-face)
+                     (propertize col-name
+                                 'face 'clutch-field-name-face)
                      (+ (string-width col-name) gap-width)))
          (tag-part (when tags
                      (propertize tag-text
@@ -1140,10 +1178,13 @@ All field types use the same delay so feedback timing is consistent."
 
 (defun clutch-result-insert--json-editor-mode ()
   "Select the best available major mode for JSON field editing."
-  (cond
-   ((fboundp 'json-ts-mode) (json-ts-mode))
-   ((fboundp 'js-mode) (js-mode))
-   (t (text-mode))))
+  (unless (and (fboundp 'json-ts-mode)
+               (condition-case nil
+                   (progn (json-ts-mode) t)
+                 (error nil)))
+    (cond
+     ((fboundp 'js-mode) (js-mode))
+     (t (text-mode)))))
 
 (defun clutch--open-json-sub-editor (buffer-name initial-text field-name finish-fn cancel-fn)
   "Open a shared JSON sub-editor buffer and return it.
@@ -1329,14 +1370,14 @@ TIME defaults to `current-time'."
           fallback))))
 
 (defun clutch-result-insert--header-line ()
-  "Return the insert-buffer header line."
+  "Return the insert form header line."
   (format " INSERT into %s [%s]  |  TAB/S-TAB: field  M-TAB: complete  C-c .: now  C-c C-a: %s  C-c C-y: import TSV/CSV  C-c C-c: stage  C-c C-k: cancel"
           clutch-result-insert--table
           (if clutch-result-insert--show-all-fields "all columns" "sparse")
           (if clutch-result-insert--show-all-fields "sparse fields" "all fields")))
 
 (defun clutch-result-insert--refresh-header-line ()
-  "Refresh the insert-buffer header line."
+  "Refresh the insert form header line."
   (setq-local header-line-format (clutch-result-insert--header-line)))
 
 (defun clutch-result-insert--line-prefix-end ()
@@ -1465,7 +1506,7 @@ If nothing handles the completion, fall back to `completing-read'."
                 #'clutch-result-insert-json-finish
                 #'clutch-result-insert-json-cancel)))
       (with-current-buffer buf
-        (clutch-result-insert-json-mode 1)
+        (clutch--result-insert-json-mode 1)
         (setq-local clutch-result-insert-json--parent-buffer parent-buf
                     clutch-result-insert-json--field-name field-name))
       buf)))
@@ -1648,7 +1689,7 @@ fields until the user expands to all columns."
           (clutch-result-insert--filter-clone-fields
            table
            (or (nth (- ridx nrows) clutch--pending-inserts)
-               (user-error "No pending insertion at this row")))
+               (user-error "No staged insert at this row")))
         (let* ((display-rows (or clutch--filtered-rows clutch--result-rows))
                (row (or (nth ridx display-rows)
                         (user-error "No row at point")))
@@ -1809,7 +1850,7 @@ ROWS is a list of string lists."
                nil)))
 
 (defun clutch-result-insert--stage-imported-rows (rows)
-  "Stage imported ROWS as pending inserts in the parent result buffer."
+  "Stage imported ROWS as inserts in the parent result buffer."
   (unless (buffer-live-p clutch-result-insert--result-buffer)
     (user-error "Result buffer no longer exists"))
   (with-current-buffer clutch-result-insert--result-buffer
@@ -1824,9 +1865,10 @@ ROWS is a list of string lists."
 ;;;###autoload
 (defun clutch-result-insert-import-delimited (&optional text)
   "Import TSV or CSV into the current insert buffer.
-Uses the active region when present; otherwise reads from the current kill.
-Single-row imports prefill the current form.  Multi-row imports stage pending
-inserts immediately."
+Uses TEXT when non-nil.
+Otherwise reads from the active region or the current kill.
+Single-row imports prefill the current form.  Multi-row imports stage inserts
+immediately."
   (interactive)
   (clutch-result-insert--sync-fields-from-buffer)
   (pcase-let* ((raw (or text (clutch-result-insert--read-import-text)))
@@ -1973,17 +2015,23 @@ Skips columns with empty values."
     (clutch-result-insert--validate-field (car field) (cdr field))))
 
 (defun clutch-result-insert--build-sql (conn table fields)
-  "Build an INSERT SQL string for TABLE with FIELDS using CONN.
+  "Build an INSERT statement spec for TABLE with FIELDS using CONN.
 FIELDS is an alist of (column-name . value-string)."
-  (let ((cols (mapconcat (lambda (f) (clutch-db-escape-identifier conn (car f)))
+  (let ((cols (mapconcat (lambda (field)
+                           (clutch-db-escape-identifier conn (car field)))
                          fields ", "))
-        (vals (mapconcat (lambda (f)
-                           (let ((v (cdr f)))
-                             (if (string= (upcase v) "NULL") "NULL"
-                               (clutch-db-escape-literal conn v))))
-                         fields ", ")))
-    (format "INSERT INTO %s (%s) VALUES (%s)"
-            (clutch-db-escape-identifier conn table) cols vals)))
+        (placeholders (mapconcat (lambda (_field) "?") fields ", "))
+        (params (mapcar (lambda (field)
+                          (let ((value (cdr field)))
+                            (if (string= (upcase value) "NULL")
+                                nil
+                              value)))
+                        fields)))
+    (cons (format "INSERT INTO %s (%s) VALUES (%s)"
+                  (clutch-db-escape-identifier conn table)
+                  cols
+                  placeholders)
+          params)))
 
 ;;;###autoload
 (defun clutch-result-insert-commit ()
@@ -2002,12 +2050,12 @@ Use \\[clutch-result-commit] in the result buffer to commit."
       (if pending-index
           (if-let* ((cell (nthcdr pending-index clutch--pending-inserts)))
               (setcar cell fields)
-            (user-error "Pending insertion no longer exists"))
+            (user-error "Staged insert no longer exists"))
         (setq clutch--pending-inserts
               (append clutch--pending-inserts (list fields))))
       (clutch--refresh-display)
       (if pending-index
-          (message "Pending insertion updated — C-c C-c to commit")
+          (message "Staged insert updated — C-c C-c to commit")
         (message "%d insertion%s staged — C-c C-c to commit"
                  (length clutch--pending-inserts)
                  (if (= (length clutch--pending-inserts) 1) "" "s"))))))

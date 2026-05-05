@@ -1,5 +1,12 @@
 ;;; clutch-ui.el --- Result rendering and icon helpers -*- lexical-binding: t; -*-
 
+;; Author: Lucius Chen <chenyh572@gmail.com>
+;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1"))
+;; Keywords: data, tools
+;; URL: https://github.com/LuciusChen/clutch
+
 ;;; Commentary:
 
 ;; Internal result rendering and icon helpers loaded from `clutch.el'.
@@ -7,6 +14,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'clutch-compat)
 
 (defvar clutch--executing-p)
 (declare-function clutch--spinner-string "clutch-connection" ())
@@ -33,10 +41,20 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "Column index currently highlighted in the header, or nil.")
 (defvar-local clutch--footer-base-string nil
   "Static portion of mode-line footer (pagination, sort, etc.).")
+(defvar-local clutch--footer-display-cache nil
+  "Cached complete footer string returned by `:eval'.
+Assembled from segment caches by `clutch--assemble-footer-display'.")
+(defvar-local clutch--footer-timing-cache nil
+  "Cached timing segment string for the footer.")
+(defvar-local clutch--footer-cursor-cache nil
+  "Cached cursor position segment string for the footer.")
+(defvar-local clutch--footer-filters-cache nil
+  "Cached filter/aggregate segment string for the footer.")
 (defvar-local clutch--header-line-string nil
   "Full header-line string before hscroll adjustment.")
 (defvar-local clutch--last-window-width nil
   "Last known window body width for the current result buffer.")
+(defvar clutch--last-query)
 (defvar-local clutch--marked-rows nil
   "List of marked row indices.")
 (defvar-local clutch--order-by nil
@@ -48,11 +66,13 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (defvar-local clutch--pending-deletes nil
   "List of pk-value vectors staged for deletion.")
 (defvar-local clutch--pending-edits nil
-  "Alist of pending edits: ((PK-VEC . COL-IDX) . NEW-VALUE).")
+  "Alist of staged edits: ((PK-VEC . COL-IDX) . NEW-VALUE).")
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.")
 (defvar-local clutch--query-elapsed nil
   "Elapsed time in seconds for the last query execution.")
+(defvar-local clutch--result-source-table nil
+  "Detected source table name for the current result buffer, or nil.")
 (defvar-local clutch--result-column-defs nil
   "Full column definition plists from the last result.")
 (defvar-local clutch--result-columns nil
@@ -107,6 +127,7 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--compute-column-widths "clutch-query" (col-names rows columns))
 (declare-function clutch--cached-column-details "clutch-schema" (conn table))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
+(declare-function clutch--ensure-column-details-async "clutch-schema" (conn table))
 (declare-function clutch--format-elapsed "clutch-query" (seconds))
 (declare-function clutch--format-value "clutch-query" (value))
 (declare-function clutch--numeric-type-p "clutch-query" (col-def))
@@ -122,12 +143,129 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch-result--extract-pk-vec "clutch-edit" (row pk-indices))
 (declare-function clutch-result--row-idx-at-line "clutch-edit" ())
 (declare-function clutch-result-mode "clutch" (&optional arg))
+(declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch-db-result-affected-rows "clutch-db" (result))
 (declare-function clutch-db-result-columns "clutch-db" (result))
 (declare-function clutch-db-result-connection "clutch-db" (result))
 (declare-function clutch-db-result-last-insert-id "clutch-db" (result))
 (declare-function clutch-db-result-rows "clutch-db" (result))
 (declare-function clutch-db-result-warnings "clutch-db" (result))
+
+(defcustom clutch-column-displayers nil
+  "Per-table/per-column display functions for result cells.
+Each entry is (TABLE-NAME . ((COLUMN-NAME . FUNCTION) ...)).
+TABLE-NAME and COLUMN-NAME are matched case-insensitively.
+FUNCTION receives the raw cell value and must return a string, which may
+include text properties.  Return nil to fall back to default rendering."
+  :type '(alist :key-type string
+                :value-type (alist :key-type string :value-type function))
+  :group 'clutch)
+
+(defun clutch--case-insensitive-string= (left right)
+  "Return non-nil when LEFT and RIGHT match case-insensitively."
+  (and (stringp left)
+       (stringp right)
+       (string= (downcase left) (downcase right))))
+
+(defun clutch--lookup-column-displayer (table column)
+  "Return registered displayer for TABLE and COLUMN, or nil."
+  (when-let* ((table-entry
+               (cl-assoc table clutch-column-displayers
+                         :test #'clutch--case-insensitive-string=))
+              (column-entry
+               (cl-assoc column (cdr table-entry)
+                         :test #'clutch--case-insensitive-string=)))
+    (cdr column-entry)))
+
+(defun clutch-register-column-displayer (table column function)
+  "Register FUNCTION as the renderer for COLUMN in TABLE.
+FUNCTION receives the raw cell value and should return a string.  Return
+nil from FUNCTION to fall back to default display.
+
+Examples:
+
+  ;; Show JSON column as a compact summary.
+  (clutch-register-column-displayer \"orders\" \"metadata\"
+    (lambda (value)
+      (when (stringp value)
+        (ignore-errors
+          (format \"{%d keys}\"
+                  (hash-table-count (json-parse-string value)))))))
+
+  ;; Show a URL as a clickable button.
+  (clutch-register-column-displayer \"bookmarks\" \"url\"
+    (lambda (value)
+      (when (stringp value)
+        (propertize (truncate-string-to-width value 40 nil nil \"…\")
+                    (quote face) (quote link)
+                    (quote help-echo) value))))
+
+  ;; Map numeric status codes to styled labels.
+  (clutch-register-column-displayer \"tasks\" \"status\"
+    (lambda (value)
+      (pcase value
+        (0 (propertize \"pending\" (quote face) (quote warning)))
+        (1 (propertize \"active\" (quote face) (quote success)))
+        (2 (propertize \"done\" (quote face) (quote shadow))))))"
+  (unless (stringp table)
+    (signal 'wrong-type-argument (list 'stringp table)))
+  (unless (stringp column)
+    (signal 'wrong-type-argument (list 'stringp column)))
+  (unless (functionp function)
+    (signal 'wrong-type-argument (list 'functionp function)))
+  (if-let* ((table-entry
+             (cl-assoc table clutch-column-displayers
+                       :test #'clutch--case-insensitive-string=)))
+      (progn
+        (setcar table-entry table)
+        (if-let* ((column-entry
+                   (cl-assoc column (cdr table-entry)
+                             :test #'clutch--case-insensitive-string=)))
+            (progn
+              (setcar column-entry column)
+              (setcdr column-entry function))
+          (setcdr table-entry (cons (cons column function) (cdr table-entry)))))
+    (push (cons table (list (cons column function))) clutch-column-displayers))
+  function)
+
+(defun clutch-unregister-column-displayer (table column)
+  "Remove any custom displayer for COLUMN in TABLE."
+  (unless (stringp table)
+    (signal 'wrong-type-argument (list 'stringp table)))
+  (unless (stringp column)
+    (signal 'wrong-type-argument (list 'stringp column)))
+  (when-let* ((table-entry
+               (cl-assoc table clutch-column-displayers
+                         :test #'clutch--case-insensitive-string=)))
+    (setcdr table-entry
+            (cl-remove-if
+             (lambda (column-entry)
+               (clutch--case-insensitive-string=
+                (car-safe column-entry) column))
+             (cdr table-entry)))
+    (when (null (cdr table-entry))
+      (setq clutch-column-displayers
+            (delq table-entry clutch-column-displayers))))
+  nil)
+
+(defun clutch--cell-custom-display (value col-def)
+  "Return custom display string for VALUE in COL-DEF, or nil."
+  (when-let* ((table clutch--result-source-table)
+              (column (plist-get col-def :name))
+              (displayer (clutch--lookup-column-displayer table column)))
+    (condition-case err
+        (let ((display (funcall displayer value)))
+          (cond
+           ((null display) nil)
+           ((stringp display) display)
+           (t
+            (message "clutch column displayer %s.%s returned %S, falling back"
+                     table column display)
+            nil)))
+      (error
+       (message "clutch column displayer %s.%s failed: %s"
+                table column (error-message-string err))
+       nil))))
 
 (defun clutch--nerd-icons-available-p ()
   "Return non-nil when nerd-icons is loaded and usable."
@@ -296,7 +434,7 @@ column-local commands still work from padded whitespace."
              (lead (make-string (car pads) ?\s))
              (trail (make-string (cdr pads) ?\s))
              (cell (concat lead truncated trail))
-             (face 'clutch-header-face)
+             (face 'clutch-field-name-face)
              (pad-str (make-string padding ?\s))
              (body nil))
         ;; Append base face so icon-specific face (e.g. pin color) is preserved.
@@ -321,18 +459,22 @@ column-local commands still work from padded whitespace."
 
 (defun clutch--cell-display-content (val w col-def edited)
   "Return the unpadded display string for a cell value VAL in width W.
-COL-DEF is the column definition plist, EDITED is the pending edit cons or nil."
+COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
   (let* ((display-val (if edited (cdr edited) val))
-         (special-placeholder (and (not edited)
+         (custom (clutch--cell-custom-display display-val col-def))
+         (special-placeholder (and (not custom)
+                                   (not edited)
                                    (clutch--cell-placeholder-value display-val)))
-         (s (or special-placeholder
-                (replace-regexp-in-string "\n" "↵"
-                                          (clutch--format-value display-val))))
-         (placeholder (and (not edited)
+         (s (and (not custom)
+                 (or special-placeholder
+                     (replace-regexp-in-string "\n" "↵"
+                                               (clutch--format-value display-val)))))
+         (placeholder (and (not custom)
+                           (not edited)
                            (not special-placeholder)
                            (> (string-width s) w)
                            (clutch--value-placeholder display-val col-def)))
-         (formatted (or placeholder s)))
+         (formatted (or custom placeholder s)))
     (if (> (string-width formatted) w)
         (truncate-string-to-width formatted w)
       formatted)))
@@ -354,7 +496,7 @@ COL-DEF is the column definition plist, EDITED is the pending edit cons or nil."
 
 (defun clutch--build-render-state ()
   "Return hash-table lookups for the current result render.
-These tables avoid repeated linear scans through pending UI state while
+These tables avoid repeated linear scans through staged UI state while
 rendering large result pages."
   (let ((edit-table (make-hash-table :test 'equal))
         (edit-row-table (make-hash-table :test 'equal))
@@ -375,7 +517,7 @@ rendering large result pages."
           :pk-indices clutch--cached-pk-indices)))
 
 (defun clutch--render-edit-entry (row _ridx cidx render-state)
-  "Return pending edit entry for ROW/CIDX from RENDER-STATE, or nil."
+  "Return staged edit entry for ROW/CIDX from RENDER-STATE, or nil."
   (let* ((edits (plist-get render-state :edits))
          (pk-indices (plist-get render-state :pk-indices)))
     (and pk-indices
@@ -383,7 +525,7 @@ rendering large result pages."
                   edits))))
 
 (defun clutch--row-pending-edit-p (row _ridx render-state)
-  "Return non-nil when ROW has any pending edit in RENDER-STATE."
+  "Return non-nil when ROW has any staged edit in RENDER-STATE."
   (let* ((edit-rows (plist-get render-state :edit-rows))
          (pk-indices (plist-get render-state :pk-indices)))
     (and pk-indices
@@ -430,6 +572,48 @@ Returns a propertized string."
                        (clutch--render-cell row ridx cidx widths render-state))
                      visible-cols "")
           (propertize "│" 'face 'clutch-border-face)))
+
+(defun clutch--render-row-line (ridx render-state)
+  "Return the rendered buffer line string for row RIDX.
+RENDER-STATE carries cached lookup tables for staged row state."
+  (let* ((rows (or clutch--filtered-rows clutch--result-rows))
+         (row (nth ridx rows))
+         (visible-cols (clutch--visible-columns))
+         (widths (clutch--effective-widths))
+         (nw (clutch--row-number-digits))
+         (global-first-row (* clutch--page-current clutch-result-max-rows))
+         (bface 'clutch-border-face)
+         (pad-str (make-string clutch-column-padding ?\s))
+         (marked-table (plist-get render-state :marked))
+         (delete-table (plist-get render-state :deletes))
+         (pk-indices (plist-get render-state :pk-indices))
+         (deletingp (and pk-indices
+                         (gethash (clutch-result--extract-pk-vec row pk-indices)
+                                  delete-table)))
+         (editedp (clutch--row-pending-edit-p row ridx render-state))
+         (data-row (let ((rendered (clutch--render-row
+                                    row ridx visible-cols widths render-state)))
+                     (if deletingp
+                         (propertize rendered 'face 'clutch-pending-delete-face)
+                       rendered)))
+         (mark-char (cond (deletingp "D")
+                          (editedp "E")
+                          ((gethash ridx marked-table) "*")
+                          (t " ")))
+         (num-label (string-pad
+                     (number-to-string
+                      (1+ (+ global-first-row ridx)))
+                     nw nil t))
+         (num-face (cond (deletingp 'clutch-pending-delete-face)
+                         (editedp 'clutch-modified-face)
+                         ((gethash ridx marked-table) 'clutch-marked-face)
+                         (t 'shadow))))
+    (concat (propertize "│" 'face bface)
+            (propertize mark-char 'face num-face)
+            (propertize num-label 'face num-face)
+            pad-str
+            data-row
+            "\n")))
 
 (defun clutch--footer-row-summary (row-count total-rows)
   "Build propertized row count display for the footer.
@@ -593,6 +777,7 @@ the page length.  TOTAL-ROWS describes the full result size when known."
     (when (and ridx cidx)
       (let* ((hi 'font-lock-keyword-face)
              (dim 'font-lock-comment-face)
+             (total-cols (length clutch--result-columns))
              (raw-name (or (nth cidx clutch--result-columns) ""))
              (col-name (if (> (length raw-name) 20)
                            (concat (substring raw-name 0 17) "...")
@@ -600,7 +785,8 @@ the page length.  TOTAL-ROWS describes the full result size when known."
         (concat (clutch--footer-icon '(mdicon . "nf-md-cursor_default_click_outline") "⌖" hi)
                 (propertize (format "R-%d" (1+ ridx)) 'face hi)
                 (propertize ":" 'face dim)
-                (propertize col-name 'face hi))))))
+                (propertize (format "%s-%d/%d" col-name (1+ cidx) total-cols)
+                            'face hi))))))
 
 (defun clutch--render-footer (row-count page-num page-size total-rows)
   "Return the static footer string for pagination state.
@@ -613,19 +799,42 @@ the page length.  TOTAL-ROWS describes the full result size when known."
                sep)))
 
 (defun clutch--footer-mode-line-display ()
-  "Return the display-ready mode-line string with dynamic cursor position."
+  "Return the cached footer string for mode-line display.
+The cache is rebuilt by `clutch--refresh-footer-display'."
+  (or clutch--footer-display-cache ""))
+
+(defun clutch--assemble-footer-display ()
+  "Assemble `clutch--footer-display-cache' from cached segments."
   (let ((badge (clutch--disconnected-badge))
         (base (or clutch--footer-base-string ""))
-        (timing (clutch--footer-timing-part))
-        (filters (clutch--footer-filter-parts))
-        (cursor (clutch--footer-cursor-part))
+        (timing clutch--footer-timing-cache)
+        (filters clutch--footer-filters-cache)
+        (cursor clutch--footer-cursor-cache)
         (sep (propertize "  •  " 'face 'font-lock-comment-face)))
-    (concat (propertize " " 'display '(space :align-to 0))
-            (when badge (concat badge sep))
-            base
-            (when timing (concat sep timing))
-            (when filters (concat sep (string-join filters sep)))
-            (when cursor (concat sep cursor)))))
+    (setq clutch--footer-display-cache
+          (concat (propertize " " 'display '(space :align-to 0))
+                  (when badge (concat badge sep))
+                  base
+                  (when timing (concat sep timing))
+                  (when filters (concat sep (string-join filters sep)))
+                  (when cursor (concat sep cursor))))))
+
+(defun clutch--refresh-footer-display ()
+  "Rebuild all footer segments and assemble the cached display string."
+  (setq clutch--footer-timing-cache (clutch--footer-timing-part)
+        clutch--footer-cursor-cache (clutch--footer-cursor-part)
+        clutch--footer-filters-cache (clutch--footer-filter-parts))
+  (clutch--assemble-footer-display))
+
+(defun clutch--refresh-footer-timing ()
+  "Rebuild only the timing segment and reassemble the footer."
+  (setq clutch--footer-timing-cache (clutch--footer-timing-part))
+  (clutch--assemble-footer-display))
+
+(defun clutch--refresh-footer-cursor ()
+  "Rebuild only the cursor segment and reassemble the footer."
+  (setq clutch--footer-cursor-cache (clutch--footer-cursor-part))
+  (clutch--assemble-footer-display))
 
 (defun clutch--effective-widths ()
   "Return column widths adjusted for header indicator icons.
@@ -672,6 +881,43 @@ Returns a list of detail plists aligned with COL-NAMES, or nil."
                 (gethash (downcase name) by-name))
               col-names))))
 
+(defun clutch--cached-result-column-details (conn sql col-names)
+  "Return cached result column details for COL-NAMES, or nil when unavailable.
+Uses CONN and SQL to detect the source table, but does not trigger synchronous
+metadata loading."
+  (when-let* ((table (when sql
+                       (clutch-result--table-from-sql sql)))
+              (details (clutch--cached-column-details conn table)))
+    (let ((by-name (make-hash-table :test 'equal)))
+      (dolist (detail details)
+        (puthash (downcase (plist-get detail :name)) detail by-name))
+      (mapcar (lambda (name)
+                (gethash (downcase name) by-name))
+              col-names))))
+
+(defun clutch--queue-result-column-details-enrichment (conn sql)
+  "Start async result column-detail preheat for CONN and SQL when needed."
+  (when-let* ((table (when sql
+                       (clutch-result--table-from-sql sql)))
+              ((not (clutch--cached-column-details conn table))))
+    (clutch--ensure-column-details-async conn table)))
+
+(defun clutch--refresh-result-metadata-buffers (conn table)
+  "Refresh cached result column metadata for live result buffers on CONN/TABLE."
+  (when-let* ((conn-key (and conn (clutch--connection-key conn))))
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and (derived-mode-p 'clutch-result-mode)
+                     clutch-connection
+                     clutch--result-columns
+                     clutch--last-query
+                     (string= (clutch--connection-key clutch-connection) conn-key)
+                     (equal (clutch-result--table-from-sql clutch--last-query) table))
+            (setq-local clutch--result-column-details
+                        (clutch--cached-result-column-details
+                         clutch-connection clutch--last-query clutch--result-columns))))))))
+
 (defun clutch--header-cell (cidx widths &optional active-cidx)
   "Build a single header cell string for column CIDX.
 WIDTHS is the effective width vector.
@@ -686,26 +932,27 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (lead (make-string (car pads) ?\s))
          (trail (make-string (cdr pads) ?\s))
          (label (copy-sequence truncated))
-         (face (cond
-                ((eql cidx active-cidx) 'clutch-header-active-face)
-                (t 'clutch-header-face)))
+         (active-p (eql cidx active-cidx))
+         (base-face 'clutch-field-name-face)
          (pad-str (make-string clutch-column-padding ?\s))
          (body nil))
     ;; Append base/underline style without overwriting icon-specific face.
-    (add-face-text-property 0 (length label)
-                            (list :inherit face :underline t)
-                            'append label)
+    (add-face-text-property 0 (length label) base-face 'append label)
+    (when active-p
+      (add-face-text-property 0 (length label) 'clutch-header-active-face
+                              'append label))
+    (add-face-text-property 0 (length label) '(:underline t) 'append label)
     ;; Keep sort/pin icons un-underlined for cleaner visual hierarchy.
     (dotimes (i (length label))
       (when (get-text-property i 'clutch-header-icon label)
-        (let ((icon-face (or (get-text-property i 'face label) face)))
+        (let ((icon-face (or (get-text-property i 'face label) base-face)))
           (put-text-property i (1+ i) 'face
                              (list '(:underline nil) icon-face)
                              label))))
     (setq body (concat pad-str
-                       (propertize lead 'face face)
+                       (propertize lead 'face base-face)
                        label
-                       (propertize trail 'face face)
+                       (propertize trail 'face base-face)
                        pad-str))
     (add-text-properties 0 (length body)
                          `(clutch-header-col ,cidx)
@@ -746,55 +993,22 @@ The header-line should track body hscroll exactly."
   (concat (propertize " " 'display '(space :align-to 0))
           (or (clutch--header-line-with-hscroll) "")))
 
-(defun clutch--insert-data-rows (rows visible-cols widths nw
-                                      global-first-row row-positions render-state)
+(defun clutch--insert-data-rows (rows row-positions render-state)
   "Insert data ROWS into the current buffer.
-VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
-GLOBAL-FIRST-ROW is the 0-based offset for numbering.
 ROW-POSITIONS stores line starts keyed by rendered row index.
-RENDER-STATE contains render lookup tables for pending UI state."
-  (let ((bface 'clutch-border-face)
-        (pad-str (make-string clutch-column-padding ?\s))
-        (marked-table (plist-get render-state :marked))
-        (delete-table (plist-get render-state :deletes))
-        (pk-indices (plist-get render-state :pk-indices)))
-    (cl-loop for row in rows
-             for ridx from 0
-             do (aset row-positions ridx (point))
-             for deletingp = (and pk-indices
-                                  (gethash (clutch-result--extract-pk-vec row pk-indices)
-                                           delete-table))
-             for editedp = (clutch--row-pending-edit-p row ridx render-state)
-             for data-row = (let ((r (clutch--render-row
-                                      row ridx visible-cols widths render-state)))
-                               (if deletingp
-                                   (propertize r 'face 'clutch-pending-delete-face)
-                                 r))
-             for mark-char = (cond (deletingp "D")
-                                   (editedp "E")
-                                   ((gethash ridx marked-table) "*")
-                                   (t " "))
-             for num-label = (string-pad
-                              (number-to-string
-                               (1+ (+ global-first-row ridx)))
-                              nw nil t)
-             for num-face = (cond (deletingp 'clutch-pending-delete-face)
-                                  (editedp 'clutch-modified-face)
-                                  ((gethash ridx marked-table) 'clutch-marked-face)
-                                  (t 'shadow))
-             do (insert (propertize "│" 'face bface)
-                        (propertize mark-char 'face num-face)
-                        (propertize num-label 'face num-face)
-                        pad-str
-                        data-row "\n"))))
+RENDER-STATE contains render lookup tables for staged UI state."
+  (cl-loop for _row in rows
+           for ridx from 0
+           do (aset row-positions ridx (point))
+           do (insert (clutch--render-row-line ridx render-state))))
 
 (defun clutch--insert-pending-insert-rows (visible-cols widths nw nrows row-positions
                                                         render-state)
-  "Append ghost rows for pending inserts below the real data rows.
+  "Append ghost rows for staged inserts below the real data rows.
 VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
 NROWS is the count of real rows (used to compute ghost row indices).
 ROW-POSITIONS stores line starts keyed by rendered row index.
-RENDER-STATE contains render lookup tables for pending UI state."
+RENDER-STATE contains render lookup tables for staged UI state."
   (let ((bface 'clutch-border-face)
         (pad-str (make-string clutch-column-padding ?\s))
         (insert-placeholders (plist-get render-state :insert-placeholders)))
@@ -818,19 +1032,35 @@ RENDER-STATE contains render lookup tables for pending UI state."
                         pad-str
                         data-row "\n"))))
 
-(defun clutch--update-result-line-formats (rows visible-cols widths nw)
+(defun clutch--refresh-header-line ()
+  "Rebuild the header-line format without touching the table body."
+  (if clutch--column-widths
+      (let* ((visible-cols (clutch--visible-columns))
+             (widths (clutch--effective-widths))
+             (nw (clutch--row-number-digits)))
+        (setq clutch--header-line-string
+              (clutch--build-header-line visible-cols widths nw
+                                         clutch--header-active-col))
+        (setq header-line-format '(:eval (clutch--header-line-display))))
+    (setq clutch--header-line-string nil
+          header-line-format nil)))
+
+(defun clutch--refresh-footer-line ()
+  "Rebuild the mode-line footer format without touching the table body."
+  (let ((rows (or clutch--filtered-rows clutch--result-rows)))
+    (setq clutch--footer-base-string
+          (clutch--render-footer
+           (length rows) clutch--page-current
+           clutch-result-max-rows clutch--page-total-rows))
+    (setq mode-line-format '(:eval (clutch--footer-mode-line-display)))
+    (clutch--refresh-footer-display)))
+
+(defun clutch--update-result-line-formats (_rows _visible-cols _widths _nw)
   "Set `mode-line-format' and `header-line-format' for the result buffer.
 ROWS, VISIBLE-COLS, and WIDTHS define the rendered table, and NW is the
 available window width."
-  (setq clutch--footer-base-string
-        (clutch--render-footer
-         (length rows) clutch--page-current
-         clutch-result-max-rows clutch--page-total-rows))
-  (setq mode-line-format '(:eval (clutch--footer-mode-line-display)))
-  (setq clutch--header-line-string
-        (clutch--build-header-line visible-cols widths nw
-                                   clutch--header-active-col))
-  (setq header-line-format '(:eval (clutch--header-line-display))))
+  (clutch--refresh-footer-line)
+  (clutch--refresh-header-line))
 
 (defun clutch--render-result ()
   "Render the result buffer content as one horizontally scrollable table.
@@ -846,18 +1076,72 @@ Preserves point position (row + column) across the render."
          (nw (clutch--row-number-digits))
          (row-positions (make-vector (+ (length rows)
                                         (length clutch--pending-inserts))
-                                     nil))
-         (global-first-row (* clutch--page-current clutch-result-max-rows)))
+                                     nil)))
     (erase-buffer)
     (setq clutch--row-start-positions row-positions)
     (clutch--update-result-line-formats rows visible-cols widths nw)
-    (clutch--insert-data-rows rows visible-cols widths nw global-first-row
-                              row-positions render-state)
+    (clutch--insert-data-rows rows row-positions render-state)
     (clutch--insert-pending-insert-rows visible-cols widths nw (length rows)
                                         row-positions render-state)
     (if save-ridx
         (clutch--goto-cell save-ridx save-cidx)
       (goto-char (point-min)))))
+
+(defun clutch--reindex-row-starts-from (ridx)
+  "Recompute `clutch--row-start-positions' from RIDX to the end of the buffer."
+  (when (and (vectorp clutch--row-start-positions)
+             (integerp ridx)
+             (<= 0 ridx)
+             (< ridx (length clutch--row-start-positions)))
+    (let ((line-pos (aref clutch--row-start-positions ridx))
+          (idx ridx)
+          (len (length clutch--row-start-positions)))
+      (when line-pos
+        (save-excursion
+          (goto-char line-pos)
+          (while (and (< idx len)
+                      (< (point) (point-max)))
+            (aset clutch--row-start-positions idx (point))
+            (setq idx (1+ idx))
+            (forward-line 1))
+          (while (< idx len)
+            (aset clutch--row-start-positions idx nil)
+            (setq idx (1+ idx))))))))
+
+(defun clutch--replace-row-at-index (ridx)
+  "Re-render row RIDX in place without a full body redraw.
+Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
+  (let* ((rows (or clutch--filtered-rows clutch--result-rows))
+         (nrows (length rows))
+         (line-pos (and (vectorp clutch--row-start-positions)
+                        (integerp ridx)
+                        (<= 0 ridx)
+                        (< ridx (length clutch--row-start-positions))
+                        (aref clutch--row-start-positions ridx))))
+    (if (or (not line-pos)
+            (not (integerp ridx))
+            (< ridx 0)
+            (>= ridx nrows))
+        (clutch--refresh-display)
+      (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
+             (save-cidx (get-text-property (point) 'clutch-col-idx))
+             (next-pos (and (< (1+ ridx) (length clutch--row-start-positions))
+                            (aref clutch--row-start-positions (1+ ridx))))
+             (end-pos (or next-pos
+                          (save-excursion
+                            (goto-char line-pos)
+                            (forward-line 1)
+                            (point))))
+             (render-state (clutch--build-render-state))
+             (line (clutch--render-row-line ridx render-state))
+             (inhibit-read-only t))
+        (save-excursion
+          (goto-char line-pos)
+          (delete-region line-pos end-pos)
+          (insert line))
+        (clutch--reindex-row-starts-from ridx)
+        (when save-ridx
+          (clutch--goto-cell save-ridx save-cidx))))))
 
 (defun clutch--col-idx-at-point ()
   "Return the column index at point, from data cells."
@@ -1001,8 +1285,7 @@ IGNORE-BUFFER, when non-nil, is excluded from the check."
            (buffer-list)))
 
 (defun clutch--disable-window-size-hook-if-unused (&optional ignore-buffer)
-  "Remove the global `window-size-change-functions' hook.
-Do so when no result buffers remain.
+  "Remove the window-size hook when no result buffers remain.
 IGNORE-BUFFER is excluded from liveness checks."
   (when (and clutch--window-size-hook-enabled
              (not (clutch--has-live-result-buffer-p ignore-buffer)))
@@ -1016,6 +1299,7 @@ IGNORE-BUFFER is excluded from liveness checks."
 (defun clutch--display-select-result (col-names rows columns)
   "Render a SELECT result with COL-NAMES, ROWS, and COLUMNS metadata."
   (let ((inhibit-read-only t))
+    (setq-local clutch--result-source-table (clutch-result--detect-table))
     (setq-local clutch--column-widths
                 (clutch--compute-column-widths
                  col-names rows columns))
@@ -1026,6 +1310,7 @@ IGNORE-BUFFER is excluded from liveness checks."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (setq-local clutch--dml-result t)
+    (setq-local clutch--result-source-table nil)
     (setq-local clutch--column-widths nil)
     (insert (propertize (format "-- %s\n" (string-trim sql))
                         'face 'font-lock-comment-face))
@@ -1083,8 +1368,10 @@ If the result has columns, shows a table; otherwise shows DML summary."
           (progn
             (clutch--init-select-result-state col-names columns rows)
             (setq-local clutch--result-column-details
-                        (clutch--resolve-result-column-details
+                        (clutch--cached-result-column-details
                          (clutch-db-result-connection result) sql col-names))
+            (clutch--queue-result-column-details-enrichment
+             (clutch-db-result-connection result) sql)
             (clutch--display-select-result col-names rows columns))
         (clutch--display-dml-result result sql elapsed)))
     (clutch--show-result-buffer buf)))

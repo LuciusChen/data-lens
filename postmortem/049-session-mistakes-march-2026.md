@@ -25,7 +25,7 @@ continued to fail with ORA-12514 until the next session caught the mismatch.
 pattern contains indentation-sensitive context, any variation in surrounding
 whitespace causes a silent non-match rather than an error.
 
-**Rule**: See CLAUDE.md pre-commit checklist.
+**Rule**: See AGENTS.md pre-commit checklist.
 
 ---
 
@@ -45,10 +45,10 @@ should not have been staged.
 ### Root cause
 
 The commit was assembled without running `git diff HEAD` to read every changed
-line.  The CLAUDE.md pre-commit checklist requires reading the full diff first,
+line.  The AGENTS.md pre-commit checklist requires reading the full diff first,
 but that step was skipped.
 
-**Rule**: See CLAUDE.md pre-commit checklist.
+**Rule**: See AGENTS.md pre-commit checklist.
 
 ---
 
@@ -67,4 +67,4 @@ Closing an issue is a visible, external action.  It was treated as a local
 action (like staging a file) when it is not.  The backtick problem was caused
 by not quoting shell special characters in the heredoc body.
 
-**Rule**: See CLAUDE.md pre-commit checklist.
+**Rule**: See AGENTS.md pre-commit checklist.

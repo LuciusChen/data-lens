@@ -14,11 +14,11 @@ Emacs users lack a seamless, integrated database client that operates within the
 ### Solution
 
 clutch integrates directly into Emacs, offering:
-- Pure Elisp protocol implementations (no external dependencies for MySQL/PostgreSQL)
+- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages
 - Interactive SQL editing with completion
 - Unified transient-based mutation workflow (edit/delete/insert with staged preview/commit)
 - Schema caching and intelligent completion
-- Org-Babel integration for literate database notebooks
+- Optional Org-Babel integration via the separate `ob-clutch` package
 
 ### Target Users
 
@@ -60,11 +60,11 @@ clutch follows a **layered, interface-based architecture** with clear separation
          │             │             │                  │
          v             v             v                  v
     ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌──────────────┐
-    │mysql.el │  │  pg.el  │  │ Emacs    │  │ Java 17+ JVM │
-    │(pure    │  │(pure    │  │ 29+ built│  │ process +    │
-    │ Elisp   │  │ Elisp   │  │ -in      │  │ JDBC drivers │
-    │ wire    │  │ wire    │  │ sqlite-* │  │              │
-    │protocol)│  │protocol)│  │ functions│  │              │
+    │mysql    │  │ upstream│  │ Emacs    │  │ Java 17+ JVM │
+    │(external │ │ pg-el   │  │ 29.1+    │  │ process +    │
+    │ pure     │ │ package)│  │ -in      │  │ JDBC drivers │
+    │ Elisp)   │ │         │  │ sqlite-* │  │              │
+    │          │ │         │  │ functions│  │              │
     └─────────┘  └─────────┘  └──────────┘  └──────────────┘
 ```
 
@@ -76,11 +76,11 @@ clutch follows a **layered, interface-based architecture** with clear separation
 | `clutch-db.el` | ~300 | Generic interface: `cl-defgeneric` definitions, result struct, shared helpers |
 | `clutch-db-mysql.el` | ~320 | MySQL backend adapter, type-category mapping |
 | `clutch-db-pg.el` | ~350 | PostgreSQL backend adapter, OID-to-type mapping |
-| `clutch-db-sqlite.el` | ~330 | SQLite backend adapter (Emacs 29+ `sqlite-*` functions) |
+| `clutch-db-sqlite.el` | ~330 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
 | `clutch-db-jdbc.el` | ~980 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
-| `ob-clutch.el` | ~265 | Org-Babel integration: connection caching, header argument parsing |
-| `mysql.el` | ~1460 | Pure Elisp MySQL wire protocol (no external CLI) |
-| `pg.el` | ~970 | Pure Elisp PostgreSQL wire protocol v3 |
+| External dependency: `mysql` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
+| External dependency: `pg` | n/a | PostgreSQL client from upstream `pg-el` (separate package) |
+| Optional package: `ob-clutch` | n/a | Org-Babel integration bridge (separate package) |
 
 For JDBC-backed databases, one logical clutch connection now maps to two JDBC
 sessions inside the sidecar:
@@ -98,8 +98,8 @@ user queries on the same JDBC session.
 
 | Backend | Emacs Version | Implementation | Notes |
 |---------|---------------|----------------|-------|
-| **MySQL** | 28.1+ | `mysql.el` | No external CLI; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
-| **PostgreSQL** | 28.1+ | `pg.el` | Wire protocol v3; supports PG 12+ |
+| **MySQL** | 28.1+ | `mysql` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
+| **PostgreSQL** | 28.1+ | `pg` | External `pg-el` package; supports PG 12+ |
 | **SQLite** | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
 
 ### JDBC Backends (via JVM Sidecar)
@@ -147,22 +147,36 @@ SQL query editing and execution mode. The primary entry point for interacting wi
 | `clutch--executing-p` | Query execution in progress flag |
 | `clutch--executing-sql-start/end` | Region markers for current query |
 | `clutch--last-query` | Last executed SQL string |
-| `clutch--schema-cache` | Table/column names for completion |
-| `clutch--column-details-cache` | PK/FK/default/nullable metadata |
-| `clutch--schema-status` | `ready` / `refreshing` / `stale` / `failed` |
 | `clutch--console-name` | Name for persisting console to disk |
 | `clutch--tables-in-buffer-cache` | Cached `(tick . tables)` for completion |
 | `clutch--tables-in-query-cache` | Cached `(tick beg end . tables)` |
+
+Shared schema metadata consulted by `clutch-mode` lives in global caches keyed
+by `clutch--connection-key`: `clutch--schema-cache`,
+`clutch--column-details-cache`, and `clutch--schema-status-cache`.
 
 **Keybindings**:
 
 | Key | Command | Description |
 |-----|---------|-------------|
 | `C-c C-e` | `clutch-connect` | Connect; query consoles reconnect their own saved connection |
-| `C-c C-c` | `clutch-execute-dwim` | Execute region, or the current `;`-delimited statement / query at point |
+| `C-c C-c` | `clutch-execute-dwim` | Execute the active region, otherwise prefer the current `;`-delimited statement and fall back to the query at point |
+| `C-c C-r` | `clutch-execute-region` | Execute the active region |
+| `C-c C-b` | `clutch-execute-buffer` | Execute the whole buffer |
+| `C-c C-m` | `clutch-commit` | Commit transaction (manual-commit connections only) |
+| `C-c C-u` | `clutch-rollback` | Roll back transaction (manual-commit connections only) |
+| `C-c C-a` | `clutch-toggle-auto-commit` | Toggle auto-commit for the current connection |
+| `C-c C-j` | `clutch-jump` | Resolve an object and run its default action |
+| `C-c C-d` | `clutch-describe-dwim` | Describe the object at point, or prompt |
+| `C-c C-o` | `clutch-act-dwim` | Show object actions for the current object, or prompt |
+| `C-c C-l` | `clutch-switch-schema` | Switch the current schema/database |
+| `C-c C-p` | `clutch-preview-execution-sql` | Preview the current execution payload |
 | `C-c C-s` | `clutch-refresh-schema` | Refresh schema cache |
 | `C-c ?` | Transient dispatch | Main command menu |
-| `TAB` | Completion at point | Table/column name CAPF |
+
+`clutch-mode` also installs a buffer-local xref backend and CAPF pipeline, so
+standard Emacs bindings such as `M-.` and `TAB` keep working through inherited
+xref / completion machinery rather than explicit `define-key` entries.
 
 ---
 
@@ -199,8 +213,10 @@ query is still running.
 | `clutch--where-filter` | Active SQL WHERE clause |
 | `clutch--filter-pattern` | Client-side row filter regex |
 | `clutch--filtered-rows` | Filtered row subset or nil |
-| `clutch--query` | Original query SQL string |
-| `clutch--table-name` | Source table name (for mutations) |
+| `clutch--last-query` | Last executed query SQL string |
+| `clutch--base-query` | Base query used for SQL-backed refinement/filtering |
+| `clutch--query-elapsed` | Elapsed execution time for the current result |
+| `clutch--result-source-table` | Detected source table name (for mutations / metadata enrichment) |
 | `clutch-connection` | Connection from parent clutch-mode buffer |
 
 **Keybindings**:
@@ -210,6 +226,7 @@ query is still running.
 | `RET` | `clutch-result-open-record` | Open record view |
 | `TAB` / `S-TAB` | `clutch-result-next-cell` / `clutch-result-prev-cell` | Move between cells |
 | `n` / `p` | `clutch-result-down-cell` / `clutch-result-up-cell` | Move to next/previous row in same column |
+| `M-n` / `M-p` | `clutch-result-down-cell` / `clutch-result-up-cell` | Alias for next/previous row in same column |
 | `N` / `P` | `clutch-result-next-page` / `clutch-result-prev-page` | Next / previous SQL page |
 | `M-<` / `M->` | `clutch-result-first-page` / `clutch-result-last-page` | First / last SQL page |
 | `]` / `[` | `clutch-result-scroll-right` / `clutch-result-scroll-left` | Page right / left (snap to column border) |
@@ -229,11 +246,13 @@ query is still running.
 | `c` | `clutch-result-copy-dispatch` | Copy transient (TSV / CSV / INSERT / UPDATE) |
 | `e` | `clutch-result-export` | Export all rows (CSV / INSERT / UPDATE copy/file) |
 | `v` | `clutch-result-view-value` | View current cell value |
+| `V` | `clutch-result-live-view-value` | Open the live cell viewer that follows point |
+| `|` | `clutch-result-shell-command-on-cell` | Pipe the current cell through a shell command |
 | `g` | `clutch-result-rerun` | Re-execute original query |
 | `#` | `clutch-result-count-total` | Count total rows |
 | `A` | `clutch-result-aggregate` | Aggregate numeric values |
 | `f` | `clutch-result-fullscreen-toggle` | Toggle fullscreen |
-| `q` | `quit-window` | Close result buffer |
+| `C-c ?` | `clutch-result-dispatch` | Result-buffer transient menu |
 
 **Pending SQL workflow**:
 - Result transient includes a dedicated *Pending* group:
@@ -262,12 +281,33 @@ Full-width inspection of a single row; each field occupies one or more lines.
 
 | Key | Command | Description |
 |-----|---------|-------------|
+| `RET` | `clutch-record-toggle-expand` | Expand/collapse long field, follow FK, or echo short value |
 | `p` | `clutch-record-prev-row` | Previous row |
 | `n` | `clutch-record-next-row` | Next row |
-| `e` | `clutch-record-expand-field` | Expand long field (JSON, BLOB placeholder) |
-| `RET` | `clutch-record-follow-fk` | Follow FK to referenced row |
 | `I` | `clutch-clone-row-to-insert` | Clone current record into a prefilled insert buffer without PK values |
+| `v` | `clutch-record-view-value` | View current field value |
+| `V` | `clutch-record-live-view-value` | Open the live field viewer that follows point |
+| `g` | `clutch-record-refresh` | Re-render the current record |
+| `C-c ?` | `clutch-record-dispatch` | Record-buffer transient menu |
 | `q` | `quit-window` | Close record buffer |
+
+---
+
+### clutch-describe-mode (Object Describe View)
+
+**Derived from**: `special-mode`
+**Buffer name pattern**: `*clutch-describe*`
+
+Read-only object describe view with shared object actions.
+
+**Keybindings**:
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `s` | `clutch-object-show-ddl-or-source` | Show object DDL or source |
+| `g` | `clutch-describe-refresh` | Refresh the current describe buffer |
+| `C-c C-d` | `clutch-describe-dwim` | Describe the object at point, or prompt |
+| `C-c C-o` | `clutch-act-dwim` | Show object actions |
 
 ---
 
@@ -299,7 +339,7 @@ Each field is displayed with:
 ### clutch-repl-mode (Interactive REPL)
 
 **Derived from**: `comint-mode`
-**Buffer name pattern**: `*clutch-repl: NAME*`
+**Buffer name pattern**: `*clutch REPL*`
 
 Line-by-line SQL evaluation with history and inline results.
 
@@ -308,9 +348,25 @@ Line-by-line SQL evaluation with history and inline results.
 - Completion from cached schema (tables, columns)
 - Result display inline or in companion result buffer
 
+**Keybindings**:
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `C-c C-e` | `clutch-connect` | Connect to a database |
+| `C-c C-m` | `clutch-commit` | Commit transaction |
+| `C-c C-u` | `clutch-rollback` | Roll back transaction |
+| `C-c C-a` | `clutch-toggle-auto-commit` | Toggle auto-commit |
+| `C-c C-j` | `clutch-jump` | Resolve an object and run its default action |
+| `C-c C-d` | `clutch-describe-dwim` | Describe the object at point, or prompt |
+| `C-c C-o` | `clutch-act-dwim` | Show object actions |
+| `C-c C-l` | `clutch-switch-schema` | Switch the current schema/database |
+
 ---
 
 ## 6. All Interactive Commands
+
+Section 5 documents per-mode navigation and editing keys.  This section focuses
+on public `M-x` entry points and named commands that users may call directly.
 
 ### Connection
 
@@ -318,51 +374,100 @@ Line-by-line SQL evaluation with history and inline results.
 |---------|-------------|
 | `clutch-connect` | Connect using profile from `clutch-connection-alist` or inline params; query consoles reconnect their associated saved connection |
 | `clutch-disconnect` | Close database connection |
+| `clutch-commit` | Commit the current transaction |
+| `clutch-rollback` | Roll back the current transaction |
+| `clutch-toggle-auto-commit` | Toggle auto-commit / manual-commit mode |
 | `clutch-switch-console` | Switch to a named query console buffer |
 | `clutch-query-console` | Open or switch to a named query console |
 | `clutch-refresh-schema` | Manually refresh schema cache for current connection |
+| `clutch-switch-schema` | Switch the current schema/database on the active connection |
+| `clutch-switch-database` | ClickHouse-only reconnect-based database switch |
+| `clutch-debug-mode` | Toggle the dedicated `*clutch-debug*` capture buffer |
 
 ### Execution
 
 | Command | Description |
 |---------|-------------|
-| `clutch-execute-dwim` | Execute selected region, or the current `;`-delimited statement / query at point |
-| `clutch-execute` | Execute SQL from any buffer |
+| `clutch-preview-execution-sql` | Preview the effective execution payload for the current workflow |
+| `clutch-execute-query-at-point` | Execute the SQL query at point |
 | `clutch-execute-statement-at-point` | Execute statement using `;` as only delimiter (blank lines preserved) |
-| `clutch--refresh-current-schema` | Refresh schema (sync for native; async for JDBC) |
+| `clutch-execute-dwim` | Execute the active region, otherwise prefer the current `;`-delimited statement and fall back to the query at point |
+| `clutch-execute-region` | Execute the active region |
+| `clutch-execute-buffer` | Execute the whole buffer |
+| `clutch-execute` | Execute SQL from any buffer using the current/live clutch connection |
+| `clutch-edit-indirect` | Open the current region/string/line in an indirect SQL edit buffer |
+| `clutch-indirect-execute` | Execute SQL from the indirect edit buffer and close it |
+| `clutch-indirect-abort` | Abort the indirect edit buffer |
 
-### Result Buffer
+### Mode / Buffer Entry Points
 
 | Command | Description |
 |---------|-------------|
+| `clutch-mode` | SQL editing major mode |
+| `clutch-result-mode` | Result-table major mode |
+| `clutch-record-mode` | Single-record detail major mode |
+| `clutch-result-insert-mode` | Insert-form major mode wrapper |
+| `clutch-describe-mode` | Object describe major mode |
+| `clutch-repl-mode` | REPL major mode |
+| `clutch-repl` | Open the shared `*clutch REPL*` buffer |
+
+### Result / Mutation Workflow
+
+| Command | Description |
+|---------|-------------|
+| `clutch-result-open-record` | Open the Record buffer for the row at point |
 | `clutch-result-edit-cell` | Stage an edit to the current cell |
-| `clutch-result-delete-row` | Stage the current row for deletion |
-| `clutch-result-insert-row` | Open insert buffer for the result table |
-| `clutch-result-mark-row` | Mark/unmark row for bulk operations |
-| `clutch-result-commit-mutations` | Preview and execute staged mutations |
-| `clutch-result-discard-mutations` | Discard all pending changes |
-| `clutch-result-sort` | Set ORDER BY column/direction |
-| `clutch-result-where-filter` | Apply SQL WHERE clause |
-| `clutch-result-filter` | Apply client-side regex filter |
-| `clutch-result-widen-column` | Increase active column display width |
-| `clutch-result-narrow-column` | Decrease active column display width |
-| `clutch-result-copy-cell` | Copy current cell value to kill ring |
-| `clutch-result-refresh` | Reload current page |
-| `clutch-result-goto-cell` | Open FK, expand BLOB/JSON, or view record |
-| `clutch-result-page-down` | Next row page |
-| `clutch-result-page-up` | Previous row page |
-| `clutch-result-scroll-right` | Page right, snapping to the next column border |
-| `clutch-result-scroll-left` | Page left, snapping to the previous column border |
-| `clutch-result-column-info` | Show column type/nullable/default info at point |
+| `clutch-result-delete-rows` | Stage the current row or region rows for deletion |
+| `clutch-result-insert-row` | Open an insert buffer for the result table |
+| `clutch-clone-row-to-insert` | Clone the current row/record into a prefilled insert buffer |
+| `clutch-result-commit` | Confirm and execute staged INSERT/UPDATE/DELETE changes |
+| `clutch-result-discard-pending-at-point` | Discard the staged change at point |
+| `clutch-result-copy-pending-sql` | Copy the exact staged SQL batch |
+| `clutch-result-save-pending-sql` | Save the exact staged SQL batch to a file |
+| `clutch-result-rerun` | Re-execute the current result query |
+| `clutch-result-count-total` | Query total row count for the current result |
+| `clutch-result-aggregate` | Aggregate numeric values over the current cell/selection |
+| `clutch-result-filter` | Apply a client-side fuzzy filter |
+| `clutch-result-apply-filter` | Apply an SQL-backed WHERE filter |
+| `clutch-result-sort-by-column` | Apply ascending SQL ORDER BY for the current column |
+| `clutch-result-sort-by-column-desc` | Apply descending SQL ORDER BY for the current column |
+| `clutch-result-column-info` | Show column type/default/nullability info at point |
+| `clutch-result-view-value` | Open the value viewer for the current cell |
+| `clutch-result-live-view-value` | Open the live value viewer for the current cell |
+| `clutch-result-shell-command-on-cell` | Pipe the current cell through a shell command |
+| `clutch-result-goto-column` | Jump to a result column by name |
+| `clutch-result-scroll-right` / `clutch-result-scroll-left` | Horizontal result paging aligned to column borders |
+| `clutch-result-widen-column` / `clutch-result-narrow-column` | Adjust current column width |
+| `clutch-result-fullscreen-toggle` | Toggle fullscreen display of the current result |
+| `clutch-result-next-page` / `clutch-result-prev-page` | Move to the next / previous SQL page |
+| `clutch-result-first-page` / `clutch-result-last-page` | Jump to the first / last SQL page |
+| `clutch-result-next-cell` / `clutch-result-prev-cell` | Move across cells |
+| `clutch-result-down-cell` / `clutch-result-up-cell` | Move down/up within the current column |
+| `clutch-result-copy-tsv` / `clutch-result-copy-csv` | Copy the current cell/selection as TSV / CSV |
+| `clutch-result-copy-insert` / `clutch-result-copy-update` | Copy rows as INSERT / UPDATE statements |
+| `clutch-result-copy-dispatch` | Open the copy transient |
+| `clutch-result-export` | Export all rows as CSV / INSERT / UPDATE (copy or file) |
+| `clutch-refine-mode` | Transient refine mode for excluding rows/columns before copy/aggregate |
+| `clutch-refine-toggle-row` / `clutch-refine-toggle-col` | Refine-mode row/column exclusion toggles |
+| `clutch-refine-confirm` / `clutch-refine-cancel` | Confirm / cancel refine mode |
 
-### Export
+### Insert / Edit Helpers
 
 | Command | Description |
 |---------|-------------|
-| `clutch-result-export-csv` | Export result as CSV (encoding choice dialog) |
-| `clutch-result-export-tsv` | Export result as TSV |
-| `clutch-result-export-json` | Export result as JSON array |
-| `clutch-result-export-org` | Export result as Org table |
+| `clutch-result-edit-complete-field` | Complete enum/bool-like edit values |
+| `clutch-result-edit-set-current-time` | Fill the current temporal edit field with “now” |
+| `clutch-result-edit-json-field` | Open the JSON sub-editor for the current edit field |
+| `clutch-result-edit-finish` / `clutch-result-edit-cancel` | Confirm / cancel the single-cell edit buffer |
+| `clutch-result-insert-next-field` / `clutch-result-insert-prev-field` | Move between insert fields |
+| `clutch-result-insert-submit-field` | Accept the current field and move forward |
+| `clutch-result-insert-complete-field` | Complete enum/bool-like insert values |
+| `clutch-result-insert-fill-current-time` | Fill the current temporal insert field with “now” |
+| `clutch-result-insert-edit-json-field` | Open the insert-form JSON sub-editor |
+| `clutch-result-insert-json-finish` / `clutch-result-insert-json-cancel` | Confirm / cancel the insert-form JSON editor |
+| `clutch-result-insert-toggle-field-layout` | Toggle sparse vs all-column layout |
+| `clutch-result-insert-import-delimited` | Import TSV / CSV into the current insert form |
+| `clutch-result-insert-commit` / `clutch-result-insert-cancel` | Stage / cancel the insert form |
 
 ### Object Workflow
 
@@ -371,8 +476,15 @@ Line-by-line SQL evaluation with history and inline results.
 | `clutch-jump` | Resolve an object and run its default action |
 | `clutch-describe-dwim` | Resolve an object and open its describe view |
 | `clutch-act-dwim` | Resolve an object and show object actions |
-| `clutch-switch-schema` | Switch the effective schema/database for the current connection |
-| `clutch-refresh-schema` | Refresh schema/object metadata from the database |
+| `clutch-describe-refresh` | Refresh the current describe buffer |
+| `clutch-object-show-ddl-or-source` | Show object DDL or source text |
+| `clutch-object-describe` | Describe a specific object entry |
+| `clutch-object-browse` | Insert `SELECT *` for a table-like object into a console |
+| `clutch-object-jump-target` | Jump to the target object of a synonym/index/trigger |
+| `clutch-object-default-action` | Run the resolved object’s default action |
+| `clutch-copy-object-name` / `clutch-copy-object-fqname` | Copy object name / fully qualified name |
+| `clutch-describe-table` / `clutch-describe-table-at-point` | Describe a table explicitly |
+| `clutch-browse-table` | Browse rows for a table-like object |
 
 ### JDBC Management
 
@@ -402,10 +514,13 @@ Connection profile plist keys:
 | `:user` | string | Database user |
 | `:password` | string | Password (prefer auth-source instead) |
 | `:database` | string | Database/schema name |
-| `:backend` | symbol | `mysql`, `pg`, `sqlite`, `oracle`, `sqlserver`, `snowflake`, `redshift`, `db2` |
+| `:sid` | string | Oracle SID when using `@host:port:SID` style connections |
+| `:backend` | symbol | `mysql`, `pg`, `sqlite`, `jdbc`, `clickhouse`, `oracle`, `sqlserver`, `snowflake`, `redshift`, `db2` |
 | `:sql-product` | symbol | SQL highlight product for `sql-mode` |
 | `:pass-entry` | string | Pass store suffix for password lookup |
-| `:url` | string | Full JDBC URL (JDBC backends; overrides host/port/database) |
+| `:ssh-host` | string | OpenSSH host alias from `~/.ssh/config` used for an automatic local tunnel |
+| `:display-name` | string | Friendly backend label shown in the UI |
+| `:url` | string | Full JDBC URL (JDBC backends; overrides host/port/database; not combined with `:ssh-host` in v1) |
 | `:props` | alist | Extra JDBC connection properties |
 | `:manual-commit` | boolean | JDBC only: disable auto-commit for this connection |
 | `:tls` | boolean | Convenience shorthand; maps to backend-native TLS settings |
@@ -425,6 +540,7 @@ Connection profile plist keys:
 | `clutch-column-width-max` | `30` | natnum | Maximum column display width |
 | `clutch-column-width-step` | `5` | natnum | Column width adjustment step |
 | `clutch-column-padding` | `1` | natnum | Padding spaces on each side of a cell |
+| `clutch-column-displayers` | `nil` | alist | Per-table/per-column custom result displayers |
 
 ### SQL and Timeouts
 
@@ -435,8 +551,16 @@ Connection profile plist keys:
 | `clutch-read-idle-timeout-seconds` | `30` | natnum | Read idle timeout (MySQL, PG, JDBC) |
 | `clutch-query-timeout-seconds` | `30` | natnum | Server-side statement timeout (PG, JDBC) |
 | `clutch-jdbc-rpc-timeout-seconds` | `30` | natnum | Global JDBC agent RPC timeout |
-| `clutch-jdbc-cancel-timeout-seconds` | `5` | natnum | JDBC cancel acknowledgement timeout; timeout degrades to disconnect |
-| `clutch-jdbc-disconnect-timeout-seconds` | `5` | natnum | JDBC disconnect acknowledgement timeout; timeout must not kill the agent |
+| `clutch-object-warmup-idle-delay-seconds` | `0.5` | number | Idle delay before background object warmup starts |
+| `clutch-primary-object-types` | `("TABLE" "VIEW" "SYNONYM")` | repeat string | Primary object types used by `clutch-jump` |
+| `clutch-sql-completion-case-style` | `'preserve` | choice | Preserve, lowercase, or uppercase inserted completion text |
+| `clutch-schema-cache-install-batch-size` | `500` | natnum | Batch size for idle schema-cache installation |
+| `clutch-debug-event-limit` | `25` | natnum | Maximum debug events retained in `*clutch-debug*` |
+
+`clutch-jdbc-cancel-timeout-seconds` and
+`clutch-jdbc-disconnect-timeout-seconds` still exist in
+`clutch-db-jdbc.el`, but they are plain internal `defvar`s rather than
+user-facing `defcustom`s.
 
 ### Insert Buffer
 
@@ -478,11 +602,14 @@ Connection profile plist keys:
 | `clutch-header-face` | bold | Column headers in result tables |
 | `clutch-header-active-face` | `hl-line`, bold | Column header under cursor |
 | `clutch-border-face` | shadow | Table borders (│, separators) |
+| `clutch-object-source-face` | shadow-ish accent | Object source/schema annotations |
+| `clutch-object-public-source-face` | accent variant | Public-object source annotations |
+| `clutch-object-type-face` | bold accent | Object type labels |
 | `clutch-null-face` | shadow, italic | NULL cell values |
 | `clutch-modified-face` | Light: #fff3cd bg / Dark: #3d2b00 bg | Pending-edit cell values |
 | `clutch-fk-face` | `font-lock-type-face`, underlined | Foreign key column values |
 | `clutch-marked-face` | `dired-marked` | Dired-style marked rows |
-| `clutch-executed-sql-face` | Light: #eaf5e9 bg / Dark: #223526 bg | Last executed SQL region |
+| `clutch-executed-sql-marker-face` | Light: #eaf5e9 bg / Dark: #223526 bg | Last executed SQL gutter marker |
 | `clutch-pending-delete-face` | Light: #fde8e8 bg, #9b1c1c fg, strikethrough | Rows staged for deletion |
 | `clutch-pending-insert-face` | Light: #e6f4ea bg, #1e4620 fg / Dark: #1a3320 bg | Rows staged for insertion |
 | `clutch-error-position-face` | Light: #fde8e8 bg, wave red / Dark: #3b1212 bg | Character at SQL error position |
@@ -506,6 +633,9 @@ Connection profile plist keys:
                         :database "main"        :tls t))
     ("dev-pg"        . (:host "localhost"       :port 5432   :user "dev"
                         :database "testdb"      :backend pg))
+    ("prod-pg-ssh"   . (:backend pg             :host "pg.internal"
+                        :port 5432              :user "app"
+                        :database "appdb"       :ssh-host "bastion-prod"))
     ("local-sqlite"  . (:backend sqlite         :database "/tmp/test.db"))
     ("oracle-uat"    . (:backend oracle          :host "oradb.uat.local"
                         :port 1521              :user "scott" :database "ORCL"))
@@ -543,30 +673,34 @@ Connection profile plist keys:
 
 | Cache | What | Key |
 |-------|------|-----|
-| `clutch--schema-cache` | Table names, column names/types | Connection identity (`eq`) |
-| `clutch--column-details-cache` | PK, FK, defaults, nullable, generated | Connection identity (`eq`) |
+| `clutch--schema-cache` | Table names, column names/types | `clutch--connection-key` string |
+| `clutch--column-details-cache` | PK, FK, defaults, nullable, generated | `clutch--connection-key` string |
 | `clutch--tables-in-buffer-cache` | Tables in current SQL buffer | `(tick . table-list)` |
 | `clutch--tables-in-query-cache` | Tables in last executed query | `(tick beg end . table-list)` |
 | `clutch--fk-info` | FK metadata for current result | Per-result buffer |
 
 ### Eager vs. Async Refresh
 
-- **Eager (synchronous)**: MySQL, PostgreSQL, SQLite — blocks until schema loaded on connect
-- **Async (background)**: JDBC — background refresh with ticket-based stale-response guard and timeout/failure exit
+- **Eager (synchronous)**: SQLite — lightweight in-process metadata path
+- **Async (deferred)**: MySQL, PostgreSQL, JDBC — deferred refresh with ticket-based stale-response guard and timeout/failure exit
   - Buffer status line shows: `[schema...]` (refreshing), `[schema~]` (stale), `[schema!]` (failed), `[schema Nt]` (ready)
   - `Nt` is the size of the current schema-cache snapshot; `schema 0t` means refresh succeeded but cached zero browseable objects
+  - Native MySQL/PostgreSQL schedule passive metadata work on the main thread when Emacs is idle; JDBC keeps using the agent's metadata session
+- **Explicit manual refresh**: `clutch-refresh-schema` (`C-c C-s`) bypasses the deferred path and runs a foreground refresh so users can immediately recover from a failed lazy refresh
 
 ### Cache Invalidation
 
 - Manual: `clutch-refresh-schema` (`C-c C-s`)
 - Auto: after successful DDL execution (CREATE/ALTER/DROP)
-- Stale detection: JDBC only (schema status flag in async response)
+- Stale detection: all async-refresh backends reject stale responses via refresh tickets / generation checks
 
 ### Completion from Schema
 
 - `clutch--tables-in-buffer`: tables referenced in current SQL (buffer-chars-modified-tick cached)
 - `clutch--tables-in-query`: tables in last executed query (tick + region start/end cached)
 - CAPF suggests: table names, column names (scoped to detected tables), SQL keywords
+- Native MySQL/PostgreSQL CAPF/Eldoc are cache-first: cache misses queue background column-name / column-detail / table-comment preheat instead of blocking the editing hot path
+- Explicit detail commands stay synchronous by design: describe / DDL / result `?` can block, but passive metadata display should not
 
 ---
 
@@ -589,7 +723,7 @@ User types SQL in clutch-mode
 - **Page size**: `clutch-result-max-rows` (default 500)
 - **Page numbering**: 0-based (page 0 = offset 0)
 - **Total count**: loaded via `COUNT(*)` query for progress indication
-- **Navigation**: `SPC` / `S-SPC` (next/prev page)
+- **Navigation**: `N` / `P` (next/prev page), `M-<` / `M->` (first/last page)
 - **Offset**: `offset = page * page-size`
 
 ### Horizontal Overflow
@@ -597,7 +731,7 @@ User types SQL in clutch-mode
 - **Layout**: every result column is rendered into one buffer
 - **Navigation**: `]` / `[` page the window horizontally, snapping to column borders
 - **Searchability**: `isearch` and `TAB` traversal work across all columns
-- **Width adjustment**: `+` / `-` (increase/decrease by `clutch-column-width-step`)
+- **Width adjustment**: `=` / `-` (increase/decrease by `clutch-column-width-step`)
 
 ### Cell Navigation
 
@@ -610,7 +744,8 @@ User types SQL in clutch-mode
 - Server-side cursor remains open between `fetch` calls
 - `clutch-jdbc-fetch-size` (default 500) rows per batch
 - All rows fetched eagerly via `clutch-jdbc--fetch-all` (`push` + `nreverse` + `nconc`)
-- Cursor closed when `done=true` or explicitly via `close-cursor`
+- Cursor state is released when `done=true`; the current Elisp client does not
+  send a separate `close-cursor` RPC
 
 ---
 
@@ -623,21 +758,21 @@ All mutations are **staged** and committed as a batch.
 #### Stage → Preview → Commit
 
 ```
-Stage (e/d/i)          Preview (C-c C-c)          Commit / Discard
+Stage (C-c '/d/i)      Preview (C-c C-p)          Commit / Discard
 ─────────────     →    ─────────────────    →      ───────────────
-e: edit cell           Show SQL preview           Execute SQL batch
-d: delete row          (transient menu)           or C-c C-k: discard
-i: insert row          Confirm or cancel
+edit cell              Show SQL preview           Execute SQL batch
+delete row             (readable rendered SQL)    or C-c C-k: discard
+insert row             Confirm or cancel
 ```
 
 Footer shows staging status: `E-2  D-1  I-3  commit:C-c C-c  discard:C-c C-k`
 
 #### Edit Cell
 
-1. `e` on a cell → open edit minibuffer
+1. `C-c '` on a cell → open a dedicated edit buffer
 2. Pending edit stored in `clutch--pending-edits` keyed by PK + column
 3. Cell shown with `clutch-modified-face` until committed
-4. Commit generates: `UPDATE table SET col = val WHERE pk = id`
+4. Confirmation preview renders literal SQL text, but native MySQL/PostgreSQL/SQLite execute staged DML through parameter binding via `clutch-db-execute-params`
 
 #### Delete Row
 
@@ -660,6 +795,7 @@ Footer shows staging status: `E-2  D-1  I-3  commit:C-c C-c  discard:C-c C-k`
 - **UPDATE/DELETE**: always keyed by primary key (mutations disabled without PK)
 - **INSERT**: generated/default columns omitted from column list (let DB handle)
 - **Composite PKs**: supported; WHERE clause uses all PK columns
+- **NULL PK components**: WHERE templates keep `IS NULL` literals for null PK parts instead of binding `NULL = ?`
 
 ---
 
@@ -781,9 +917,11 @@ Connections are cached in `ob-clutch--connection-cache` (hash-table keyed by `ba
 | Format | MIME | Use Case |
 |--------|------|----------|
 | **CSV** | text/csv | Spreadsheets, Excel (UTF-8 BOM recommended) |
-| **TSV** | text/tab-separated-values | Unix tools, data pipelines |
-| **JSON** | application/json | APIs, data interchange |
-| **Org Table** | text/org | Org-mode documents |
+| **INSERT SQL** | text/plain | Replayable row inserts |
+| **UPDATE SQL** | text/plain | Replayable row updates |
+
+TSV remains available from the copy transient for cell/selection-oriented copy,
+but full-buffer export currently targets CSV / INSERT / UPDATE only.
 
 ### CSV Encoding Options
 
@@ -797,24 +935,62 @@ Controlled by `clutch-csv-export-default-coding-system`:
 
 ## 16. Generic Interface (cl-defgeneric Methods)
 
-All backends implement these generic methods dispatched on connection type:
+Current `clutch-db.el` generic surface, grouped by responsibility:
+
+### Connection and transactions
 
 | Method | Description |
 |--------|-------------|
-| `clutch-db-connect (backend params)` | Open connection |
-| `clutch-db-disconnect (conn)` | Close connection |
-| `clutch-db-live-p (conn)` | Check if connection is alive |
-| `clutch-db-query (conn sql)` | Execute SQL, return `clutch-db-result` |
-| `clutch-db-list-tables (conn)` | Return list of table names |
-| `clutch-db-list-columns (conn table)` | Return column metadata for table |
-| `clutch-db-primary-keys (conn table)` | Return primary key column names |
-| `clutch-db-foreign-keys (conn table)` | Return FK metadata |
-| `clutch-db-show-create (conn table)` | Return CREATE TABLE DDL string |
-| `clutch-db-list-databases (conn)` | Return list of databases |
-| `clutch-db-use-database (conn db)` | Switch to named database |
-| `clutch-db-type-category (conn type)` | Map type string to `text\|numeric\|temporal` |
-| `clutch-db-format-temporal (val)` | Format temporal plist to ISO-8601 string |
-| `clutch-db-eager-schema-refresh-p (conn)` | Return t if schema refresh should be sync |
+| `clutch-db-connect (backend params)` | Open a backend connection |
+| `clutch-db-disconnect (conn)` | Close a connection |
+| `clutch-db-live-p (conn)` | Check whether the connection is still live |
+| `clutch-db-error-details (conn)` / `clutch-db-clear-error-details (conn)` | Structured backend error detail access |
+| `clutch-db-init-connection (conn)` | Backend-specific post-connect initialization |
+| `clutch-db-manual-commit-p (conn)` | Report whether the connection is in manual-commit mode |
+| `clutch-db-commit (conn)` / `clutch-db-rollback (conn)` | Transaction control |
+| `clutch-db-set-auto-commit (conn auto-commit)` | Toggle auto-commit |
+| `clutch-db-interrupt-query (conn)` | Attempt recoverable interrupt for the active query |
+| `clutch-db-busy-p (conn)` | Report whether the backend is busy |
+| `clutch-db-user (conn)` / `clutch-db-host (conn)` / `clutch-db-port (conn)` / `clutch-db-database (conn)` / `clutch-db-display-name (conn)` | UI/identity accessors |
+
+### Query execution and SQL helpers
+
+| Method | Description |
+|--------|-------------|
+| `clutch-db-query (conn sql)` | Execute SQL and return a `clutch-db-result` |
+| `clutch-db-execute-params (conn sql params)` | Execute parameterized SQL with bound values |
+| `clutch-db-build-paged-sql (conn base-sql page-num page-size &optional order-by where-clause)` | Build paged SQL for a backend |
+| `clutch-db-escape-identifier (conn name)` | Quote/escape identifiers |
+| `clutch-db-escape-literal (conn value)` | Render literal SQL values for preview/fallback paths |
+
+### Schema, completion, and metadata
+
+| Method | Description |
+|--------|-------------|
+| `clutch-db-eager-schema-refresh-p (conn)` | Whether connect-time schema refresh stays synchronous |
+| `clutch-db-completion-sync-columns-p (conn)` | Whether completion may still use synchronous column lookup |
+| `clutch-db-refresh-schema-async (conn callback &optional errback)` | Defer schema snapshot refresh until Emacs is idle |
+| `clutch-db-column-details-async (conn table callback &optional errback)` | Defer detailed column metadata load until Emacs is idle |
+| `clutch-db-list-columns-async (conn table callback &optional errback)` | Defer column-name load until Emacs is idle |
+| `clutch-db-table-comment-async (conn table callback &optional errback)` | Defer table-comment load until Emacs is idle |
+| `clutch-db-list-objects-async (conn category callback &optional errback)` | Defer object warmup until Emacs is idle |
+| `clutch-db-list-tables (conn)` / `clutch-db-list-schemas (conn)` | Enumerate tables and schemas/databases |
+| `clutch-db-current-schema (conn)` / `clutch-db-set-current-schema (conn schema)` | Read/write current schema context |
+| `clutch-db-list-table-entries (conn)` / `clutch-db-browseable-object-entries (conn)` | Return browseable table/object entries |
+| `clutch-db-list-columns (conn table)` / `clutch-db-complete-columns (conn table prefix)` | Column metadata and completion |
+| `clutch-db-complete-tables (conn prefix)` / `clutch-db-search-table-entries (conn prefix)` | Table completion and prefix search |
+| `clutch-db-table-comment (conn table)` / `clutch-db-column-details (conn table)` | Synchronous table comment / detailed column metadata |
+| `clutch-db-primary-key-columns (conn table)` / `clutch-db-foreign-keys (conn table)` / `clutch-db-referencing-objects (conn table)` | Relationship metadata |
+
+### Object introspection
+
+| Method | Description |
+|--------|-------------|
+| `clutch-db-show-create-table (conn table)` | Table DDL |
+| `clutch-db-list-objects (conn category)` | Enumerate non-table objects by category |
+| `clutch-db-object-details (conn entry)` | Rich object metadata |
+| `clutch-db-object-source (conn entry)` | Source text for procedures/functions/triggers |
+| `clutch-db-show-create-object (conn entry)` | DDL/source fallback for generic object definitions |
 
 ---
 
@@ -827,13 +1003,13 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 ### Request Format
 
 ```json
-{"id": 1, "op": "execute", "params": {"connId": 0, "sql": "SELECT 1"}}
+{"id":1,"op":"execute","params":{"conn-id":0,"sql":"SELECT 1"}}
 ```
 
 ### Response Format
 
 ```json
-{"id": 1, "ok": true, "result": {"cursorId": 0}}
+{"id":1,"ok":true,"result":{"cursor-id":0}}
 {"id": 1, "ok": false, "error": "Unknown connection id: 5"}
 ```
 
@@ -841,20 +1017,27 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 
 | Op | Description |
 |----|-------------|
-| `ping` | Health check (responds `{"pong": true}`) |
-| `connect` | Open JDBC connection (`auto-commit` optional), returns `connId` |
+| `connect` | Open JDBC connection (`auto-commit` optional), returns `conn-id` |
 | `disconnect` | Close a connection |
 | `commit` | Commit the current transaction on a connection |
 | `rollback` | Roll back the current transaction on a connection |
-| `execute` | Execute SQL, returns `cursorId` for SELECT |
+| `set-auto-commit` | Toggle JDBC auto-commit |
+| `set-current-schema` | Update the effective schema/database for both JDBC sessions |
+| `cancel` | Cancel the currently running statement for a connection |
+| `execute` | Execute SQL, returns `cursor-id` for SELECT |
 | `fetch` | Fetch next batch from cursor, returns `rows`, `columns`, `done` |
-| `close-cursor` | Explicitly close a cursor |
-| `get-tables` | List schema/browser tables; Oracle uses direct SQL over `user_*`, `user_synonyms`, and accessible `all_*` views |
+| `get-schemas` | List available schemas/databases |
+| `get-tables` | List schema/browser tables |
+| `search-tables` | Prefix search for table/object entries |
 | `get-columns` | List columns for table |
+| `search-columns` | Prefix search for columns |
 | `get-primary-keys` | List primary keys |
 | `get-foreign-keys` | List foreign keys |
-| `get-schemas` | List available schemas/databases |
-| `show-create` | Return CREATE TABLE DDL |
+| `get-indexes` / `get-index-columns` | Index metadata |
+| `get-sequences` / `get-procedures` / `get-functions` / `get-triggers` | Non-table object discovery |
+| `get-procedure-params` / `get-function-params` | Routine parameter metadata |
+| `get-object-source` / `get-object-ddl` | Source or DDL text |
+| `get-referencing-objects` | Objects referencing a target table/object |
 
 ### Type Conversion (Java → JSON)
 
@@ -897,15 +1080,23 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | **SQL rewriting** | ORDER BY/LIMIT/OFFSET injection uses top-level clause detection (regex); complex CTEs/UNIONs may rewrite incorrectly |
 | **Mutations without PK** | Edit and delete are disabled when the result table has no primary key |
 | **MySQL query timeout** | `clutch-query-timeout-seconds` is not enforced for MySQL (applied for PostgreSQL and JDBC only) |
-| **Transaction control** | JDBC supports `commit`/`rollback`; Oracle defaults to manual-commit but can be flipped globally via `clutch-jdbc-oracle-manual-commit` or per connection via `:manual-commit` |
-| **Prepared statements** | No parameterized query support; all SQL is executed as raw strings |
+| **Transaction control** | Native MySQL and PostgreSQL support `commit` / `rollback` / runtime auto-commit toggle; JDBC supports the same, with Oracle defaulting to manual-commit and `:manual-commit` remaining JDBC-only at connect time |
+| **Prepared statements** | DML mutations use parameterized execution for native MySQL/PostgreSQL/SQLite backends; JDBC still falls back to literal SQL rendering |
 | **CLOB/BLOB full content** | CLOBs show first 256 chars; BLOBs show length only; full streaming deferred |
 | **Multiple result sets** | Stored procedures returning multiple result sets not supported |
 | **Cancel/interrupt** | `C-g` is recoverable for JDBC and native PostgreSQL; backends without explicit interrupt support still fall back to disconnect/reconnect |
 
+### Branch Features
+
+- Deferred metadata loading now keeps MySQL/PostgreSQL schema and object warmup
+  off the initial UI hot path via idle-time cache preheat on the main thread.
+- Result buffers support per-table/per-column displayers through
+  `clutch-register-column-displayer`.
+- Result buffers can pipe the current cell through a shell command with `|`.
+
 ## 19. Development Guidelines
 
-See `CLAUDE.md` in both repos for full rules. Key points:
+See `AGENTS.md` in both repos for full rules. Key points:
 
 - **Interface/implementation separation**: protocol layers never include UI; UI never imports protocol layers directly
 - **Single file, single responsibility**: do not split files without a genuinely distinct responsibility
@@ -948,7 +1139,7 @@ C-c C-d
 C-c C-o
 C-c C-l
 
-;; Org-Babel (add to init)
+;; Org-Babel (install separate ob-clutch package, then add to init)
 (require 'ob-clutch)
 ```
 

@@ -4,6 +4,9 @@
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1"))
+;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
@@ -32,9 +35,11 @@
 
 (require 'clutch-db)
 (require 'clutch-schema)
-(require 'clutch-ui)
 (require 'auth-source)
 (require 'cl-lib)
+(require 'comint)
+
+(declare-function auth-source-pass-parse-entry "auth-source-pass" (entry))
 
 ;; Forward declarations — variables defined in clutch.el
 (defvar clutch-connection)
@@ -62,11 +67,13 @@
 (defconst clutch--spinner-interval 0.1
   "Seconds between spinner frame advances.")
 
+(defconst clutch--ssh-tunnel-ready-poll-interval 0.05
+  "Seconds between SSH tunnel readiness checks.")
+
 ;; Forward declarations — functions defined in clutch.el
 (declare-function clutch--effective-sql-product "clutch" (params))
 (declare-function clutch--clear-connection-problem-capture "clutch" (connection))
 (declare-function clutch--forget-problem-record "clutch" (&optional buffer connection))
-(declare-function clutch--forget-problem-records-for-connection "clutch" (connection))
 (declare-function clutch--remember-debug-event "clutch" (&rest event))
 (declare-function clutch--remember-problem-record "clutch" (&rest args))
 (declare-function clutch--update-console-buffer-name "clutch" ())
@@ -82,18 +89,71 @@
 ;; Forward declarations — functions defined in other modules
 (declare-function clutch-jdbc-conn-p "clutch-db-jdbc" (conn))
 (declare-function clutch-jdbc-conn-params "clutch-db-jdbc" (conn))
-(declare-function clutch--render-object-describe "clutch-object"
-                  (conn entry &optional params product))
-(declare-function nerd-icons--function-name "nerd-icons" (name))
+(declare-function clutch--icon "clutch-ui" (name &optional fallback &rest icon-args))
+(declare-function clutch--icon-with-face "clutch-ui"
+                  (name fallback face &rest icon-args))
+(declare-function clutch--nerd-icons-available-p "clutch-ui" ())
 
 ;;;; Connection identity
+
+(defvar clutch--connection-remote-params-cache
+  (make-hash-table :test 'eq :weakness 'key)
+  "Original remote connection params keyed by live connection object.")
+
+(defvar clutch--connection-ssh-tunnel-cache
+  (make-hash-table :test 'eq :weakness 'key)
+  "SSH tunnel process plists keyed by live connection object.")
+
+(defun clutch--connection-remote-param (conn key)
+  "Return remote KEY for CONN when clutch cached transport metadata."
+  (when conn
+    (plist-get (gethash conn clutch--connection-remote-params-cache) key)))
+
+(defun clutch--connection-remote-host (conn)
+  "Return the remote host label for CONN."
+  (or (clutch--connection-remote-param conn :host)
+      (clutch-db-host conn)))
+
+(defun clutch--connection-remote-port (conn)
+  "Return the remote port label for CONN."
+  (or (clutch--connection-remote-param conn :port)
+      (clutch-db-port conn)))
+
+(defun clutch--connection-ssh-host (conn)
+  "Return the configured SSH host alias for CONN, or nil."
+  (clutch--connection-remote-param conn :ssh-host))
+
+(defun clutch--remember-connection-transport (conn params &optional tunnel)
+  "Remember original PARAMS and optional SSH TUNNEL for CONN."
+  (when conn
+    (let ((remote nil))
+      (when-let* ((host (plist-get params :host)))
+        (setq remote (plist-put remote :host host)))
+      (when-let* ((port (plist-get params :port)))
+        (setq remote (plist-put remote :port port)))
+      (when-let* ((ssh-host (plist-get params :ssh-host)))
+        (setq remote (plist-put remote :ssh-host ssh-host)))
+      (puthash conn remote clutch--connection-remote-params-cache))
+    (if tunnel
+        (puthash conn tunnel clutch--connection-ssh-tunnel-cache)
+      (remhash conn clutch--connection-ssh-tunnel-cache))))
+
+(defun clutch--release-connection-transport (conn)
+  "Stop any SSH tunnel and forget cached transport metadata for CONN."
+  (when conn
+    (when-let* ((tunnel (gethash conn clutch--connection-ssh-tunnel-cache))
+                (proc (plist-get tunnel :process)))
+      (when (process-live-p proc)
+        (delete-process proc)))
+    (remhash conn clutch--connection-ssh-tunnel-cache)
+    (remhash conn clutch--connection-remote-params-cache)))
 
 (defun clutch--connection-key (conn)
   "Return a descriptive string for CONN like \"user@host:port/db\"."
   (format "%s@%s:%s/%s"
           (or (clutch-db-user conn) "?")
-          (or (clutch-db-host conn) "?")
-          (or (clutch-db-port conn) "?")
+          (or (clutch--connection-remote-host conn) "?")
+          (or (clutch--connection-remote-port conn) "?")
           (or (clutch-db-database conn) "")))
 
 (defun clutch--default-port-for-connection (conn)
@@ -108,17 +168,22 @@
 (defun clutch--connection-display-key (conn)
   "Return a compact display identity for CONN for use in UI only."
   (let* ((user (or (clutch-db-user conn) "?"))
-         (host (or (clutch-db-host conn) "?"))
-         (port (clutch-db-port conn))
+         (host (or (clutch--connection-remote-host conn) "?"))
+         (port (clutch--connection-remote-port conn))
+         (ssh-host (clutch--connection-ssh-host conn))
          (default-port (clutch--default-port-for-connection conn)))
-    (format "%s@%s%s"
-            user
-            host
-            (if (and port default-port (equal port default-port))
-                ""
-              (if port
-                  (format ":%s" port)
-                "")))))
+    (concat
+     (format "%s@%s%s"
+             user
+             host
+             (if (and port default-port (equal port default-port))
+                 ""
+               (if port
+                   (format ":%s" port)
+                 "")))
+     (if ssh-host
+         (format " via %s" ssh-host)
+       ""))))
 
 (defun clutch--ensure-clutch-loaded ()
   "Load the `clutch' entrypoint before module-autoloaded commands run.
@@ -157,6 +222,11 @@ interactive readers inspect shared customization such as
   (member (clutch--sql-main-op-keyword sql)
           '("INSERT" "UPDATE" "DELETE" "MERGE" "REPLACE")))
 
+(defun clutch--transactional-schema-query-p (conn sql)
+  "Return non-nil when schema-affecting SQL leaves uncommitted work on CONN."
+  (and (clutch--schema-affecting-query-p sql)
+       (eq (ignore-errors (clutch--backend-key-from-conn conn)) 'pg)))
+
 (defun clutch--transaction-control-query-p (sql)
   "Return non-nil when SQL is explicit transaction control."
   (member (clutch--sql-leading-keyword sql)
@@ -189,7 +259,7 @@ interactive readers inspect shared customization such as
     (clutch--refresh-transaction-ui conn)))
 
 (defun clutch--clear-tx-dirty (conn)
-  "Forget any pending transaction state for CONN."
+  "Forget uncommitted transaction state for CONN."
   (when conn
     (remhash conn clutch--tx-dirty-cache)
     (clutch--refresh-transaction-ui conn)))
@@ -249,12 +319,16 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
      ((and (clutch--connection-oracle-jdbc-p conn)
            (clutch--schema-affecting-query-p sql))
       (clutch--clear-tx-dirty conn))
+     ((clutch--transactional-schema-query-p conn sql)
+      (clutch--set-tx-dirty conn))
      ((clutch--manual-commit-dirtying-query-p sql)
       (clutch--set-tx-dirty conn)))))
 
-(defun clutch--run-db-query (conn sql)
-  "Execute SQL on CONN and keep transaction UI state in sync."
-  (let ((result (clutch-db-query conn sql)))
+(defun clutch--run-db-query (conn sql &optional params)
+  "Execute SQL on CONN with optional PARAMS and keep transaction UI state in sync."
+  (let ((result (if params
+                    (clutch-db-execute-params conn sql params)
+                  (clutch-db-query conn sql))))
     (clutch--clear-connection-problem-capture conn)
     (clutch--record-tx-state-after-query conn sql)
     result))
@@ -334,10 +408,8 @@ Also remember PARAMS and PRODUCT."
 Find reconnect params from the current buffer or any attached buffer that
 still references the same dead connection, then rebind all attached buffers
 to the new connection on success.
-Pending staged changes in result buffers are preserved — they are
-client-side SQL that has not been sent to the database, so they remain
-valid on the new connection.  Only a query re-execution (which changes
-the underlying result rows) should discard pending changes.
+Staged result-buffer changes are preserved across reconnects because
+they are client-side DML.  Only query re-execution should discard them.
 Returns non-nil on success, nil on failure."
   (when-let* ((old-conn clutch-connection)
               (context (clutch--connection-context old-conn))
@@ -346,6 +418,7 @@ Returns non-nil on success, nil on failure."
     (condition-case err
         (let ((conn (clutch--build-conn params)))
           (clutch--clear-tx-dirty old-conn)
+          (clutch--release-connection-transport old-conn)
           (clutch--rebind-connection-buffers old-conn conn params product)
           (clutch--finalize-rebound-connection conn)
           (message "Reconnected to %s" (clutch--connection-key conn))
@@ -361,8 +434,10 @@ PRODUCT is the effective SQL product for the new logical session."
          (old-key (clutch--connection-key old-conn))
          (new-conn (clutch--build-conn params)))
     (clutch--clear-tx-dirty old-conn)
-    (when (clutch--connection-alive-p old-conn)
-      (clutch-db-disconnect old-conn))
+    (unwind-protect
+        (when (clutch--connection-alive-p old-conn)
+          (clutch-db-disconnect old-conn))
+      (clutch--release-connection-transport old-conn))
     (unless (clutch--connection-alive-p new-conn)
       (setq new-conn (clutch--build-conn params)))
     (clutch--rebind-connection-buffers old-conn new-conn params product)
@@ -538,18 +613,26 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
                   (if parts
                       (mapconcat #'identity parts sep)
                     disconnect)))
-      (let* ((sep     (propertize "  •  " 'face 'shadow))
-             (backend (clutch--connection-backend-segment clutch-connection))
-             (key     (concat (clutch--connection-state-icon t)
-                              " "
-                              (clutch--connection-display-key clutch-connection)))
+      (let* ((sep         (propertize "  •  " 'face 'shadow))
+             (backend-sep (propertize "  ›  " 'face 'shadow))
+             (backend     (clutch--connection-backend-segment clutch-connection))
+             (key         (concat (clutch--connection-state-icon t)
+                                  " "
+                                  (clutch--connection-display-key clutch-connection)))
              (current-schema
               (clutch--current-schema-header-line-segment clutch-connection))
-             (schema  (clutch--schema-status-header-line-segment clutch-connection))
-             (tx      (clutch--tx-header-line-segment clutch-connection))
-             (parts   (delq nil (list backend
-                                      key current-schema schema tx))))
-        (concat indent (mapconcat #'identity parts sep))))))
+             (schema      (clutch--schema-status-header-line-segment clutch-connection))
+             (tx          (clutch--tx-header-line-segment clutch-connection))
+             (tail        (delq nil (list current-schema schema tx))))
+        (concat indent
+                (cond
+                 ((and backend key)
+                  (concat backend backend-sep key
+                          (when tail
+                            (concat sep (mapconcat #'identity tail sep)))))
+                 (backend backend)
+                 (key (mapconcat #'identity (cons key tail) sep))
+                 (t (mapconcat #'identity tail sep))))))))
 
 (defun clutch--spinner-start ()
   "Start the spinner timer if not already running."
@@ -595,6 +678,9 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
           (if (and clutch--executing-p spinner)
               (concat base " " (propertize spinner 'face 'success))
             base)))
+  (when (derived-mode-p 'clutch-result-mode)
+    (when (fboundp 'clutch--refresh-footer-timing)
+      (clutch--refresh-footer-timing)))
   (when (derived-mode-p 'clutch-mode 'clutch-repl-mode)
     ;; Use :eval so line-number-display-width is recomputed on each redraw,
     ;; keeping alignment correct when display-line-numbers-mode is toggled.
@@ -663,6 +749,87 @@ Signals a `user-error' when removed timeout keys are present."
 
 ;;;; Password resolution and connection building
 
+(defun clutch--auth-source-target (params)
+  "Return a human-readable auth-source target string for PARAMS."
+  (let ((user (plist-get params :user))
+        (host (plist-get params :host))
+        (port (plist-get params :port)))
+    (cond
+     ((and user host port) (format "%s@%s:%s" user host port))
+     ((and user host) (format "%s@%s" user host))
+     (host host)
+     (t "the configured credential source"))))
+
+(defun clutch--password-lookup-error (message)
+  "Signal MESSAGE as a user-facing password lookup failure."
+  (user-error "%s" message))
+
+(defun clutch--resolve-pass-entry-password (entry)
+  "Return the password from pass ENTRY.
+Signal `user-error' when a matching pass entry exists but cannot be read."
+  (when-let* ((path (clutch-db--pass-entry-by-suffix entry)))
+    (let ((parsed (auth-source-pass-parse-entry path)))
+      (cond
+       ((null parsed)
+        (clutch--password-lookup-error
+         (format
+          "Database password lookup failed for pass entry %s. Unlock pass/auth-source-pass and retry"
+          path)))
+       ((not (assq 'secret parsed))
+        (clutch--password-lookup-error
+         (format
+          "Database password lookup failed for pass entry %s because it does not contain a secret"
+          path)))
+       (t
+        (cdr (assq 'secret parsed)))))))
+
+(defun clutch--auth-source-first-match (params target)
+  "Return the first auth-source match for PARAMS targeting TARGET."
+  (condition-case err
+      (car (auth-source-search
+            :host (plist-get params :host)
+            :user (plist-get params :user)
+            :port (plist-get params :port)
+            :max 1))
+    (error
+     (clutch--password-lookup-error
+      (format "Database password lookup failed via auth-source for %s: %s"
+              target
+              (error-message-string err))))))
+
+(defun clutch--auth-source-secret-value (secret target)
+  "Return auth-source SECRET for TARGET, or signal `user-error'."
+  (cond
+   ((null secret)
+    (clutch--password-lookup-error
+     (format
+      "Database password lookup failed via auth-source for %s. The matching credential has no secret"
+      target)))
+   ((functionp secret)
+    (let ((value
+           (condition-case secret-err
+               (funcall secret)
+             (error
+              (clutch--password-lookup-error
+               (format
+                "Database password lookup failed via auth-source for %s: %s"
+                target
+                (error-message-string secret-err)))))))
+      (or value
+          (clutch--password-lookup-error
+           (format
+            "Database password lookup failed via auth-source for %s. Unlock the credential store and retry"
+            target)))))
+   (t secret)))
+
+(defun clutch--resolve-auth-source-password (params)
+  "Return a password from `auth-source' for PARAMS, or nil when absent.
+Signal `user-error' when auth-source finds a credential but cannot
+read its secret."
+  (let ((target (clutch--auth-source-target params)))
+    (when-let* ((found (clutch--auth-source-first-match params target)))
+      (clutch--auth-source-secret-value (plist-get found :secret) target))))
+
 (defun clutch--resolve-password (params)
   "Return the password for connection PARAMS.
 Checks in order:
@@ -671,20 +838,16 @@ Checks in order:
      \\='dev-mysql\\=' finds \\='mysql/dev-mysql\\='.  Automatically set to the
      connection name by callers; override in `clutch-connection-alist'.
   3. `auth-source-search' by :host/:user/:port (authinfo / pass).
-Returns nil when nothing is found (caller should prompt if needed)."
+Returns nil when nothing is found (caller should prompt if needed).
+Signals `user-error' when a configured credential source matches but
+cannot be read."
   (let ((pw    (plist-get params :password))
         (entry (plist-get params :pass-entry)))
     (cond
      ((and (stringp pw) (not (string-empty-p pw))) pw)
      (t
-      (or (and entry (clutch-db--pass-secret-by-suffix entry))
-          (when-let* ((found  (car (auth-source-search
-                                    :host (plist-get params :host)
-                                    :user (plist-get params :user)
-                                    :port (plist-get params :port)
-                                    :max 1)))
-                      (secret (plist-get found :secret)))
-            (if (functionp secret) (funcall secret) secret)))))))
+      (or (and entry (clutch--resolve-pass-entry-password entry))
+          (clutch--resolve-auth-source-password params))))))
 
 (defun clutch--debug-connection-context (backend params)
   "Return a redacted connect context for BACKEND and PARAMS."
@@ -699,8 +862,271 @@ Returns nil when nothing is found (caller should prompt if needed)."
       (setq context (plist-put context :database database)))
     (when-let* ((display-name (plist-get params :display-name)))
       (setq context (plist-put context :display-name display-name)))
+    (when-let* ((ssh-host (plist-get params :ssh-host)))
+      (setq context (plist-put context :ssh-host ssh-host)))
     (setq context (plist-put context :backend backend))
     context))
+
+(defun clutch--ssh-tunnel-enabled-p (params)
+  "Return non-nil when PARAMS request an SSH tunnel."
+  (let ((ssh-host (plist-get params :ssh-host)))
+    (and (stringp ssh-host)
+         (not (string-empty-p ssh-host)))))
+
+(defun clutch--allocate-local-port ()
+  "Return an available local TCP port for an SSH tunnel."
+  (condition-case err
+      (let* ((listener (make-network-process :name "clutch-ssh-port-reserve"
+                                             :server t
+                                             :host "127.0.0.1"
+                                             :service t
+                                             :family 'ipv4
+                                             :noquery t))
+             (port (process-contact listener :service)))
+        (delete-process listener)
+        port)
+    (file-error
+     (signal 'clutch-db-error
+             (list (format "Cannot allocate a local port for the SSH tunnel: %s"
+                           (error-message-string err)))))))
+
+(defun clutch--ssh-tunnel-buffer-name (ssh-host)
+  "Return the process buffer name for SSH-HOST."
+  (format " *clutch-ssh %s*" ssh-host))
+
+(defun clutch--ssh-prepare-buffer-name (ssh-host)
+  "Return the interactive SSH prepare buffer name for SSH-HOST."
+  (format "*clutch-ssh-prepare %s*" ssh-host))
+
+(defun clutch--default-ssh-host ()
+  "Return the current buffer's default SSH host alias, or nil."
+  (let* ((params (or clutch--connection-params
+                     (car-safe (clutch--connection-context clutch-connection))))
+         (ssh-host (plist-get params :ssh-host)))
+    (when (and (stringp ssh-host)
+               (not (string-empty-p ssh-host)))
+      ssh-host)))
+
+(defun clutch--read-ssh-host-alias ()
+  "Prompt for an SSH host alias from OpenSSH config."
+  (let* ((default (clutch--default-ssh-host))
+         (prompt (if default
+                     (format "SSH host from ~/.ssh/config (%s): " default)
+                   "SSH host from ~/.ssh/config: "))
+         (ssh-host (read-string prompt nil nil default)))
+    (if (string-empty-p ssh-host)
+        (user-error "An SSH host alias is required")
+      ssh-host)))
+
+(defun clutch--ssh-buffer-output (buffer)
+  "Return BUFFER contents as a trimmed string, or an empty string."
+  (if (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (string-trim (buffer-substring-no-properties (point-min) (point-max))))
+    ""))
+
+(defun clutch--ssh-output-last-line (output)
+  "Return the last non-empty line from SSH OUTPUT."
+  (when (and output
+             (not (string-empty-p output)))
+    (let ((lines (split-string output "\n" t "[ \t\r]+")))
+      (car (last lines)))))
+
+(defun clutch--ssh-diagnose-output (ssh-host output)
+  "Return a user-facing diagnosis for SSH-HOST using SSH OUTPUT."
+  (let* ((cleaned (string-trim (or output "")))
+         (last-line (or (clutch--ssh-output-last-line cleaned)
+                        "the ssh process exited before the tunnel became ready"))
+         (case-fold-search t))
+    (cond
+     ((or (string-match-p "enter passphrase for key" cleaned)
+          (string-match-p "incorrect passphrase" cleaned)
+          (string-match-p "agent refused operation" cleaned)
+          (string-match-p "sign_and_send_pubkey" cleaned))
+      (format
+       "the SSH key for %s is locked. Run M-x clutch-prepare-ssh-host or `ssh %s exit` once to unlock it"
+       ssh-host ssh-host))
+     ((or (string-match-p "host key verification failed" cleaned)
+          (string-match-p "host identification has changed" cleaned)
+          (string-match-p "are you sure you want to continue connecting" cleaned))
+      (format
+       "SSH host verification for %s needs attention. Run M-x clutch-prepare-ssh-host or `ssh %s exit` once to confirm the host key"
+       ssh-host ssh-host))
+     ((string-match-p "permission denied" cleaned)
+      (format
+       "SSH authentication to %s was rejected. Run M-x clutch-prepare-ssh-host once, or check the remote username and ~/.ssh/authorized_keys"
+       ssh-host))
+     ((or (string-match-p "could not resolve hostname" cleaned)
+          (string-match-p "name or service not known" cleaned))
+      (format "OpenSSH could not resolve host %s. Check the alias in ~/.ssh/config"
+              ssh-host))
+     ((or (string-match-p "connection refused" cleaned)
+          (string-match-p "operation timed out" cleaned)
+          (string-match-p "connection timed out" cleaned)
+          (string-match-p "no route to host" cleaned)
+          (string-match-p "network is unreachable" cleaned))
+      (format "OpenSSH could not reach %s (%s)" ssh-host last-line))
+     ((or (string-match-p "administratively prohibited" cleaned)
+          (string-match-p "open failed" cleaned))
+      (format "the remote side rejected SSH port forwarding via %s" ssh-host))
+     ((string-empty-p cleaned)
+      (format
+       "OpenSSH could not use host %s in batch mode. Run M-x clutch-prepare-ssh-host or `ssh %s exit` once first"
+       ssh-host ssh-host))
+     (t last-line))))
+
+(defun clutch--ssh-prepare-sentinel (proc _event)
+  "Report completion state for SSH prepare PROC."
+  (when (memq (process-status proc) '(exit signal))
+    (let* ((ssh-host (process-get proc :clutch-ssh-host))
+           (buffer (process-buffer proc))
+           (buffer-name (and (buffer-live-p buffer) (buffer-name buffer))))
+      (if (and (eq (process-status proc) 'exit)
+               (zerop (process-exit-status proc)))
+          (message "SSH host %s is ready for batch use" ssh-host)
+        (message "SSH prepare for %s exited. If prompts completed, retry clutch-connect; otherwise inspect %s"
+                 ssh-host
+                 (or buffer-name "the SSH prepare buffer"))))))
+
+(defun clutch--start-ssh-prepare-session (ssh-host)
+  "Start an interactive SSH prepare session for SSH-HOST."
+  (let* ((buffer-name (clutch--ssh-prepare-buffer-name ssh-host))
+         (buffer (get-buffer-create buffer-name))
+         (proc (get-buffer-process buffer)))
+    (if (process-live-p proc)
+        buffer
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t))
+          (erase-buffer)))
+      (setq buffer (make-comint-in-buffer
+                    (format "clutch-ssh-prepare-%s" ssh-host)
+                    buffer
+                    "ssh"
+                    nil
+                    ssh-host
+                    "exit"))
+      (setq proc (get-buffer-process buffer))
+      (process-put proc :clutch-ssh-host ssh-host)
+      (set-process-query-on-exit-flag proc nil)
+      (set-process-sentinel proc #'clutch--ssh-prepare-sentinel)
+      buffer)))
+
+(defun clutch--ssh-prepare-session-live-p (buffer)
+  "Return non-nil when BUFFER hosts a live SSH prepare process."
+  (when-let* ((proc (and (buffer-live-p buffer)
+                         (get-buffer-process buffer))))
+    (process-live-p proc)))
+
+(defun clutch--prepare-ssh-host-message (ssh-host buffer)
+  "Display a status message after opening SSH-HOST prepare BUFFER."
+  (if (clutch--ssh-prepare-session-live-p buffer)
+      (message "Complete any SSH prompts in %s, then retry clutch-connect"
+               (buffer-name buffer))
+    (message "SSH host %s is ready for batch use" ssh-host)))
+
+(defun clutch--ssh-tunnel-error (params buffer reason)
+  "Signal a `clutch-db-error' for PARAMS using BUFFER and REASON."
+  (let* ((ssh-host (plist-get params :ssh-host))
+         (buffer-name (and (buffer-live-p buffer) (buffer-name buffer)))
+         (summary (format "SSH tunnel to %s failed" ssh-host))
+         (message (if buffer-name
+                      (format "%s: %s. Inspect %s for SSH output"
+                              summary reason buffer-name)
+                    (format "%s: %s" summary reason))))
+    (signal 'clutch-db-error
+            (list message
+                  (list :summary summary
+                        :diag (list :raw-message message
+                                    :context (list :ssh-host ssh-host
+                                                   :ssh-buffer buffer-name
+                                                   :host (plist-get params :host)
+                                                   :port (plist-get params :port))))))))
+
+(defun clutch--ssh-local-port-open-p (port)
+  "Return non-nil when localhost PORT accepts TCP connections."
+  (condition-case nil
+      (let ((probe (make-network-process :name "clutch-ssh-ready-probe"
+                                         :host "127.0.0.1"
+                                         :service port
+                                         :family 'ipv4
+                                         :noquery t)))
+        (delete-process probe)
+        t)
+    (error nil)))
+
+(defun clutch--wait-for-ssh-tunnel (proc port params buffer timeout)
+  "Wait until PROC forwards localhost PORT or signal a tunnel error.
+PARAMS describe the original connection, BUFFER captures SSH output,
+and TIMEOUT is the maximum wait in seconds."
+  (let ((deadline (+ (float-time) (max 1 timeout))))
+    (while (and (process-live-p proc)
+                (< (float-time) deadline)
+                (not (clutch--ssh-local-port-open-p port)))
+      (accept-process-output proc clutch--ssh-tunnel-ready-poll-interval))
+    (cond
+     ((clutch--ssh-local-port-open-p port) t)
+     ((process-live-p proc)
+      (delete-process proc)
+      (clutch--ssh-tunnel-error params buffer "the local forward did not become ready in time"))
+     (t
+      (let* ((ssh-host (plist-get params :ssh-host))
+             (output (clutch--ssh-buffer-output buffer))
+             (reason (clutch--ssh-diagnose-output ssh-host output)))
+        (clutch--ssh-tunnel-error params buffer reason))))))
+
+(defun clutch--start-ssh-tunnel (params)
+  "Start an SSH tunnel for PARAMS using the user's OpenSSH config."
+  (unless (executable-find "ssh")
+    (user-error "SSH tunnels require the OpenSSH client executable `ssh'"))
+  (when (eq (plist-get params :backend) 'sqlite)
+    (user-error "SQLite connections do not support SSH tunnels"))
+  (when (plist-get params :url)
+    (user-error "SSH tunnels currently require structured :host/:port params, not :url"))
+  (unless (plist-get params :host)
+    (user-error "SSH tunnels require :host for the remote database endpoint"))
+  (unless (plist-get params :port)
+    (user-error "SSH tunnels require :port for the remote database endpoint"))
+  (let* ((ssh-host (plist-get params :ssh-host))
+         (local-port (clutch--allocate-local-port))
+         (buffer (get-buffer-create (clutch--ssh-tunnel-buffer-name ssh-host)))
+         (timeout (or (plist-get params :connect-timeout)
+                      clutch-connect-timeout-seconds))
+         (proc nil))
+    (with-current-buffer buffer
+      (erase-buffer))
+    (setq proc (make-process
+                :name (format "clutch-ssh-%s" ssh-host)
+                :buffer buffer
+                :command (list "ssh"
+                               "-N"
+                               "-o" "BatchMode=yes"
+                               "-o" "ExitOnForwardFailure=yes"
+                               "-L" (format "127.0.0.1:%d:%s:%s"
+                                            local-port
+                                            (plist-get params :host)
+                                            (plist-get params :port))
+                               ssh-host)
+                :coding 'utf-8
+                :noquery t))
+    (set-process-query-on-exit-flag proc nil)
+    (clutch--wait-for-ssh-tunnel proc local-port params buffer timeout)
+    (list :process proc
+          :local-port local-port
+          :buffer buffer
+          :ssh-host ssh-host)))
+
+(defun clutch--prepare-connect-params (params)
+  "Return `(CONNECT-PARAMS TUNNEL)' for PARAMS.
+When PARAMS request SSH, CONNECT-PARAMS targets the local forwarded port
+and TUNNEL contains the live process metadata."
+  (if (not (clutch--ssh-tunnel-enabled-p params))
+      (list params nil)
+    (let* ((tunnel (clutch--start-ssh-tunnel params))
+           (connect-params (copy-sequence params)))
+      (setq connect-params (plist-put connect-params :host "127.0.0.1"))
+      (setq connect-params (plist-put connect-params :port
+                                      (plist-get tunnel :local-port)))
+      (list connect-params tunnel))))
 
 (defun clutch--make-connection-error-details (params err)
   "Return structured error details for a failed connection attempt.
@@ -729,44 +1155,68 @@ signaled condition."
     (setq diag (plist-put diag :context context))
     (plist-put details :diag diag)))
 
+(defun clutch--materialize-connection-params (params)
+  "Return effective connection PARAMS with resolved credentials included.
+The returned plist keeps the original backend-facing keys, but fills in the
+password that `clutch--resolve-password' produced so later reconnects reuse the
+same credentials as the successful foreground connection."
+  (let* ((backend (or (plist-get params :backend)
+                      (user-error "Connection params require :backend")))
+         (params (clutch--normalize-timeout-params backend params))
+         (password (clutch--resolve-password params)))
+    (when (and (clutch--jdbc-backend-p backend)
+               (plist-get params :pass-entry)
+               (null password))
+      (user-error
+       (concat "No password resolved for JDBC connection %s (:pass-entry %s). "
+               "Enable auth-source-pass/auth-source, or set :password explicitly")
+       backend
+       (plist-get params :pass-entry)))
+    (if password
+        (plist-put (copy-sequence params) :password password)
+      params)))
+
 (defun clutch--build-conn (params)
   "Connect to a database using PARAMS, resolving the password via auth-source.
 Returns a live connection object or signals a `user-error'."
-  (let* ((backend  (or (plist-get params :backend) 'mysql))
-         (params   (clutch--normalize-timeout-params backend params))
-         (password (clutch--resolve-password params))
-         (_guard
-          (when (and (clutch--jdbc-backend-p backend)
-                     (plist-get params :pass-entry)
-                     (null password))
-            (user-error
-             (concat "No password resolved for JDBC connection %s (:pass-entry %s). "
-                     "Enable auth-source-pass/auth-source, or set :password explicitly")
-             backend
-             (plist-get params :pass-entry))))
-         (db-params (cl-loop for (k v) on params by #'cddr
-                             unless (memq k '(:sql-product :backend :password :pass-entry))
-                             append (list k v)))
-         (db-params (if password
-                        (append db-params (list :password password))
-                      db-params)))
+  (let* ((effective-params params)
+         (backend (plist-get params :backend))
+         (ssh-tunnel nil))
     (condition-case err
-        (let ((conn (clutch-db-connect backend db-params)))
-          (when clutch-debug-mode
-            (clutch--remember-debug-event
-             :connection conn
-             :op "connect"
-             :phase "success"
-             :backend backend
-             :summary (condition-case nil
-                          (format "Connected to %s" (clutch--connection-key conn))
-                        (error "Connected"))
-             :context (clutch--debug-connection-context backend params)))
-          conn)
+        (progn
+          (setq effective-params (clutch--materialize-connection-params params))
+          (setq backend (plist-get effective-params :backend))
+          (let* ((prepared (clutch--prepare-connect-params effective-params))
+                 (connect-params (car prepared))
+                 (password (plist-get connect-params :password))
+                 (db-params (cl-loop for (k v) on connect-params by #'cddr
+                                     unless (memq k '(:sql-product :backend :password :pass-entry
+                                                                   :ssh-host))
+                                     append (list k v)))
+                 (db-params (if password
+                                (append db-params (list :password password))
+                              db-params)))
+            (setq ssh-tunnel (cadr prepared))
+            (let ((conn (clutch-db-connect backend db-params)))
+              (clutch--remember-connection-transport conn effective-params ssh-tunnel)
+              (when clutch-debug-mode
+                (clutch--remember-debug-event
+                 :connection conn
+                 :op "connect"
+                 :phase "success"
+                 :backend backend
+                 :summary (condition-case nil
+                              (format "Connected to %s" (clutch--connection-key conn))
+                            (error "Connected"))
+                 :context (clutch--debug-connection-context backend effective-params)))
+              conn)))
       (clutch-db-error
+       (when-let* ((proc (and ssh-tunnel (plist-get ssh-tunnel :process))))
+         (when (process-live-p proc)
+           (delete-process proc)))
        (clutch--remember-problem-record
         :buffer (current-buffer)
-        :problem (clutch--make-connection-error-details params err))
+        :problem (clutch--make-connection-error-details effective-params err))
        (let ((message (clutch--humanize-db-error
                        (or (car (cdr err))
                            (error-message-string err)))))
@@ -776,7 +1226,7 @@ Returns a live connection object or signals a `user-error'."
             :phase "error"
             :backend backend
             :summary message
-            :context (clutch--debug-connection-context backend params)))
+            :context (clutch--debug-connection-context backend effective-params)))
          (user-error "%s" (clutch--debug-workflow-message message)))))))
 
 (defun clutch--inject-entry-name (params name)
@@ -802,7 +1252,8 @@ Leaves PARAMS unchanged when :password or :pass-entry is already set."
 (defun clutch--read-connection-params ()
   "Prompt the user for connection parameters and return a params plist.
 Offers saved connections from `clutch-connection-alist' when non-empty,
-otherwise prompts for host/port/user/password/database individually.
+otherwise prompts for :backend first, then for the backend-specific
+connection parameters.
 The password is resolved via `auth-source' before falling back to `read-passwd'."
   (clutch--ensure-clutch-loaded)
   (if clutch-connection-alist
@@ -811,16 +1262,37 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
                                       nil t))
              (params (clutch--saved-connection-params name)))
         params)
-    (let* ((host          (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
-           (port          (read-number "Port (3306): " 3306))
-           (user          (read-string "User: "))
-           (manual-params (list :host host :port port :user user))
-           (pw            (or (clutch--resolve-password manual-params)
-                              (read-passwd "Password: ")))
-           (db            (read-string "Database (optional): ")))
-      (append manual-params
-              (list :password pw
-                    :database (unless (string-empty-p db) db))))))
+    (let* ((backend (intern
+                     (completing-read
+                      "Backend: "
+                      (mapcar #'symbol-name
+                              '(mysql pg sqlite oracle sqlserver db2 snowflake redshift))
+                      nil t nil nil "mysql"))))
+      (if (eq backend 'sqlite)
+          (list :backend 'sqlite
+                :database (read-string "Database (:memory:): " nil nil ":memory:"))
+        (let* ((port-default (pcase backend
+                               ('mysql 3306)
+                               ('pg 5432)
+                               ('oracle 1521)
+                               ('sqlserver 1433)
+               ('db2 50000)
+                               ('redshift 5439)
+                               ('snowflake 443)))
+               (host (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
+               (port (read-number (format "Port (%d): " port-default) port-default))
+               (user (read-string "User: "))
+               (ssh-host (read-string "SSH host from ~/.ssh/config (optional): "))
+               (manual-params (append (list :backend backend
+                                            :host host :port port :user user)
+                                      (unless (string-empty-p ssh-host)
+                                        (list :ssh-host ssh-host))))
+               (pw (or (clutch--resolve-password manual-params)
+                       (read-passwd "Password: ")))
+               (db (read-string "Database (optional): ")))
+          (append manual-params
+                  (list :password pw
+                        :database (unless (string-empty-p db) db))))))))
 
 ;;;; Interactive connect/disconnect
 
@@ -839,14 +1311,29 @@ params; see `clutch-connection-alist' for details."
        old-conn
        "Uncommitted changes will be lost.  Disconnect? "))
     (let* ((params  (clutch--connect-params-for-current-buffer))
-           (product (clutch--effective-sql-product params))
+           (effective-params (clutch--materialize-connection-params params))
+           (product (clutch--effective-sql-product effective-params))
            (conn    (clutch--build-conn params)))
       (when old-live-p
         (clutch--do-disconnect old-conn))
       (unless (clutch--connection-alive-p conn)
         (setq conn (clutch--build-conn params)))
-      (clutch--activate-current-buffer-connection conn params product)
+      (clutch--activate-current-buffer-connection conn effective-params product)
       (message "Connected to %s" (clutch--connection-key conn)))))
+
+;;;###autoload
+(defun clutch-prepare-ssh-host (&optional ssh-host)
+  "Open an interactive SSH session so OpenSSH can finish host/key setup.
+This is useful before `clutch-connect' when a host alias in `~/.ssh/config'
+still needs an initial passphrase entry or host-key confirmation."
+  (interactive (list (clutch--read-ssh-host-alias)))
+  (unless (executable-find "ssh")
+    (user-error "SSH preparation requires the OpenSSH client executable `ssh'"))
+  (let* ((ssh-host (or ssh-host
+                       (clutch--read-ssh-host-alias)))
+         (buffer (clutch--start-ssh-prepare-session ssh-host)))
+    (pop-to-buffer buffer)
+    (clutch--prepare-ssh-host-message ssh-host buffer)))
 
 ;;;###autoload
 (defun clutch-disconnect ()
@@ -891,13 +1378,15 @@ state, and disconnects the underlying connection."
                   (format "Disconnected from %s" (clutch--connection-key conn))
                 (error "Disconnected"))))
   (clutch--forget-problem-record nil conn)
-  (clutch-db-disconnect conn))
+  (unwind-protect
+      (clutch-db-disconnect conn)
+    (clutch--release-connection-transport conn)))
 
 (defun clutch--disconnect-on-kill ()
   "Disconnect the connection owned by this buffer.
 Invalidates all derived buffers that share the same connection.
-Does nothing in indirect SQL buffers (`clutch-indirect-mode')."
-  (when (and (not (bound-and-true-p clutch-indirect-mode))
+Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
+  (when (and (not (bound-and-true-p clutch--indirect-mode))
              (clutch--connection-alive-p clutch-connection))
     (clutch--confirm-disconnect-transaction-loss
      clutch-connection
@@ -933,13 +1422,13 @@ Does nothing in indirect SQL buffers (`clutch-indirect-mode')."
 ;;;###autoload
 (defun clutch-toggle-auto-commit ()
   "Toggle auto-commit mode for the current connection.
-When switching from manual-commit to auto-commit, the database commits
-any pending transaction per JDBC specification."
+When switching from manual-commit to auto-commit, the backend finishes
+any open transaction according to its own semantics."
   (interactive)
   (clutch--ensure-connection)
   (let ((manual-now (clutch-db-manual-commit-p clutch-connection)))
     (when (and manual-now (clutch--tx-dirty-p clutch-connection))
-      (user-error "Cannot toggle: commit or roll back pending changes first"))
+      (user-error "Cannot toggle: commit or roll back staged changes first"))
     (clutch-db-set-auto-commit clutch-connection manual-now)
     (when manual-now
       (clutch--clear-tx-dirty clutch-connection))

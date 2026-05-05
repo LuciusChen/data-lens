@@ -69,7 +69,7 @@ record view forces one canonical path.
 
 ## Principle
 
-The CLAUDE.md rule "Converge UX, avoid mode branches" was explicitly
+The AGENTS.md rule "Converge UX, avoid mode branches" was explicitly
 added (`26a8d20`) as a result of this iteration. Before adding a new
 copy variant or format, check whether it can be expressed as a context
 of the existing `c` command. Do not reintroduce standalone copy
