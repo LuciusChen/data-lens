@@ -73,6 +73,7 @@
 (declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns))
 (declare-function clutch-db-pg--wrap-result "clutch-db-pg" (result))
 (declare-function clutch-db-pg-connect "clutch-db-pg" (params))
+(declare-function clutch-db-sqlite-connect "clutch-db-sqlite" (params))
 (declare-function clutch--jdbc-backend-p "clutch" (backend))
 (declare-function clutch--backend-display-name-from-params "clutch" (params))
 (declare-function clutch--build-conn "clutch" (params))
@@ -85,6 +86,7 @@
 (declare-function make-pgresult "pg" (&rest args))
 (declare-function pgcon-connect-plist "pg" (conn))
 (declare-function pgcon-dbname "pg" (conn))
+(declare-function sqlite-available-p "sqlite" ())
 
 ;;;; Test configuration
 
@@ -613,6 +615,42 @@ connection as live and not busy."
       (should (equal (nreverse calls)
                      '("/* lead */ COMMIT" "-- lead\nBEGIN"))))))
 
+(ert-deftest clutch-db-test-native-pg-ctid-identity-reads-relkind-cell ()
+  "PostgreSQL CTID identity should read the relkind cell, not its first char."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test")))
+    (cl-letf (((symbol-function 'pg-exec)
+               (lambda (_conn _sql)
+                 (make-pgresult :connection conn
+                                :status "SELECT 1"
+                                :attributes '(("relkind" 25 -1))
+                                :tuples '(("r"))))))
+      (should (equal (clutch-db-pg--ctid-identity conn "demo")
+                     '(:kind row-locator
+                       :name "ctid"
+                       :select-expressions ("ctid::text")
+                       :where-sql "ctid = ?::tid"))))))
+
+(ert-deftest clutch-db-test-sqlite-rowid-identity-in-memory ()
+  "SQLite rowid tables should expose `rowid' as a row locator."
+  (skip-unless (require 'clutch-db-sqlite nil t))
+  (skip-unless (and (fboundp 'sqlite-available-p)
+                    (sqlite-available-p)))
+  (let* ((db-file (make-temp-file "clutch-sqlite-rowid-" nil ".db"))
+         (conn (clutch-db-sqlite-connect (list :database db-file))))
+    (unwind-protect
+        (progn
+          (clutch-db-query conn "CREATE TABLE demo (name TEXT)")
+          (let ((candidate (car (clutch-db-row-identity-candidates
+                                 conn "demo"))))
+            (should (equal (plist-get candidate :kind) 'row-locator))
+            (should (equal (plist-get candidate :name) "rowid"))
+            (should (equal (plist-get candidate :select-expressions)
+                           '("rowid")))
+            (should (equal (plist-get candidate :where-sql) "rowid = ?"))))
+      (clutch-db-disconnect conn)
+      (ignore-errors (delete-file db-file)))))
+
 (ert-deftest clutch-db-test-jdbc-show-create-table-uses-oracle-style-identifiers ()
   "Oracle synthesized JDBC DDL should quote only identifiers that need it."
   (let ((conn (make-clutch-jdbc-conn :conn-id 4
@@ -631,6 +669,21 @@ connection as live and not busy."
         (should (string-match-p "\"mixedCase\" VARCHAR2" ddl))
         (should-not (string-match-p "\"ZJ_NCBUSINESSDATA\"" ddl))
         (should-not (string-match-p "\"PK_MAIN\"" ddl))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-row-identity-falls-back-to-rowid ()
+  "Oracle JDBC should offer ROWID when no logical key is available."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 4
+                                     :params '(:driver oracle
+                                               :schema "CLUTCH"))))
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (_conn _table) nil))
+              ((symbol-function 'clutch-jdbc--unique-not-null-identities)
+               (lambda (_conn _table) nil)))
+      (should (equal (clutch-db-row-identity-candidates conn "DEMO")
+                     '((:kind row-locator
+                        :name "ROWID"
+                        :select-expressions ("ROWID")
+                        :where-sql "ROWID = ?")))))))
 
 (ert-deftest clutch-db-test-jdbc-refresh-schema-async-returns-table-names ()
   "Async JDBC schema refresh should return only table names to its callback."
@@ -2241,6 +2294,66 @@ Skips if `clutch-db-test-mysql-password' is nil."
       (should (stringp ddl))
       (should (string-match-p "CREATE\\( TABLE\\| .* VIEW\\)" ddl)))))
 
+(ert-deftest clutch-db-test-mysql-live-row-identity-uses-unique-not-null ()
+  :tags '(:db-live :mysql-live)
+  "MySQL should use a non-null unique key when no primary key exists."
+  (clutch-db-test--with-mysql conn
+    (let* ((table (format "clutch_rowid_unique_%d" (emacs-pid)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table))
+           (create-sql
+            (format "CREATE TABLE %s (code VARCHAR(32) NOT NULL, name VARCHAR(64), UNIQUE KEY uq_code (code))"
+                    table)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query conn create-sql)
+            (let ((candidate (car (clutch-db-row-identity-candidates
+                                   conn table))))
+              (should (equal (plist-get candidate :kind) 'unique-key))
+              (should (equal (plist-get candidate :name) "uq_code"))
+              (should (equal (plist-get candidate :columns) '("code")))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
+
+(ert-deftest clutch-db-test-mysql-live-row-identity-sees-generated-invisible-pk ()
+  :tags '(:db-live :mysql-live)
+  "MySQL generated invisible primary keys should behave as primary keys."
+  (clutch-db-test--with-mysql conn
+    (let* ((table (format "clutch_rowid_gipk_%d" (emacs-pid)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
+      (condition-case nil
+          (progn
+            (ignore-errors
+              (clutch-db-query
+               conn
+               "SET SESSION show_gipk_in_create_table_and_information_schema=ON"))
+            (clutch-db-query
+             conn "SET SESSION sql_generate_invisible_primary_key=ON"))
+        (clutch-db-error
+         (ert-skip "MySQL generated invisible primary keys are unavailable")))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query
+             conn
+             (format "CREATE TABLE %s (name VARCHAR(64))" table))
+            (let ((show-keys
+                   (clutch-db-query
+                    conn
+                    (format "SHOW KEYS FROM %s WHERE Key_name = 'PRIMARY'"
+                            table))))
+              (unless (clutch-db-result-rows show-keys)
+                (ert-skip "MySQL generated invisible primary key metadata is hidden")))
+            (should (equal (clutch-db-primary-key-columns conn table)
+                           '("my_row_id")))
+            (let ((candidate (car (clutch-db-row-identity-candidates
+                                   conn table))))
+              (should (equal (plist-get candidate :kind) 'primary-key))
+              (should (equal (plist-get candidate :columns) '("my_row_id")))))
+        (ignore-errors (clutch-db-query conn drop-sql))
+        (ignore-errors
+          (clutch-db-query
+           conn "SET SESSION sql_generate_invisible_primary_key=OFF"))))))
+
 (ert-deftest clutch-db-test-mysql-show-create-table-empty-rows-errors-cleanly ()
   "MySQL show-create-table should signal `clutch-db-error' on empty row sets."
   (let ((conn (make-mysql-conn :host "localhost")))
@@ -2299,6 +2412,27 @@ Skips if `clutch-db-test-pg-password' is nil."
       (should (string-match-p "CREATE TABLE" ddl)))
     ;; Cleanup
     (clutch-db-query conn "DROP TABLE IF EXISTS _schema_real")))
+
+(ert-deftest clutch-db-test-pg-live-row-identity-uses-ctid ()
+  :tags '(:db-live :pg-live)
+  "PostgreSQL should use CTID when no logical key exists."
+  (clutch-db-test--with-pg conn
+    (let* ((table (format "clutch_rowid_ctid_%d" (emacs-pid)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query conn
+                             (format "CREATE TABLE %s (name TEXT)" table))
+            (let ((candidate (car (clutch-db-row-identity-candidates
+                                   conn table))))
+              (should (equal (plist-get candidate :kind) 'row-locator))
+              (should (equal (plist-get candidate :name) "ctid"))
+              (should (equal (plist-get candidate :select-expressions)
+                             '("ctid::text")))
+              (should (equal (plist-get candidate :where-sql)
+                             "ctid = ?::tid"))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
 
 ;;;; Live integration tests — JDBC / Oracle
 ;;
@@ -2499,6 +2633,69 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
             (let ((cols (clutch-db-list-columns conn tbl)))
               (should (member "ID" cols))
               (should (member "NAME" cols))))
+        (ignore-errors
+          (clutch-db-query conn (format "DROP TABLE %s" tbl)))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-row-identity-uses-unique-not-null ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Oracle JDBC should use a non-null unique key when no primary key exists."
+  (clutch-db-test--with-oracle conn
+    (let* ((suffix (abs (random 9999)))
+           (tbl (format "CC_UID_%d" suffix))
+           (idx (format "CC_UID_UQ_%d" suffix)))
+      (unwind-protect
+          (progn
+            (clutch-db-query
+             conn
+             (format "CREATE TABLE %s (code VARCHAR2(32) NOT NULL, name VARCHAR2(64), CONSTRAINT %s UNIQUE (code))"
+                     tbl idx))
+            (let ((candidate (car (clutch-db-row-identity-candidates
+                                   conn tbl))))
+              (should (equal (plist-get candidate :kind) 'unique-key))
+              (should (equal (plist-get candidate :name) idx))
+              (should (equal (plist-get candidate :columns) '("CODE")))))
+        (ignore-errors
+          (clutch-db-query conn (format "DROP TABLE %s" tbl)))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-row-identity-falls-back-to-rowid ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Oracle JDBC should use ROWID to update a table without a logical key."
+  (clutch-db-test--with-oracle conn
+    (let ((tbl (format "CC_ROWID_%d" (abs (random 9999)))))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn
+                             (format "CREATE TABLE %s (name VARCHAR2(64))"
+                                     tbl))
+            (clutch-db-query conn
+                             (format "INSERT INTO %s (name) VALUES ('before')"
+                                     tbl))
+            (let ((candidate (car (clutch-db-row-identity-candidates
+                                   conn tbl))))
+              (should (equal (plist-get candidate :kind) 'row-locator))
+              (should (equal (plist-get candidate :name) "ROWID"))
+              (should (equal (plist-get candidate :select-expressions)
+                             '("ROWID")))
+              (should (equal (plist-get candidate :where-sql) "ROWID = ?")))
+            (let* ((rows (clutch-db-result-rows
+                          (clutch-db-query
+                           conn
+                           (format "SELECT ROWID, name FROM %s" tbl))))
+                   (rowid (caar rows))
+                   (update-result
+                    (clutch-db-execute-params
+                     conn
+                     (format "UPDATE %s SET name = ? WHERE ROWID = ?" tbl)
+                     (list "after" rowid))))
+              (should (equal (cadar rows) "before"))
+              (should (equal (clutch-db-result-affected-rows update-result)
+                             1))
+              (should (equal (clutch-db-result-rows
+                              (clutch-db-query
+                               conn
+                               (format "SELECT name FROM %s WHERE ROWID = '%s'"
+                                       tbl rowid)))
+                             '(("after"))))))
         (ignore-errors
           (clutch-db-query conn (format "DROP TABLE %s" tbl)))))))
 

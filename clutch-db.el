@@ -654,6 +654,23 @@ nil when unsupported.")
 (cl-defgeneric clutch-db-primary-key-columns (conn table)
   "Return a list of primary key column name strings for TABLE on CONN.")
 
+(cl-defgeneric clutch-db-row-identity-candidates (conn table)
+  "Return row identity candidate plists for TABLE on CONN.
+Candidates are ordered from most stable to least stable.  A candidate with
+:kind `primary-key' or `unique-key' has :columns as source column names.  A
+candidate with :kind `row-locator' has :select-expressions as SQL expressions
+that can be hidden in SELECT results and :where-sql as the predicate used by
+UPDATE and DELETE.")
+
+(cl-defmethod clutch-db-row-identity-candidates ((conn t) table)
+  "Return the primary-key row identity candidate for CONN and TABLE."
+  (condition-case nil
+      (when-let* ((pk-cols (clutch-db-primary-key-columns conn table)))
+        (list (list :kind 'primary-key
+                    :name "PRIMARY"
+                    :columns pk-cols)))
+    (error nil)))
+
 (cl-defgeneric clutch-db-foreign-keys (conn table)
   "Return foreign key info for TABLE on CONN.
 Returns an alist of (COLUMN-NAME . (:ref-table T :ref-column C)).")

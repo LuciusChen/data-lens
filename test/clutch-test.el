@@ -64,6 +64,16 @@
     (with-current-buffer buf
       (buffer-string))))
 
+(defun clutch-test--primary-row-identity (&optional table columns indices)
+  "Return primary-key row identity metadata for tests."
+  (let ((indices (or indices '(0))))
+    (list :kind 'primary-key
+          :name "PRIMARY"
+          :table (or table "users")
+          :columns (or columns '("id"))
+          :indices indices
+          :source-indices indices)))
+
 ;;;; Rendering — value formatting
 
 (ert-deftest clutch-test-format-value-nil ()
@@ -380,6 +390,93 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
     (setq-local clutch--result-columns '("c1" "c2" "c3" "c4"))
     (should (equal (clutch--visible-columns) '(0 1 2 3)))))
 
+(ert-deftest clutch-test-visible-columns-skips-hidden-row-identity-columns ()
+  "Hidden row identity columns should not be rendered as user data."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("clutch__rid_0" "id" "name")
+                clutch--result-column-defs
+                '((:name "clutch__rid_0" :hidden t)
+                  (:name "id")
+                  (:name "name")))
+    (should (equal (clutch--visible-columns) '(1 2)))))
+
+(ert-deftest clutch-test-row-identity-prep-injects-hidden-primary-key ()
+  "Simple table SELECTs should receive hidden identity expressions."
+  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn _table)
+               (list (list :kind 'primary-key
+                           :name "PRIMARY"
+                           :columns '("id")))))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    (let ((prep (clutch--prepare-row-identity-query
+                 'fake-conn "SELECT name FROM users WHERE active = 1")))
+      (should (plist-get prep :augmented))
+      (should (equal (plist-get prep :hidden-aliases) '("clutch__rid_0")))
+      (should (equal (plist-get prep :sql)
+                     "SELECT name, \"id\" AS \"clutch__rid_0\" FROM users WHERE active = 1")))))
+
+(ert-deftest clutch-test-row-identity-prep-preserves-ordinal-order-by ()
+  "Hidden identity expressions should not change ORDER BY ordinals."
+  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn _table)
+               (list (list :kind 'primary-key
+                           :name "PRIMARY"
+                           :columns '("id")))))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    (let ((prep (clutch--prepare-row-identity-query
+                 'fake-conn "SELECT name, status FROM users ORDER BY 1")))
+      (should (plist-get prep :augmented))
+      (should (equal (plist-get prep :sql)
+                     "SELECT name, status, \"id\" AS \"clutch__rid_0\" FROM users ORDER BY 1")))))
+
+(ert-deftest clutch-test-row-identity-prep-skips-joined-selects ()
+  "Joined SELECTs should not receive table-local hidden identity columns."
+  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn _table)
+               (list (list :kind 'primary-key
+                           :name "PRIMARY"
+                           :columns '("id")))))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    (let* ((sql "SELECT u.name, o.total FROM users u JOIN orders o ON o.user_id = u.id")
+           (prep (clutch--prepare-row-identity-query 'fake-conn sql)))
+      (should-not (plist-get prep :augmented))
+      (should (equal (plist-get prep :sql) sql)))))
+
+(ert-deftest clutch-test-row-identity-prep-skips-comma-joins-and-derived-selects ()
+  "Ambiguous or derived SELECTs should not receive hidden identity columns."
+  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn _table)
+               (list (list :kind 'primary-key
+                           :name "PRIMARY"
+                           :columns '("id")))))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    (dolist (sql '("SELECT * FROM users, orders"
+                   "WITH x AS (SELECT * FROM users) SELECT * FROM x"
+                   "SELECT * FROM (SELECT * FROM users) u"))
+      (let ((prep (clutch--prepare-row-identity-query 'fake-conn sql)))
+        (should-not (plist-get prep :augmented))
+        (should (equal (plist-get prep :sql) sql))))))
+
+(ert-deftest clutch-test-row-identity-finalize-separates-hidden-and-source-pk ()
+  "Hidden locator indices and visible source PK indices should stay distinct."
+  (let* ((prep (list :table "users"
+                     :candidate (list :kind 'primary-key
+                                      :name "PRIMARY"
+                                      :columns '("id"))
+                     :hidden-aliases '("clutch__rid_0")
+                     :augmented t))
+         (columns (clutch--apply-row-identity-column-metadata
+                   '((:name "id") (:name "name") (:name "clutch__rid_0"))
+                   prep))
+         (row-identity (clutch--finalize-row-identity prep columns)))
+    (should (plist-get (nth 2 columns) :hidden))
+    (should (equal (plist-get row-identity :indices) '(2)))
+    (should (equal (plist-get row-identity :source-indices) '(0)))))
+
 (ert-deftest clutch-test-render-result-includes-all-columns ()
   "Wide tables should keep later columns searchable and reachable by TAB."
   (with-temp-buffer
@@ -521,7 +618,8 @@ ROWS defaults to a small three-row sample."
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil
                 clutch--marked-rows nil
-                clutch--cached-pk-indices '(0)
+                clutch--row-identity (clutch-test--primary-row-identity
+                                       "users" '("id") '(0))
                 clutch--sort-column nil
                 clutch--sort-descending nil
                 clutch--page-current 0
@@ -609,7 +707,8 @@ ROWS defaults to a small three-row sample."
   (with-temp-buffer
     (setq-local clutch--result-column-defs '((:name "id" :type-category numeric)
                                              (:name "name" :type-category text))
-                clutch--cached-pk-indices '(0))
+                clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0)))
     (let* ((clutch--pending-edits '((([1] . 1) . "edited")))
            (render-state (clutch--build-render-state))
            (cell (clutch--render-cell '(1 "before") 0 1 [4 8] render-state)))
@@ -649,7 +748,8 @@ ROWS defaults to a small three-row sample."
                 clutch-result-max-rows 100
                 clutch--page-current 0
                 clutch--column-widths [4 8]
-                clutch--cached-pk-indices '(0)
+                clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0))
                 clutch--pending-edits '((([1] . 1) . "edited"))
                 clutch--pending-deletes nil
                 clutch--marked-rows nil)
@@ -659,8 +759,8 @@ ROWS defaults to a small three-row sample."
                                 (clutch--build-render-state))
       (should (string-prefix-p "│E  1 " (buffer-string))))))
 
-(ert-deftest clutch-test-record-render-uses-pk-keyed-pending-edits ()
-  "Record view should render staged edits keyed by primary key."
+(ert-deftest clutch-test-record-render-uses-row-identity-keyed-pending-edits ()
+  "Record view should render staged edits keyed by row identity."
   (let ((result-buf (generate-new-buffer "*clutch-result*")))
     (unwind-protect
         (progn
@@ -669,7 +769,8 @@ ROWS defaults to a small three-row sample."
                         clutch--result-column-defs '((:name "id" :type-category numeric)
                                                      (:name "name" :type-category text))
                         clutch--result-rows '((1 "before"))
-                        clutch--cached-pk-indices '(0)
+                        clutch--row-identity (clutch-test--primary-row-identity
+                                              "users" '("id") '(0))
                         clutch--pending-edits '((([1] . 1) . "edited"))
                         clutch--fk-info nil))
           (with-temp-buffer
@@ -695,7 +796,6 @@ ROWS defaults to a small three-row sample."
                         clutch--result-column-defs '((:name "id" :type-category numeric)
                                                      (:name "name" :type-category text))
                         clutch--result-rows '((1 "before"))
-                        clutch--cached-pk-indices '(0)
                         clutch--pending-edits nil
                         clutch--fk-info nil))
           (with-temp-buffer
@@ -734,7 +834,6 @@ ROWS defaults to a small three-row sample."
                       clutch--sort-descending nil
                       clutch--page-current 0
                       clutch--page-total-rows 3
-                      clutch--cached-pk-indices nil
                       clutch--fk-info nil
                       clutch--column-widths [2 5])
           (clutch--refresh-display)
@@ -936,20 +1035,19 @@ ROWS defaults to a small three-row sample."
                             (substring-no-properties
                              (clutch--footer-cursor-part))))))
 
-(ert-deftest clutch-test-render-footer-warns-when-primary-key-missing ()
-  "Footer should explain when edit/delete are disabled due to missing PK."
+(ert-deftest clutch-test-render-footer-warns-when-row-identity-missing ()
+  "Footer should explain when edit/delete are disabled due to missing identity."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name")
-                clutch--last-query "SELECT * FROM users"
-                clutch--cached-pk-indices nil)
+                clutch--last-query "SELECT * FROM users")
     (let* ((footer-prop (clutch--render-footer 10 0 500 100))
            (footer (substring-no-properties footer-prop))
-           (pk-start (string-match "PK missing" footer)))
-      (should (string-match-p "PK missing" footer))
+           (identity-start (string-match "row identity missing" footer)))
+      (should (string-match-p "row identity missing" footer))
       (should-not (string-match-p "users" footer))
       (should (string-match-p "E/D off" footer))
-      (should pk-start)
-      (should (equal (get-text-property pk-start 'face footer-prop)
+      (should identity-start)
+      (should (equal (get-text-property identity-start 'face footer-prop)
                      '(:inherit font-lock-warning-face :weight normal))))))
 
 (ert-deftest clutch-test-result-mode-does-not-override-mouse-wheel ()
@@ -3808,7 +3906,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      '("severity")
                      '((:name "severity" :type-category text))
                      '(("low"))
-                     'clutch--cached-pk-indices '(0))))
+                     'clutch--row-identity
+                     (clutch-test--primary-row-identity
+                      "shipping_incidents" '("severity") '(0)))))
     (unwind-protect
         (let ((buf (clutch-test--open-edit-cell
                     result-buf
@@ -3826,25 +3926,22 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               (should (equal candidates '("low" "medium" "high"))))))
       (kill-buffer result-buf))))
 
-(ert-deftest clutch-test-edit-cell-errors-clearly-without-primary-key ()
+(ert-deftest clutch-test-edit-cell-errors-clearly-without-row-identity ()
   "Edit entry should fail early when the result is not updateable."
   (let ((result-buf (clutch-test--make-edit-cell-result-buffer
                      '("id" "name")
                      '((:name "id" :type-category numeric)
                        (:name "name" :type-category text))
                      '((1 "alice"))
-                     'clutch--last-query "SELECT * FROM users"
-                     'clutch--cached-pk-indices nil)))
+                     'clutch--last-query "SELECT * FROM users")))
     (unwind-protect
         (cl-letf (((symbol-function 'clutch-result--cell-at-point)
-                   (lambda () '(0 1 "alice")))
-                  ((symbol-function 'clutch-result--detect-primary-key)
-                   (lambda () nil)))
+                   (lambda () '(0 1 "alice"))))
           (with-current-buffer result-buf
             (let ((err (should-error (clutch-result-edit-cell)
                                      :type 'user-error)))
               (should (string-match-p
-                       "Cannot edit cell: no primary key detected for table users"
+                       "Cannot edit cell: no primary, unique, or row locator identity available for table users"
                        (error-message-string err))))
             (should-not (get-buffer "*clutch-edit: [0].name*"))))
       (kill-buffer result-buf))))
@@ -3855,7 +3952,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      '("opened_at")
                      '((:name "opened_at" :type-category datetime))
                      '(("2026-03-10 10:00:00"))
-                     'clutch--cached-pk-indices '(0))))
+                     'clutch--row-identity
+                     (clutch-test--primary-row-identity
+                      "shipping_incidents" '("opened_at") '(0)))))
     (unwind-protect
         (let ((buf (clutch-test--open-edit-cell
                     result-buf
@@ -3874,7 +3973,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      '("payload")
                      '((:name "payload" :type-category json))
                      '(("{\"a\":1}"))
-                     'clutch--cached-pk-indices '(0))))
+                     'clutch--row-identity
+                     (clutch-test--primary-row-identity
+                      "shipping_incidents" '("payload") '(0)))))
     (unwind-protect
         (let ((buf (clutch-test--open-edit-cell
                     result-buf
@@ -3898,7 +3999,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                       '("payload")
                       '((:name "payload" :type-category json))
                       (list (list payload))
-                      'clutch--cached-pk-indices '(0))))
+                      'clutch--row-identity
+                      (clutch-test--primary-row-identity
+                       "shipping_incidents" '("payload") '(0)))))
     (puthash "test" t payload)
     (puthash "data" (vector 1 2) payload)
     (unwind-protect
@@ -3927,7 +4030,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                       '("payload")
                       '((:name "payload" :type-category json))
                       (list (list payload))
-                      'clutch--cached-pk-indices '(0))))
+                      'clutch--row-identity
+                      (clutch-test--primary-row-identity
+                       "shipping_incidents" '("payload") '(0)))))
     (unwind-protect
         (let ((buf (clutch-test--open-edit-cell
                     result-buf
@@ -4269,7 +4374,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                                      (:name "created_at" :type-category datetime))
                         clutch--result-rows '((1 "low" "alice" "2026-03-01 10:00:00"))
                         clutch--filtered-rows nil
-                        clutch--cached-pk-indices '(0)
+                        clutch--row-identity (clutch-test--primary-row-identity
+                                              "shipping_incidents" '("id") '(0))
                         clutch--pending-edits '((([1] . 1) . "high"))))
           (cl-letf (((symbol-function 'clutch-result--row-idx-at-line)
                      (lambda () 0))
@@ -4348,8 +4454,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                         clutch--result-column-defs '((:name "id" :type-category numeric)
                                                      (:name "label" :type-category text))
                         clutch--result-rows '((42 "duplicate me"))
-                        clutch--filtered-rows nil
-                        clutch--cached-pk-indices '(0)))
+                        clutch--filtered-rows nil))
           (cl-letf (((symbol-function 'clutch-result--row-idx-at-line)
                      (lambda () 0))
                     ((symbol-function 'clutch--ensure-column-details)
@@ -4440,7 +4545,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (kill-buffer insert-buf))
       (kill-buffer result-buf))))
 
-;;;; Edit — staged mutations (PK-vec)
+;;;; Edit — staged mutations (row identity)
 
 (ert-deftest clutch-test-insert-commit-replaces-existing-pending-insert ()
   "Committing a re-edited insert should replace the staged entry in place."
@@ -4466,7 +4571,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (setq-local clutch--pending-edits '((([1] . 1) . "edited")))
     (setq-local clutch--pending-deletes '([1]))
     (setq-local clutch--marked-rows '(0 2))
-    (setq-local clutch--cached-pk-indices '(0))
     (let* ((state (clutch--build-render-state))
            (edits (plist-get state :edits))
            (edit-rows (plist-get state :edit-rows))
@@ -4479,39 +4583,36 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (gethash 2 marked))
       (should (gethash [1] deletes)))))
 
-(ert-deftest clutch-test-apply-edit-errors-clearly-without-primary-key ()
+(ert-deftest clutch-test-apply-edit-errors-clearly-without-row-identity ()
   "Edit staging should explain why update/delete are disabled."
   (with-temp-buffer
     (setq-local clutch--last-query "SELECT * FROM users"
                 clutch--result-rows '((1 "before"))
-                clutch--filtered-rows nil
-                clutch--cached-pk-indices nil)
-    (cl-letf (((symbol-function 'clutch-result--detect-primary-key) (lambda () nil)))
-      (condition-case err
-          (progn
-            (clutch-result--apply-edit 0 1 "after")
-            (should nil))
-        (user-error
-         (should (string-match-p
-                  "no primary key detected for table users"
-                  (error-message-string err))))))))
+                clutch--filtered-rows nil)
+    (condition-case err
+        (progn
+          (clutch-result--apply-edit 0 1 "after")
+          (should nil))
+      (user-error
+       (should (string-match-p
+                "no primary, unique, or row locator identity available for table users"
+                (error-message-string err)))))))
 
-(ert-deftest clutch-test-delete-rows-errors-clearly-without-primary-key ()
+(ert-deftest clutch-test-delete-rows-errors-clearly-without-row-identity ()
   "Delete staging should explain why update/delete are disabled."
   (with-temp-buffer
     (setq-local clutch--last-query "SELECT * FROM users"
                 clutch--result-rows '((1 "before"))
-                clutch--filtered-rows nil
-                clutch--cached-pk-indices nil)
+                clutch--filtered-rows nil)
     (cl-letf (((symbol-function 'clutch-result--selected-row-indices) (lambda () '(0)))
-              ((symbol-function 'clutch-result--detect-primary-key) (lambda () nil)))
+              ((symbol-function 'clutch--refresh-display) #'ignore))
       (condition-case err
           (progn
             (clutch-result-delete-rows)
             (should nil))
         (user-error
          (should (string-match-p
-                  "no primary key detected for table users"
+                  "no primary, unique, or row locator identity available for table users"
                   (error-message-string err))))))))
 
 (ert-deftest clutch-test-build-delete-stmt-variants ()
@@ -4543,8 +4644,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        ())))
         (pcase-let ((`(,label ,table ,row ,columns ,pk-indices ,sql ,params) case))
           (ert-info ((format "delete case: %s" label))
-            (let ((stmt (clutch-result--build-delete-stmt
-                         table row columns pk-indices)))
+            (let* ((row-identity
+                    (list :kind 'primary-key
+                          :name "PRIMARY"
+                          :table table
+                          :columns (mapcar (lambda (i) (nth i columns))
+                                           pk-indices)
+                          :indices pk-indices))
+                   (stmt (clutch-result--build-delete-stmt
+                          table row columns row-identity)))
               (should (equal (car stmt) sql))
               (should (equal (cdr stmt) params))
               (should-not (member nil (cdr stmt))))))))))
@@ -4564,30 +4672,30 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        "INSERT INTO \"users\" (\"id\", \"name\", \"note\") VALUES (?, ?, ?)"))
         (should (equal (cdr stmt) '("7" "alice" nil)))))))
 
-(ert-deftest clutch-test-stage-delete-stores-pk-vec ()
-  "Staging a delete stores a PK vector, not a ridx integer."
+(ert-deftest clutch-test-stage-delete-stores-row-identity-vec ()
+  "Staging a delete stores an identity vector, not a ridx integer."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name"))
     (setq-local clutch--result-rows (list (list 42 "alice")))
-    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0)))
     (setq-local clutch--filtered-rows nil)
     (setq-local clutch--pending-deletes nil)
     (cl-letf (((symbol-function 'clutch-result--selected-row-indices) (lambda () '(0)))
               ((symbol-function 'clutch-result--detect-table) (lambda () "users"))
-              ((symbol-function 'clutch-result--detect-primary-key) (lambda () '(0)))
               ((symbol-function 'clutch--refresh-display) #'ignore))
       (clutch-result-delete-rows)
       (should (equal clutch--pending-deletes (list (vector 42)))))))
 
-(ert-deftest clutch-test-commit-delete-uses-pk-vec ()
-  "DELETE statement uses PK values from stored vector, not ridx."
+(ert-deftest clutch-test-commit-delete-uses-row-identity-vec ()
+  "DELETE statement uses identity values from stored vector, not ridx."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (setq-local clutch--result-columns '("id" "name"))
-    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0)))
     (setq-local clutch--pending-deletes (list (vector 42)))
     (cl-letf (((symbol-function 'clutch-result--detect-table) (lambda () "users"))
-              ((symbol-function 'clutch-result--detect-primary-key) (lambda () '(0)))
               ((symbol-function 'clutch-db-escape-identifier)
                (lambda (_conn name) (format "`%s`" name))))
       (let ((stmts (clutch-result--build-pending-delete-statements)))
@@ -4595,12 +4703,13 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (equal (caar stmts) "DELETE FROM `users` WHERE `id` = ?"))
         (should (equal (cdar stmts) '(42)))))))
 
-(ert-deftest clutch-test-stage-edit-stores-pk-vec ()
-  "Staging an edit stores (pk-vec . cidx) key, not (ridx . cidx)."
+(ert-deftest clutch-test-stage-edit-stores-row-identity-vec ()
+  "Staging an edit stores (identity-vec . cidx) key, not (ridx . cidx)."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name"))
     (setq-local clutch--result-rows (list (list 7 "bob")))
-    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0)))
     (setq-local clutch--filtered-rows nil)
     (setq-local clutch--pending-edits nil)
     (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore)
@@ -4612,16 +4721,16 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (equal (car key) (vector 7)))
         (should (= (cdr key) 1))))))
 
-(ert-deftest clutch-test-commit-edit-generates-update-with-pk-where ()
-  "UPDATE statement uses PK values in WHERE clause."
+(ert-deftest clutch-test-commit-edit-generates-update-with-primary-key-identity-where ()
+  "UPDATE statement uses primary-key identity values in WHERE clause."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (setq-local clutch--result-columns '("id" "name"))
-    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0)))
     (setq-local clutch--pending-edits
                 (list (cons (cons (vector 7) 1) "carol")))
     (cl-letf (((symbol-function 'clutch-result--detect-table) (lambda () "users"))
-              ((symbol-function 'clutch-result--detect-primary-key) (lambda () '(0)))
               ((symbol-function 'clutch-db-escape-identifier)
                (lambda (_conn name) (format "`%s`" name))))
       (let ((stmts (clutch-result--build-update-statements)))
@@ -4630,12 +4739,31 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        "UPDATE `users` SET `name` = ? WHERE `id` = ?"))
         (should (equal (cdar stmts) '("carol" 7)))))))
 
-(ert-deftest clutch-test-discard-delete-removes-pk-entry ()
+(ert-deftest clutch-test-build-update-stmt-uses-row-locator-where ()
+  "UPDATE builder should use backend row locator predicates when available."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn name) (format "\"%s\"" name))))
+      (let* ((row-identity (list :kind 'row-locator
+                                 :table "users"
+                                 :indices '(0)
+                                 :hidden-aliases '("clutch__rid_0")
+                                 :where-sql "ctid = ?::tid"))
+             (stmt (clutch-result--build-update-stmt
+                    "users" (vector "(0,1)") '((1 . "carol"))
+                    '("clutch__rid_0" "name") row-identity)))
+        (should (equal (car stmt)
+                       "UPDATE \"users\" SET \"name\" = ? WHERE ctid = ?::tid"))
+        (should (equal (cdr stmt) '("carol" "(0,1)")))))))
+
+(ert-deftest clutch-test-discard-delete-removes-row-identity-entry ()
   "Discarding a delete should remove the matching staged delete."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name"))
     (setq-local clutch--result-rows (list (list 42 "alice")))
-    (setq-local clutch--cached-pk-indices '(0))
+    (setq-local clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0)))
     (setq-local clutch--filtered-rows nil)
     (setq-local clutch--pending-deletes (list (vector 42)))
     (setq-local clutch--pending-edits nil)
@@ -4664,7 +4792,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name")
                 clutch--result-rows (list (list 42 "alice"))
-                clutch--cached-pk-indices '(0)
+                clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0))
                 clutch--filtered-rows nil
                 clutch--pending-edits (list (cons (cons (vector 42) 1) "carol"))
                 clutch--pending-deletes nil
@@ -4695,7 +4824,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (setq-local clutch-connection 'fake-conn)
     (setq-local clutch--result-columns '("id" "name"))
     (setq-local clutch--result-rows (list (list 1 "a") (list 2 "b")))
-    (setq-local clutch--cached-pk-indices '(0))
     (setq-local clutch--pending-inserts '((("id" . "3") ("name" . "c"))))
     (setq-local clutch--pending-edits
                 (list (cons (cons (vector 1) 1) "a2")))
@@ -4963,7 +5091,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                       clutch--result-column-defs '((:name "name" :type-category text))
                       clutch--result-rows '(("before"))
                       clutch--last-query "SELECT * FROM users"
-                      clutch--cached-pk-indices '(0))
+                      clutch--row-identity (clutch-test--primary-row-identity
+                                            "users" '("name") '(0)))
           (let ((inhibit-read-only t))
             (insert "before")
             (add-text-properties (point-min) (point-max)
@@ -5398,28 +5527,33 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 (ert-deftest clutch-test-copy-update-errors-when-only-pk-column-is-selected ()
   "UPDATE copy should reject selections that contain only primary key columns."
   (with-temp-buffer
-    (setq-local clutch--result-columns '("id" "name"))
+    (setq-local clutch--result-columns '("id" "name")
+                clutch--result-column-defs '((:name "id" :type-category numeric)
+                                             (:name "name" :type-category text))
+                clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0)))
     (cl-letf (((symbol-function 'clutch--result-source-table-or-user-error)
-               (lambda (_op) "users"))
-              ((symbol-function 'clutch--result-pk-indices-or-user-error)
-               (lambda (_table _op) '(0))))
+               (lambda (_op) "users")))
       (let ((err (should-error
                   (clutch-result--build-update-statements-for-rows
                    '((1 "a")) '(0) "copy UPDATE SQL")
                   :type 'user-error)))
         (should (string-match-p
-                 "Cannot copy UPDATE SQL: no non-primary-key columns selected"
+                 "Cannot copy UPDATE SQL: no writable source columns selected"
                  (error-message-string err)))))))
 
 (ert-deftest clutch-test-copy-update-errors-on-non-source-columns ()
   "UPDATE copy should reject alias or computed columns."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
-                clutch--result-columns '("id" "name" "computed_total"))
+                clutch--result-columns '("id" "name" "computed_total")
+                clutch--result-column-defs '((:name "id" :type-category numeric)
+                                             (:name "name" :type-category text)
+                                             (:name "computed_total" :type-category numeric))
+                clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0)))
     (cl-letf (((symbol-function 'clutch--result-source-table-or-user-error)
                (lambda (_op) "users"))
-              ((symbol-function 'clutch--result-pk-indices-or-user-error)
-               (lambda (_table _op) '(0)))
               ((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  (list (list :name "id")
@@ -5436,11 +5570,13 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "UPDATE copy should reject generated source columns."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
-                clutch--result-columns '("id" "generated_name"))
+                clutch--result-columns '("id" "generated_name")
+                clutch--result-column-defs '((:name "id" :type-category numeric)
+                                             (:name "generated_name" :type-category text))
+                clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0)))
     (cl-letf (((symbol-function 'clutch--result-source-table-or-user-error)
                (lambda (_op) "users"))
-              ((symbol-function 'clutch--result-pk-indices-or-user-error)
-               (lambda (_table _op) '(0)))
               ((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  (list (list :name "id")
@@ -8246,25 +8382,21 @@ This applies when the buffer owns the connection."
         (captured-pk :unset))
     (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
                (lambda (_conn sql _page-num _page-size &optional _order-by) sql))
+              ((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (_conn _table)
+                 (list (list :kind 'primary-key
+                             :name "PRIMARY"
+                             :columns '("id")))))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn id) (format "\"%s\"" id)))
               ((symbol-function 'clutch-db-query)
                (lambda (_conn _sql)
                  (make-clutch-db-result
-                  :columns '((:name "id") (:name "name"))
-                  :rows '((1 "a")))))
+                  :columns '((:name "id") (:name "name") (:name "clutch__rid_0"))
+                  :rows '((1 "a" 1)))))
               ((symbol-function 'clutch--result-buffer-name)
                (lambda () "*clutch-test-result*"))
               ((symbol-function 'clutch--show-result-buffer) #'ignore)
-              ((symbol-function 'clutch--init-result-state)
-               (lambda (_conn sql columns rows elapsed)
-                 (setq-local clutch-connection 'fake-conn
-                             clutch--last-query sql
-                             clutch--result-columns (mapcar (lambda (c) (plist-get c :name)) columns)
-                             clutch--result-column-defs columns
-                             clutch--result-rows rows
-                             clutch--query-elapsed elapsed)
-                 clutch--result-columns))
-              ((symbol-function 'clutch-result--detect-primary-key)
-               (lambda () '(0)))
               ((symbol-function 'clutch--load-fk-info) #'ignore)
               ((symbol-function 'clutch--display-select-result)
                (lambda (&rest _args)
@@ -11041,6 +11173,14 @@ Skips if `clutch-test-password' is nil."
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
             (with-temp-buffer
+              (let ((row-identity (car (clutch-db-row-identity-candidates
+                                         conn table))))
+                (should row-identity)
+                (setq-local clutch--row-identity
+                            (append (list :table table
+                                          :indices '(0)
+                                          :source-indices '(0))
+                                    row-identity)))
               (setq-local clutch-connection conn)
               (setq-local clutch--last-query select-sql)
               (setq-local clutch--result-columns '("id" "name"))

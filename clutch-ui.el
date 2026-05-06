@@ -23,6 +23,7 @@
   "Last aggregate summary plist for result footer, or nil.
 Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
 (defvar clutch--cached-pk-indices)
+(defvar clutch--row-identity)
 (defvar clutch--cell-default-placeholder)
 (defvar clutch--cell-generated-placeholder)
 (defvar-local clutch--column-widths nil
@@ -64,9 +65,9 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
 (defvar-local clutch--page-total-rows nil
   "Total row count from COUNT(*), or nil if not yet queried.")
 (defvar-local clutch--pending-deletes nil
-  "List of pk-value vectors staged for deletion.")
+  "List of row identity vectors staged for deletion.")
 (defvar-local clutch--pending-edits nil
-  "Alist of staged edits: ((PK-VEC . COL-IDX) . NEW-VALUE).")
+  "Alist of staged edits: ((IDENTITY-VEC . COL-IDX) . NEW-VALUE).")
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.")
 (defvar-local clutch--query-elapsed nil
@@ -79,6 +80,8 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
   "Column names from the last result.")
 (defvar-local clutch--result-rows nil
   "Row data from the last result.")
+(defvar-local clutch--row-identity nil
+  "Row identity metadata for staging edits and deletes in the current result.")
 (defvar-local clutch--executed-sql-overlay nil
   "Overlay marking the last successfully executed SQL statement.")
 (defvar-local clutch--row-overlay nil
@@ -140,7 +143,8 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--visible-columns "clutch-query" ())
 (declare-function clutch-result--detect-table "clutch-edit" ())
 (declare-function clutch-result--table-from-sql "clutch-edit" (sql))
-(declare-function clutch-result--extract-pk-vec "clutch-edit" (row pk-indices))
+(declare-function clutch-result--current-row-identity "clutch-edit" (&optional table))
+(declare-function clutch-result--extract-row-identity-vec "clutch-edit" (row row-identity))
 (declare-function clutch-result--row-idx-at-line "clutch-edit" ())
 (declare-function clutch-result-mode "clutch" (&optional arg))
 (declare-function clutch--connection-key "clutch-connection" (conn))
@@ -501,35 +505,38 @@ rendering large result pages."
   (let ((edit-table (make-hash-table :test 'equal))
         (edit-row-table (make-hash-table :test 'equal))
         (marked-table (make-hash-table :test 'eql))
-        (delete-table (make-hash-table :test 'equal)))
+        (delete-table (make-hash-table :test 'equal))
+        (row-identity (clutch-result--current-row-identity)))
     (dolist (edit clutch--pending-edits)
       (puthash (car edit) edit edit-table)
       (puthash (car (car edit)) t edit-row-table))
     (dolist (ridx clutch--marked-rows)
       (puthash ridx t marked-table))
-    (dolist (pk-vec clutch--pending-deletes)
-      (puthash pk-vec t delete-table))
+    (dolist (identity-vec clutch--pending-deletes)
+      (puthash identity-vec t delete-table))
     (list :edits edit-table
           :edit-rows edit-row-table
           :marked marked-table
           :deletes delete-table
           :insert-placeholders (clutch--pending-insert-placeholders)
-          :pk-indices clutch--cached-pk-indices)))
+          :row-identity row-identity)))
 
 (defun clutch--render-edit-entry (row _ridx cidx render-state)
   "Return staged edit entry for ROW/CIDX from RENDER-STATE, or nil."
   (let* ((edits (plist-get render-state :edits))
-         (pk-indices (plist-get render-state :pk-indices)))
-    (and pk-indices
-         (gethash (cons (clutch-result--extract-pk-vec row pk-indices) cidx)
+         (row-identity (plist-get render-state :row-identity)))
+    (and row-identity
+         (gethash (cons (clutch-result--extract-row-identity-vec
+                         row row-identity)
+                        cidx)
                   edits))))
 
 (defun clutch--row-pending-edit-p (row _ridx render-state)
   "Return non-nil when ROW has any staged edit in RENDER-STATE."
   (let* ((edit-rows (plist-get render-state :edit-rows))
-         (pk-indices (plist-get render-state :pk-indices)))
-    (and pk-indices
-         (gethash (clutch-result--extract-pk-vec row pk-indices)
+         (row-identity (plist-get render-state :row-identity)))
+    (and row-identity
+         (gethash (clutch-result--extract-row-identity-vec row row-identity)
                   edit-rows))))
 
 (defun clutch--render-cell (row ridx cidx widths render-state)
@@ -586,9 +593,10 @@ RENDER-STATE carries cached lookup tables for staged row state."
          (pad-str (make-string clutch-column-padding ?\s))
          (marked-table (plist-get render-state :marked))
          (delete-table (plist-get render-state :deletes))
-         (pk-indices (plist-get render-state :pk-indices))
-         (deletingp (and pk-indices
-                         (gethash (clutch-result--extract-pk-vec row pk-indices)
+         (row-identity (plist-get render-state :row-identity))
+         (deletingp (and row-identity
+                         (gethash (clutch-result--extract-row-identity-vec
+                                   row row-identity)
                                   delete-table)))
          (editedp (clutch--row-pending-edit-p row ridx render-state))
          (data-row (let ((rendered (clutch--render-row
@@ -727,11 +735,11 @@ Returns a list of propertized strings (may be empty)."
   "Build footer part describing update/delete capability for the result."
   (when (and clutch--result-columns
              (clutch-result--detect-table))
-    (unless clutch--cached-pk-indices
+    (unless clutch--row-identity
       (let ((warn-icon 'font-lock-warning-face)
             (warn-text '(:inherit font-lock-warning-face :weight normal)))
         (concat (clutch--footer-icon '(codicon . "nf-cod-warning") "⚠" warn-icon)
-                (propertize "PK missing" 'face warn-text)
+                (propertize "row identity missing" 'face warn-text)
                 (propertize " E/D off" 'face warn-text))))))
 
 (defun clutch--footer-main-parts (row-count page-num page-size total-rows)
@@ -1335,6 +1343,8 @@ initial result data."
   (setq-local clutch--result-columns col-names)
   (setq-local clutch--result-column-defs columns)
   (setq-local clutch--result-rows rows)
+  (setq-local clutch--row-identity nil)
+  (setq-local clutch--cached-pk-indices nil)
   (setq-local clutch--pending-edits nil)
   (setq-local clutch--pending-deletes nil)
   (setq-local clutch--pending-inserts nil)

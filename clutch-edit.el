@@ -18,6 +18,7 @@
 
 (defvar-local clutch--cached-pk-indices nil
   "Cached list of primary-key column indices for the current result buffer.")
+(defvar clutch--row-identity)
 (defvar clutch--filtered-rows)
 (defvar clutch--fk-info)
 (defvar clutch--last-query)
@@ -38,10 +39,9 @@
 (declare-function clutch--format-value "clutch-query" (value))
 (declare-function clutch--json-value-to-string "clutch-query" (value))
 (declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
-(declare-function clutch--sql-find-top-level-clause "clutch-query"
-                  (sql pattern &optional start))
 (declare-function clutch--sql-normalize-for-rewrite "clutch-query" (sql))
 (declare-function clutch--string-pad "clutch-query" (s width &optional pad-left numeric))
+(declare-function clutch--visible-columns "clutch-query" ())
 (declare-function clutch--value-to-literal "clutch" (val))
 (declare-function clutch--humanize-db-error "clutch-query" (msg))
 (declare-function clutch--refresh-footer-line "clutch-ui" ())
@@ -49,9 +49,10 @@
 (declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
 (declare-function clutch-result--selected-row-indices "clutch" ())
 (declare-function clutch-db-escape-identifier "clutch-db" (conn name))
+(declare-function clutch-db-result-affected-rows "clutch-db" (result))
+(declare-function clutch-db-sql-find-top-level-clause "clutch-db" (sql pattern &optional start))
 (declare-function clutch-db-substitute-params "clutch-db" (sql params render-fn))
 (declare-function clutch-db-foreign-keys "clutch-db" (conn table))
-(declare-function clutch-db-primary-key-columns "clutch-db" (conn table))
 
 ;;;; Cell editing (C-c ')
 
@@ -427,7 +428,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
         (clutch-result--edit-pending-insert ridx)
       (let* ((op "edit cell")
              (table (clutch--result-source-table-or-user-error op))
-             (_pk-indices (clutch--result-pk-indices-or-user-error table op))
+             (_row-identity (clutch-result--row-identity-or-user-error table op))
              (col-name (nth cidx clutch--result-columns))
              (col-def (nth cidx clutch--result-column-defs))
              (detail (clutch-result--column-detail (current-buffer) col-name))
@@ -489,11 +490,11 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
   "Record edit for row RIDX, column CIDX with NEW-VALUE.
 Refresh the affected row and footer in place when possible."
   (let* ((table (clutch--result-source-table-or-user-error "Stage UPDATE"))
-         (pk-indices (clutch--result-pk-indices-or-user-error table "Stage UPDATE"))
+         (row-identity (clutch-result--row-identity-or-user-error table "Stage UPDATE"))
          (display-rows (or clutch--filtered-rows clutch--result-rows))
          (row (nth ridx display-rows))
-         (pk-vec (clutch-result--extract-pk-vec row pk-indices))
-         (key (cons pk-vec cidx))
+         (identity-vec (clutch-result--extract-row-identity-vec row row-identity))
+         (key (cons identity-vec cidx))
          (original (nth cidx (nth ridx clutch--result-rows))))
     (if (equal new-value original)
         (setq clutch--pending-edits
@@ -541,24 +542,17 @@ Returns table name string or nil."
       (user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
                   op)))
 
-(defun clutch--result-pk-indices-or-user-error (table op)
-  "Return primary key indices for TABLE, or signal user-error for OP."
-  (or clutch--cached-pk-indices
-      (clutch-result--detect-primary-key)
-      (user-error "Cannot %s: no primary key detected for table %s"
-                  op table)))
+(defun clutch-result--current-row-identity (&optional table)
+  "Return current row identity metadata.
+TABLE is accepted for callers that already know the result source table."
+  (ignore table)
+  clutch--row-identity)
 
-(defun clutch-result--detect-primary-key ()
-  "Return a list of column indices that form the primary key, or nil."
-  (when-let* ((conn clutch-connection)
-              (table (clutch-result--detect-table)))
-    (condition-case nil
-        (let* ((pk-cols (clutch-db-primary-key-columns conn table))
-               (col-names clutch--result-columns))
-          (delq nil (mapcar (lambda (pk)
-                              (cl-position pk col-names :test #'string=))
-                            pk-cols)))
-      (clutch-db-error nil))))
+(defun clutch-result--row-identity-or-user-error (table op)
+  "Return row identity metadata for TABLE, or signal `user-error' for OP."
+  (or (clutch-result--current-row-identity table)
+      (user-error "Cannot %s: no primary, unique, or row locator identity available for table %s"
+                  op table)))
 
 (defun clutch--load-fk-info ()
   "Load foreign key info for the current result's source table.
@@ -576,22 +570,23 @@ column indices to their referenced table and column."
                 (push (cons idx ref-info) clutch--fk-info)))))
       (clutch-db-error nil))))
 
-(defun clutch-result--extract-pk-vec (row pk-indices)
-  "Return a vector of PK column values from ROW at PK-INDICES."
-  (vconcat (mapcar (lambda (i) (nth i row)) pk-indices)))
+(defun clutch-result--extract-row-identity-vec (row row-identity)
+  "Return a vector of row identity values from ROW using ROW-IDENTITY."
+  (vconcat (mapcar (lambda (i) (nth i row))
+                   (plist-get row-identity :indices))))
 
-(defun clutch-result--group-edits-by-pk (edits)
-  "Group EDITS alist by PK-VEC into a hash-table (test: equal).
-Returns hash-table mapping pk-vec -> list of (cidx . new-value)."
+(defun clutch-result--group-edits-by-identity (edits)
+  "Group EDITS alist by identity vector into a hash-table (test: equal).
+Returns hash-table mapping identity vector -> list of (cidx . new-value)."
   (let ((ht (make-hash-table :test 'equal)))
-    (pcase-dolist (`((,pk-vec . ,cidx) . ,val) edits)
-      (push (cons cidx val) (gethash pk-vec ht)))
+    (pcase-dolist (`((,identity-vec . ,cidx) . ,val) edits)
+      (push (cons cidx val) (gethash identity-vec ht)))
     ht))
 
 (defun clutch-result--ensure-where-guard (statements op-name)
   "Ensure every statement in STATEMENTS has a top-level WHERE for OP-NAME."
   (dolist (stmt statements)
-    (unless (clutch--sql-find-top-level-clause
+    (unless (clutch-db-sql-find-top-level-clause
              (clutch--sql-normalize-for-rewrite stmt) "WHERE")
       (user-error "%s blocked: statement without WHERE: %s"
                   op-name
@@ -619,14 +614,25 @@ the parameter list."
               (clutch-db-substitute-params sql params #'clutch--value-to-literal)))
           statements))
 
-(defun clutch-result--build-update-stmt (table pk-vec edits col-names pk-names)
+(defun clutch--row-identity-where-parts (conn row-identity values)
+  "Return `(PARTS . PARAMS)' for ROW-IDENTITY using VALUES on CONN."
+  (if-let* ((where-sql (plist-get row-identity :where-sql)))
+      (cons (list where-sql) (append values nil))
+    (clutch--pk-where-parts
+     conn
+     (plist-get row-identity :columns)
+     (append values nil))))
+
+(defun clutch-result--build-update-stmt (table identity-vec edits col-names row-identity)
   "Build an UPDATE statement spec for TABLE.
-PK-VEC is the primary key vector, EDITS is a list of (cidx . value),
-COL-NAMES are column names, PK-NAMES are primary key column names."
+IDENTITY-VEC is the row identity vector, EDITS is a list of
+\(cidx . value), COL-NAMES are column names, and ROW-IDENTITY describes the
+WHERE predicate."
   (let ((conn clutch-connection))
     (let ((set-parts nil)
           (set-params nil)
-          (where-spec (clutch--pk-where-parts conn pk-names (append pk-vec nil))))
+          (where-spec (clutch--row-identity-where-parts
+                       conn row-identity identity-vec)))
       (dolist (edit edits)
         (push (format "%s = ?"
                       (clutch-db-escape-identifier
@@ -644,17 +650,16 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
   (unless clutch--pending-edits
     (user-error "No staged edits"))
   (let* ((table (clutch--result-source-table-or-user-error "Build UPDATE"))
-         (pk-indices (clutch--result-pk-indices-or-user-error table "Build UPDATE"))
-         (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
+         (row-identity (clutch-result--row-identity-or-user-error table "Build UPDATE"))
          (col-names clutch--result-columns)
-         (by-pk (clutch-result--group-edits-by-pk clutch--pending-edits))
+         (by-identity (clutch-result--group-edits-by-identity clutch--pending-edits))
          statements)
     (maphash
-     (lambda (pk-vec edits)
+     (lambda (identity-vec edits)
        (push (clutch-result--build-update-stmt
-              table pk-vec edits col-names pk-names)
+              table identity-vec edits col-names row-identity)
              statements))
-     by-pk)
+     by-identity)
     statements))
 
 (defun clutch-result--build-pending-insert-statements ()
@@ -668,17 +673,35 @@ COL-NAMES are column names, PK-NAMES are primary key column names."
 (defun clutch-result--build-pending-delete-statements ()
   "Build DELETE statement specs from staged deletes."
   (let* ((table (clutch--result-source-table-or-user-error "Build DELETE"))
-         (pk-indices (clutch--result-pk-indices-or-user-error table "Build DELETE"))
-         (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
+         (row-identity (clutch-result--row-identity-or-user-error table "Build DELETE"))
          (conn clutch-connection))
-    (mapcar (lambda (pk-vec)
+    (mapcar (lambda (identity-vec)
               (let ((where-spec
-                     (clutch--pk-where-parts conn pk-names (append pk-vec nil))))
+                     (clutch--row-identity-where-parts
+                      conn row-identity identity-vec)))
                 (cons (format "DELETE FROM %s WHERE %s"
                               (clutch-db-escape-identifier conn table)
                               (mapconcat #'identity (car where-spec) " AND "))
                       (cdr where-spec))))
             clutch--pending-deletes)))
+
+(defun clutch-result--execute-mutation-stmt (stmt &optional require-single-row)
+  "Execute mutation STMT.
+When REQUIRE-SINGLE-ROW is non-nil, signal `user-error' if the backend reports
+an affected row count other than one."
+  (pcase-let ((`(,sql . ,params) stmt))
+    (condition-case err
+        (let ((result (clutch--run-db-query clutch-connection sql params)))
+          (when-let* ((affected (and require-single-row
+                                     (clutch-db-result-p result)
+                                     (clutch-db-result-affected-rows result))))
+            (unless (= affected 1)
+              (user-error "Mutation matched %d rows; expected exactly 1"
+                          affected)))
+          result)
+      (clutch-db-error
+       (user-error "%s" (clutch--humanize-db-error
+                         (error-message-string err)))))))
 
 ;;;###autoload
 (defun clutch-result-commit ()
@@ -708,12 +731,12 @@ Executes in order: INSERTs first, then UPDATEs, then DELETEs."
                                (length all-stmts)
                                (if (= (length all-stmts) 1) "" "s")
                                sql-text))
-      (dolist (stmt all-stmts)
-        (pcase-let ((`(,sql . ,params) stmt))
-          (condition-case err
-              (clutch--run-db-query clutch-connection sql params)
-          (clutch-db-error
-           (user-error "%s" (clutch--humanize-db-error (error-message-string err)))))))
+      (dolist (stmt insert-stmts)
+        (clutch-result--execute-mutation-stmt stmt))
+      (dolist (stmt update-stmts)
+        (clutch-result--execute-mutation-stmt stmt t))
+      (dolist (stmt delete-stmts)
+        (clutch-result--execute-mutation-stmt stmt t))
       (setq clutch--pending-edits nil
             clutch--pending-deletes nil
             clutch--pending-inserts nil
@@ -725,14 +748,14 @@ Executes in order: INSERTs first, then UPDATEs, then DELETEs."
 
 ;;;; Delete rows
 
-(defun clutch-result--build-delete-stmt (table row col-names pk-indices)
+(defun clutch-result--build-delete-stmt (table row _col-names row-identity)
   "Build a DELETE statement spec for TABLE.
-ROW is the row data, COL-NAMES are column names,
-PK-INDICES are primary key column indices."
+ROW is the row data and ROW-IDENTITY describes the WHERE predicate."
   (let* ((conn clutch-connection)
-         (pk-names (mapcar (lambda (pki) (nth pki col-names)) pk-indices))
-         (pk-values (mapcar (lambda (pki) (nth pki row)) pk-indices))
-         (where-spec (clutch--pk-where-parts conn pk-names pk-values)))
+         (identity-values (clutch-result--extract-row-identity-vec
+                           row row-identity))
+         (where-spec (clutch--row-identity-where-parts
+                      conn row-identity identity-values)))
     (cons (format "DELETE FROM %s WHERE %s"
                   (clutch-db-escape-identifier conn table)
                   (mapconcat #'identity (car where-spec) " AND "))
@@ -746,11 +769,13 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   (let* ((indices (or (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (table (clutch--result-source-table-or-user-error "Stage DELETE"))
-         (pk-indices (clutch--result-pk-indices-or-user-error table "Stage DELETE"))
+         (row-identity (clutch-result--row-identity-or-user-error table "Stage DELETE"))
          (display-rows (or clutch--filtered-rows clutch--result-rows)))
     (dolist (ridx indices)
-      (let ((pv (clutch-result--extract-pk-vec (nth ridx display-rows) pk-indices)))
-        (cl-pushnew pv clutch--pending-deletes :test #'equal)))
+      (let ((identity-vec (clutch-result--extract-row-identity-vec
+                           (nth ridx display-rows)
+                           row-identity)))
+        (cl-pushnew identity-vec clutch--pending-deletes :test #'equal)))
     (dolist (ridx indices)
       (clutch--replace-row-at-index ridx))
     (clutch--refresh-footer-line)
@@ -1594,11 +1619,13 @@ TABLE is used to resolve column details for the current result buffer."
                    (clutch--ensure-column-details clutch-connection table))))
     (cl-loop for col in clutch--result-columns
              for cidx from 0
+             for col-def = (nth cidx clutch--result-column-defs)
              for detail = (cl-find col details
                                    :key (lambda (item) (plist-get item :name))
                                    :test #'string=)
              for cell = (assoc col fields)
              when (and cell
+                       (not (plist-get col-def :hidden))
                        (clutch-result-insert--clone-copy-column-p detail cidx))
              collect (cons col (cdr cell)))))
 
@@ -1608,7 +1635,10 @@ TABLE is used to resolve column details for the current result buffer."
 FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert.
 When OMIT-PRIMARY-KEY-FIELDS is non-nil, sparse layout hides primary-key
 fields until the user expands to all columns."
-  (let* ((col-names (with-current-buffer result-buf clutch--result-columns))
+  (let* ((col-names
+          (with-current-buffer result-buf
+            (mapcar (lambda (i) (nth i clutch--result-columns))
+                    (clutch--visible-columns))))
          (buf (get-buffer-create (format "*clutch-insert: %s*" table))))
     (with-current-buffer buf
       (let ((inhibit-read-only t)
@@ -1650,13 +1680,14 @@ fields until the user expands to all columns."
 (defun clutch-result-insert--row-values-with-pending-edits (row)
   "Return ROW as a list, applying any staged edits in the current result buffer."
   (let* ((values (append row nil))
-         (pk-indices clutch--cached-pk-indices)
-         (pk-vec (and pk-indices
-                      (clutch-result--extract-pk-vec row pk-indices))))
-    (when pk-vec
+         (row-identity (clutch-result--current-row-identity))
+         (identity-vec (and row-identity
+                            (clutch-result--extract-row-identity-vec
+                             row row-identity))))
+    (when identity-vec
       (dolist (edit clutch--pending-edits)
-        (pcase-let ((`((,edit-pk . ,cidx) . ,new-value) edit))
-          (when (equal edit-pk pk-vec)
+        (pcase-let ((`((,edit-identity . ,cidx) . ,new-value) edit))
+          (when (equal edit-identity identity-vec)
             (setcar (nthcdr cidx values) new-value)))))
     values))
 
@@ -1672,6 +1703,7 @@ fields until the user expands to all columns."
              for detail = (cl-find col details
                                    :key (lambda (item) (plist-get item :name))
                                    :test #'string=)
+             unless (plist-get col-def :hidden)
              do (push (cons col (if (null value)
                                     ""
                                   (clutch-result--editable-field-string

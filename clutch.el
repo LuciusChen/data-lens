@@ -961,6 +961,7 @@ debug event when `clutch-debug-mode' is enabled."
 (defvar clutch--result-column-defs)
 (defvar clutch--result-columns)
 (defvar clutch--result-rows)
+(defvar clutch--row-identity)
 (defvar clutch--sql-keywords)
 (defvar clutch--sort-column)
 (defvar clutch--sort-descending)
@@ -2489,17 +2490,20 @@ Priority: region rows > current row."
         (clutch--refresh-display)
         (message "Staged insert discarded")))
      (t
-      (let* ((pk-indices (or clutch--cached-pk-indices
-                             (clutch-result--detect-primary-key)))
+      (let* ((table (clutch-result--detect-table))
+             (row-identity (clutch-result--current-row-identity table))
              (display-rows (or clutch--filtered-rows clutch--result-rows))
              (row (nth ridx display-rows))
              (cidx (clutch--col-idx-at-point))
-             (pv (when pk-indices
-                   (clutch-result--extract-pk-vec row pk-indices)))
-             (edit-key (and pv cidx (cons pv cidx)))
+             (identity-vec (when row-identity
+                             (clutch-result--extract-row-identity-vec
+                              row row-identity)))
+             (edit-key (and identity-vec cidx (cons identity-vec cidx)))
              (was-edit (and edit-key
                             (cl-assoc edit-key clutch--pending-edits :test #'equal)))
-             (was-delete (and pv (cl-find pv clutch--pending-deletes :test #'equal))))
+             (was-delete (and identity-vec
+                              (cl-find identity-vec clutch--pending-deletes
+                                       :test #'equal))))
         (cond
          (was-edit
           (setq clutch--pending-edits
@@ -2510,7 +2514,7 @@ Priority: region rows > current row."
           (message "Staged edit discarded"))
          (was-delete
           (setq clutch--pending-deletes
-                (cl-remove pv clutch--pending-deletes :test #'equal))
+                (cl-remove identity-vec clutch--pending-deletes :test #'equal))
           (clutch--replace-row-at-index ridx)
           (clutch--refresh-footer-line)
           (force-mode-line-update)
@@ -2734,9 +2738,9 @@ Triggers a COUNT(*) query if total rows are not yet known."
 
 (defun clutch--sql-strip-top-level-tail (sql)
   "Strip top-level ORDER/LIMIT/OFFSET tail clauses from SQL."
-  (let* ((order-pos (clutch--sql-find-top-level-clause sql "ORDER\\s-+BY"))
-         (limit-pos (clutch--sql-find-top-level-clause sql "LIMIT"))
-         (offset-pos (clutch--sql-find-top-level-clause sql "OFFSET"))
+  (let* ((order-pos (clutch-db-sql-find-top-level-clause sql "ORDER\\s-+BY"))
+         (limit-pos (clutch-db-sql-find-top-level-clause sql "LIMIT"))
+         (offset-pos (clutch-db-sql-find-top-level-clause sql "OFFSET"))
          (cut-pos (car (sort (delq nil (list order-pos limit-pos offset-pos)) #'<))))
     (if cut-pos
         (string-trim-right (substring sql 0 cut-pos))
@@ -2905,7 +2909,8 @@ empty string at the condition prompt to clear the filter."
   (let* ((base (or clutch--base-query
                    clutch--last-query))
          (current clutch--where-filter)
-         (columns clutch--result-columns)
+         (columns (mapcar (lambda (i) (nth i clutch--result-columns))
+                          (clutch--visible-columns)))
          (default-col (and columns clutch--header-active-col
                            (nth clutch--header-active-col columns)))
          (input
@@ -2955,6 +2960,7 @@ empty string at the condition prompt to clear the filter."
 (defun clutch-result--apply-filter (input)
   "Apply INPUT as a client-side substring filter and re-render."
   (let* ((pattern  (downcase input))
+         (col-indices (clutch--visible-columns))
          (matching (cl-loop for row in clutch--result-rows
                             when (cl-some
                                   (lambda (val)
@@ -2962,7 +2968,8 @@ empty string at the condition prompt to clear the filter."
                                          (string-match-p
                                           (regexp-quote pattern)
                                           (downcase (clutch--format-value val)))))
-                                  row)
+                                  (mapcar (lambda (i) (nth i row))
+                                          col-indices))
                             collect row)))
     (setq clutch--filter-pattern input
           clutch--filtered-rows matching
@@ -4002,15 +4009,22 @@ results use `clutch--insert-placeholder-table' instead."
   (or (clutch--simple-insert-source-table)
       clutch--insert-placeholder-table))
 
-(defun clutch-result--selected-update-col-indices (pk-indices col-indices op)
-  "Return non-PK update column indices from COL-INDICES for OP.
-PK-INDICES are excluded."
-  (let ((set-col-indices
-         (cl-loop for cidx in col-indices
-                  unless (memq cidx pk-indices)
-                  collect cidx)))
+(defun clutch-result--selected-update-col-indices (row-identity col-indices op)
+  "Return writable update column indices from ROW-IDENTITY, COL-INDICES, and OP.
+Hidden identity columns are excluded.  Primary-key source columns are excluded
+to preserve the existing copy/export UPDATE behavior."
+  (let* ((pk-source-indices
+          (and (eq (plist-get row-identity :kind) 'primary-key)
+               (or (plist-get row-identity :source-indices)
+                   (plist-get row-identity :indices))))
+         (set-col-indices
+          (cl-loop for cidx in col-indices
+                   unless (or (plist-get (nth cidx clutch--result-column-defs)
+                                         :hidden)
+                              (memq cidx pk-source-indices))
+                   collect cidx)))
     (unless set-col-indices
-      (user-error "Cannot %s: no non-primary-key columns selected" op))
+      (user-error "Cannot %s: no writable source columns selected" op))
     set-col-indices))
 
 (defun clutch-result--ensure-update-source-columns (table col-indices op)
@@ -4035,19 +4049,19 @@ PK-INDICES are excluded."
   "Return UPDATE preview statements for ROWS using COL-INDICES.
 OP is a short operation description used in user-facing error messages."
   (let* ((table (clutch--result-source-table-or-user-error op))
-         (pk-indices (clutch--result-pk-indices-or-user-error table op))
+         (row-identity (clutch-result--row-identity-or-user-error table op))
          (set-col-indices (clutch-result--selected-update-col-indices
-                           pk-indices col-indices op))
-         (pk-names (mapcar (lambda (i) (nth i clutch--result-columns)) pk-indices))
+                           row-identity col-indices op))
          (col-names clutch--result-columns)
          statements)
     (clutch-result--ensure-update-source-columns table set-col-indices op)
     (dolist (row rows)
-      (let* ((pk-vec (clutch-result--extract-pk-vec row pk-indices))
+      (let* ((identity-vec (clutch-result--extract-row-identity-vec
+                            row row-identity))
              (edits (cl-loop for cidx in set-col-indices
                              collect (cons cidx (nth cidx row)))))
         (push (clutch-result--build-update-stmt
-               table pk-vec edits col-names pk-names)
+               table identity-vec edits col-names row-identity)
               statements)))
     (clutch-result--render-statements (nreverse statements))))
 
@@ -4065,8 +4079,7 @@ Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
                       (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (col-indices (or (cdr-safe rect)
-                          (cl-loop for i below (length clutch--result-columns)
-                                   collect i)))
+                          (clutch--visible-columns)))
          (table (clutch--insert-target-table))
          (stmts (clutch-result--build-insert-statements indices col-indices table)))
     (kill-new (mapconcat #'identity stmts "\n"))
@@ -4089,8 +4102,7 @@ Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
                       (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (col-indices (or (cdr-safe rect)
-                          (cl-loop for i below (length clutch--result-columns)
-                                   collect i)))
+                          (clutch--visible-columns)))
          (rows (mapcar (lambda (ridx) (nth ridx clutch--result-rows)) indices))
          (stmts (clutch-result--build-update-statements-for-rows
                  rows col-indices "copy UPDATE SQL")))
@@ -4130,8 +4142,7 @@ Includes a header row with column names."
                       (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
          (col-indices (or (cdr-safe rect)
-                          (cl-loop for i below (length clutch--result-columns)
-                                   collect i)))
+                          (clutch--visible-columns)))
          (lines (clutch-result--build-csv-lines indices col-indices)))
     (kill-new (mapconcat #'identity lines "\n"))
     (deactivate-mark)
@@ -4224,9 +4235,15 @@ Prompts for format:
 
 (defun clutch--csv-content (rows)
   "Return CSV text for ROWS using current result columns."
-  (let ((header (mapconcat #'clutch--csv-escape clutch--result-columns ","))
+  (let* ((col-indices (clutch--visible-columns))
+         (header (mapconcat (lambda (i)
+                              (clutch--csv-escape
+                               (nth i clutch--result-columns)))
+                            col-indices ","))
         (body (mapconcat (lambda (row)
-                           (mapconcat #'clutch--csv-escape row ","))
+                           (mapconcat (lambda (i)
+                                        (clutch--csv-escape (nth i row)))
+                                      col-indices ","))
                          rows "\n")))
     (if (string-empty-p body)
         (concat header "\n")
@@ -4300,16 +4317,22 @@ Report success with MESSAGE-FMT and MESSAGE-ARGS."
       clutch--result-rows)
      ((or (null clutch--base-query)
           (clutch--sql-has-limit-p effective-sql))
+      (let* ((row-identity-prep
+              (clutch--prepare-row-identity-query clutch-connection effective-sql))
+             (identity-sql (plist-get row-identity-prep :sql)))
       (clutch-db-result-rows
-       (clutch--run-db-query clutch-connection effective-sql)))
+       (clutch--run-db-query clutch-connection identity-sql))))
      (t
-      (let ((page-num 0)
+      (let* ((row-identity-prep
+              (clutch--prepare-row-identity-query clutch-connection effective-sql))
+             (identity-sql (plist-get row-identity-prep :sql))
+             (page-num 0)
             (page-size clutch-result-max-rows)
             (rows nil)
             done)
         (while (not done)
           (let* ((paged-sql (clutch--build-paged-sql
-                             effective-sql page-num page-size clutch--order-by))
+                             identity-sql page-num page-size clutch--order-by))
                  (result (clutch--run-db-query clutch-connection paged-sql))
                  (batch (clutch-db-result-rows result)))
             (setq rows (nconc rows (copy-sequence batch)))
@@ -4331,7 +4354,7 @@ Report success with MESSAGE-FMT and MESSAGE-ARGS."
 (defun clutch--insert-content (rows)
   "Return INSERT statement text for ROWS using current result metadata."
   (let* ((table (clutch--insert-target-table))
-         (col-indices (cl-loop for i below (length clutch--result-columns) collect i))
+         (col-indices (clutch--visible-columns))
          (stmts (clutch-result--build-insert-statements
                  (cl-loop for i below (length rows) collect i)
                  col-indices
@@ -4342,7 +4365,7 @@ Report success with MESSAGE-FMT and MESSAGE-ARGS."
 
 (defun clutch--update-content (rows)
   "Return UPDATE statement text for ROWS using current result metadata."
-  (let* ((col-indices (cl-loop for i below (length clutch--result-columns) collect i))
+  (let* ((col-indices (clutch--visible-columns))
          (stmts (clutch-result--build-update-statements-for-rows
                  rows col-indices "export UPDATE SQL")))
     (if stmts
@@ -4586,16 +4609,16 @@ Reuses a single *clutch-record* buffer, updating it in place."
       (clutch-record--render))
     (pop-to-buffer buf '(display-buffer-at-bottom))))
 
-(defun clutch-record--render-field (name cidx val col-def row ridx pk-indices
+(defun clutch-record--render-field (name cidx val col-def row ridx row-identity
                                         edits fk-info expanded-fields max-name-w)
   "Insert one field line for column NAME at CIDX.
 VAL is the cell value, COL-DEF the column metadata, ROW the full row.
-RIDX is the row index.  PK-INDICES, EDITS, FK-INFO, and EXPANDED-FIELDS
+RIDX is the row index.  ROW-IDENTITY, EDITS, FK-INFO, and EXPANDED-FIELDS
 provide edit/FK/expand state.  MAX-NAME-W is the label column width."
-  (let* ((pk-indices pk-indices)
-         (pk-vec (and pk-indices row
-                      (clutch-result--extract-pk-vec row pk-indices)))
-         (edited (and pk-vec (assoc (cons pk-vec cidx) edits)))
+  (let* ((identity-vec (and row-identity row
+                            (clutch-result--extract-row-identity-vec
+                             row row-identity)))
+         (edited (and identity-vec (assoc (cons identity-vec cidx) edits)))
          (display-val (if edited (cdr edited) val))
          (long-p (clutch--long-field-type-p col-def))
          (expanded-p (memq cidx expanded-fields))
@@ -4627,7 +4650,8 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
          (col-names (buffer-local-value 'clutch--result-columns result-buf))
          (col-defs (buffer-local-value 'clutch--result-column-defs result-buf))
          (rows (buffer-local-value 'clutch--result-rows result-buf))
-         (pk-indices (buffer-local-value 'clutch--cached-pk-indices result-buf))
+         (row-identity (with-current-buffer result-buf
+                         (clutch-result--current-row-identity)))
          (fk-info (buffer-local-value 'clutch--fk-info result-buf))
          (edits (buffer-local-value 'clutch--pending-edits result-buf))
          (inhibit-read-only t))
@@ -4646,10 +4670,12 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
     (let* ((row (nth ridx rows))
            (max-name-w (apply #'max (mapcar #'string-width col-names))))
       (cl-loop for name in col-names
+               for col-def in col-defs
                for cidx from 0
+               unless (plist-get col-def :hidden)
                do (clutch-record--render-field
-                   name cidx (nth cidx row) (nth cidx col-defs)
-                   row ridx pk-indices edits fk-info clutch-record--expanded-fields
+                   name cidx (nth cidx row) col-def
+                   row ridx row-identity edits fk-info clutch-record--expanded-fields
                    max-name-w)))
     (goto-char (point-min))))
 

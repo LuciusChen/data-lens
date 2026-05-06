@@ -255,6 +255,69 @@ WHERE type='table' AND name=%s"
              when (> (nth 5 row) 0)
              collect (nth 1 row))))
 
+(defun clutch-db-sqlite--unique-not-null-identities (conn table)
+  "Return unique-not-null row identity candidates for TABLE on CONN."
+  (condition-case _err
+      (let* ((handle (clutch-db-sqlite-conn-handle conn))
+             (table-info (clutch-db-sqlite--pragma
+                          handle
+                          (format "PRAGMA table_info(%s)"
+                                  (clutch-db-sqlite--escape-id table))))
+             (not-null (make-hash-table :test 'equal))
+             (indexes (clutch-db-sqlite--pragma
+                       handle
+                       (format "PRAGMA index_list(%s)"
+                               (clutch-db-sqlite--escape-id table)))))
+        (dolist (row table-info)
+          ;; table_info row: (cid name type notnull dflt_value pk)
+          (puthash (nth 1 row) (> (nth 3 row) 0) not-null))
+        (cl-loop for row in indexes
+                 ;; index_list row: (seq name unique origin partial)
+                 for name = (nth 1 row)
+                 for unique = (nth 2 row)
+                 for partial = (nth 4 row)
+                 when (and (= (or unique 0) 1)
+                           (not (= (or partial 0) 1)))
+                 for cols = (mapcar
+                             (lambda (info-row) (nth 2 info-row))
+                             (clutch-db-sqlite--pragma
+                              handle
+                              (format "PRAGMA index_info(%s)"
+                                      (clutch-db-sqlite--escape-id name))))
+                 when (and cols
+                           (cl-every (lambda (col)
+                                       (gethash col not-null))
+                                     cols))
+                 collect (list :kind 'unique-key
+                               :name name
+                               :columns cols)))
+    (sqlite-error nil)))
+
+(defun clutch-db-sqlite--rowid-identity (conn table)
+  "Return a rowid row locator candidate for TABLE on CONN, or nil."
+  (condition-case _err
+      (let* ((handle (clutch-db-sqlite-conn-handle conn))
+             (rows (sqlite-select
+                    handle
+                    (format "SELECT sql FROM sqlite_master WHERE type='table' AND name=%s"
+                            (clutch-db-sqlite--escape-lit table))))
+             (ddl (caar rows)))
+        (when (and ddl
+                   (not (string-match-p "\\bWITHOUT\\s-+ROWID\\b"
+                                        (upcase ddl))))
+          (list :kind 'row-locator
+                :name "rowid"
+                :select-expressions '("rowid")
+                :where-sql "rowid = ?")))
+    (sqlite-error nil)))
+
+(cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-sqlite-conn) table)
+  "Return row identity candidates for TABLE on SQLite CONN."
+  (append (cl-call-next-method)
+          (clutch-db-sqlite--unique-not-null-identities conn table)
+          (when-let* ((rowid (clutch-db-sqlite--rowid-identity conn table)))
+            (list rowid))))
+
 (defun clutch-db-sqlite--fk-alist (handle table)
   "Return FK alist for TABLE from HANDLE.
 Result: ((from-col :ref-table T :ref-column C) ...)"

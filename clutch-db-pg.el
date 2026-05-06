@@ -1068,6 +1068,57 @@ ORDER BY array_position(i.indkey, a.attnum)"
         (mapcar #'car (clutch-db-pg--rows result)))
     (pg-error nil)))
 
+(defun clutch-db-pg--unique-not-null-identities (conn table)
+  "Return unique-not-null row identity candidates for TABLE on CONN."
+  (condition-case _err
+      (let* ((sql (format "SELECT idx.relname,
+       string_agg(a.attname, E'\\x1f' ORDER BY keys.ord) AS columns
+FROM pg_index i
+JOIN pg_class idx ON idx.oid = i.indexrelid
+JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS keys(attnum, ord) ON true
+JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = keys.attnum
+WHERE i.indrelid = %s::regclass
+  AND i.indisunique
+  AND NOT i.indisprimary
+  AND i.indpred IS NULL
+  AND i.indexprs IS NULL
+GROUP BY idx.relname
+HAVING bool_and(a.attnotnull)
+ORDER BY idx.relname"
+                          (pg-escape-literal table)))
+             (result (pg-exec conn sql)))
+        (mapcar (lambda (row)
+                  (pcase-let ((`(,name ,columns) row))
+                    (list :kind 'unique-key
+                          :name name
+                          :columns (split-string columns "\x1f" t))))
+                (clutch-db-pg--rows result)))
+    (pg-error nil)))
+
+(defun clutch-db-pg--ctid-identity (conn table)
+  "Return a CTID row locator candidate for TABLE on CONN, or nil."
+  (condition-case _err
+      (let* ((sql (format "SELECT c.relkind::text
+FROM pg_class c
+WHERE c.oid = %s::regclass"
+                          (pg-escape-literal table)))
+             (result (pg-exec conn sql))
+             (relkind (car (car (clutch-db-pg--rows result)))))
+        (when (or (equal relkind "r")
+                  (equal relkind ?r))
+          (list :kind 'row-locator
+                :name "ctid"
+                :select-expressions '("ctid::text")
+                :where-sql "ctid = ?::tid")))
+    (pg-error nil)))
+
+(cl-defmethod clutch-db-row-identity-candidates ((conn pgcon) table)
+  "Return row identity candidates for TABLE on PostgreSQL CONN."
+  (append (cl-call-next-method)
+          (clutch-db-pg--unique-not-null-identities conn table)
+          (when-let* ((ctid (clutch-db-pg--ctid-identity conn table)))
+            (list ctid))))
+
 (cl-defmethod clutch-db-foreign-keys ((conn pgcon) table)
   "Return foreign key info for TABLE on PostgreSQL CONN."
   (condition-case _err

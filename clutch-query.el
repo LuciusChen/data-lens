@@ -75,6 +75,7 @@
 (defvar clutch--pending-edits)
 (defvar clutch--pending-inserts)
 (defvar clutch--query-elapsed)
+(defvar clutch--row-identity)
 (defvar clutch--result-column-defs)
 (defvar clutch--result-columns)
 (defvar clutch--result-source-table)
@@ -88,6 +89,7 @@
 (declare-function clutch--debug-sql-preview "clutch" (sql))
 (declare-function clutch--remember-debug-event "clutch" (&rest event))
 (declare-function clutch--remember-problem-record "clutch" (&rest args))
+(declare-function clutch-result--table-from-sql "clutch-edit" (sql))
 (declare-function clutch--find-console-buffer "clutch" (name))
 (declare-function clutch--update-console-buffer-name "clutch" ())
 (declare-function clutch--console-file "clutch" (name))
@@ -124,7 +126,6 @@
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--display-select-result "clutch-ui" (col-names rows columns))
 (declare-function clutch--display-result "clutch-ui" (result sql elapsed))
-(declare-function clutch-result--detect-primary-key "clutch-edit" ())
 (declare-function clutch--load-fk-info "clutch-edit" ())
 (declare-function clutch-result--build-pending-insert-statements "clutch-edit" ())
 (declare-function clutch-result--build-update-statements "clutch-edit" ())
@@ -400,7 +401,168 @@ Returns a vector of integers."
 (defun clutch--visible-columns ()
   "Return the column indices rendered in the result buffer."
   (cl-loop for i below (length clutch--result-columns)
+           unless (plist-get (nth i clutch--result-column-defs) :hidden)
            collect i))
+
+(defconst clutch--row-identity-hidden-prefix "clutch__rid_"
+  "Prefix used for hidden row identity result columns.")
+
+(defun clutch--row-identity-hidden-aliases (count)
+  "Return COUNT hidden row identity column aliases."
+  (cl-loop for i below count
+           collect (format "%s%d" clutch--row-identity-hidden-prefix i)))
+
+(defun clutch--row-identity-key-expressions (conn candidate)
+  "Return SELECT expressions for key CANDIDATE on CONN."
+  (mapcar (lambda (column)
+            (clutch-db-escape-identifier conn column))
+          (plist-get candidate :columns)))
+
+(defun clutch--row-identity-select-expressions (conn candidate)
+  "Return hidden SELECT expressions for CANDIDATE on CONN."
+  (or (plist-get candidate :select-expressions)
+      (clutch--row-identity-key-expressions conn candidate)))
+
+(defun clutch--row-identity-top-level-comma-p (sql start end)
+  "Return non-nil when SQL has a top-level comma between START and END."
+  (let ((pos start)
+        (depth 0)
+        found)
+    (while (and (< pos end) (not found))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+          (setq pos (min skip end))
+        (let ((ch (aref sql pos)))
+          (cond
+           ((= ch ?\() (cl-incf depth) (cl-incf pos))
+           ((= ch ?\)) (cl-decf depth) (cl-incf pos))
+           ((and (= depth 0) (= ch ?,)) (setq found t))
+           (t (cl-incf pos))))))
+    found))
+
+(defun clutch--row-identity-single-from-table-p (sql)
+  "Return non-nil when SQL has a single top-level FROM table segment."
+  (when-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
+    (let* ((start (+ from-pos 4))
+           (end (or (car (sort (delq nil
+                                      (mapcar
+                                       (lambda (clause)
+                                         (clutch-db-sql-find-top-level-clause
+                                          sql clause start))
+                                       '("WHERE" "GROUP" "HAVING" "ORDER\\s-+BY"
+                                         "LIMIT" "OFFSET" "FETCH" "UNION"
+                                         "INTERSECT" "EXCEPT")))
+                              #'<))
+                    (length sql)))
+           (from-segment (string-trim-left (substring sql start end))))
+      (and (not (string-prefix-p "(" from-segment))
+           (not (clutch--row-identity-top-level-comma-p sql start end))))))
+
+(defun clutch--row-identity-direct-select-p (sql)
+  "Return non-nil when SQL starts with a direct SELECT."
+  (let ((case-fold-search t))
+    (string-match-p "\\`\\s-*select\\b" sql)))
+
+(defun clutch--row-identity-augmentable-sql-p (sql table)
+  "Return non-nil when SQL for TABLE may receive hidden identity columns."
+  (and table
+       (clutch--row-identity-direct-select-p sql)
+       (clutch--row-identity-single-from-table-p sql)
+       (not (clutch-db-sql-find-top-level-clause sql "DISTINCT"))
+       (not (clutch-db-sql-find-top-level-clause sql "GROUP"))
+       (not (clutch-db-sql-find-top-level-clause sql "HAVING"))
+       (not (clutch-db-sql-find-top-level-clause sql "UNION"))
+       (not (clutch-db-sql-find-top-level-clause sql "INTERSECT"))
+       (not (clutch-db-sql-find-top-level-clause sql "EXCEPT"))
+       (not (clutch-db-sql-find-top-level-clause sql "JOIN"))))
+
+(defun clutch--row-identity-inject-select-list (conn sql expressions aliases)
+  "Return SQL with hidden identity EXPRESSIONS inserted using ALIASES.
+CONN supplies identifier escaping for the hidden aliases."
+  (if-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
+      (let ((hidden (mapconcat
+                     #'identity
+                     (cl-mapcar
+                      (lambda (expr alias)
+                        (format "%s AS %s"
+                                expr
+                                (clutch-db-escape-identifier conn alias)))
+                      expressions aliases)
+                     ", ")))
+        (concat (string-trim-right (substring sql 0 from-pos))
+                ", " hidden " "
+                (string-trim-left (substring sql from-pos))))
+    sql))
+
+(defun clutch--prepare-row-identity-query (conn sql)
+  "Return a row identity preparation plist for executing SQL on CONN.
+The returned plist contains :sql, :table, :candidate, :hidden-aliases, and
+:augmented.  If no identity candidate is available, :sql is the original SQL."
+  (let* ((table (clutch-result--table-from-sql sql))
+         (candidates (and table
+                          (condition-case nil
+                              (clutch-db-row-identity-candidates conn table)
+                            (clutch-db-error nil))))
+         (candidate (car candidates))
+         (expressions (and candidate
+                           (clutch--row-identity-select-expressions
+                            conn candidate)))
+         (aliases (and expressions
+                       (clutch--row-identity-hidden-aliases
+                        (length expressions))))
+         (augment-p (and candidate expressions
+                         (clutch--row-identity-augmentable-sql-p sql table))))
+    (list :sql (if augment-p
+                   (clutch--row-identity-inject-select-list
+                    conn sql expressions aliases)
+                 sql)
+          :table table
+          :candidate candidate
+          :candidates candidates
+          :hidden-aliases (and augment-p aliases)
+          :augmented (and augment-p t))))
+
+(defun clutch--row-identity-column-indices (columns names)
+  "Return column indices in COLUMNS for NAMES, or nil if any is absent."
+  (let ((col-names (clutch--column-names columns))
+        indices)
+    (catch 'missing
+      (dolist (name names (nreverse indices))
+        (if-let* ((idx (cl-position name col-names :test #'string=)))
+            (push idx indices)
+          (throw 'missing nil))))))
+
+(defun clutch--finalize-row-identity (prep columns)
+  "Return finalized row identity metadata for PREP and result COLUMNS."
+  (when-let* ((candidate (plist-get prep :candidate)))
+    (let* ((aliases (plist-get prep :hidden-aliases))
+           (indices (if aliases
+                        (clutch--row-identity-column-indices columns aliases)
+                      (clutch--row-identity-column-indices
+                       columns (plist-get candidate :columns))))
+           (source-indices
+            (and (eq (plist-get candidate :kind) 'primary-key)
+                 (clutch--row-identity-column-indices
+                  columns (plist-get candidate :columns)))))
+      (when indices
+        (append
+         (list :table (plist-get prep :table)
+               :indices indices
+               :source-indices source-indices
+               :hidden-aliases aliases)
+         candidate)))))
+
+(defun clutch--apply-row-identity-column-metadata (columns prep)
+  "Return COLUMNS with hidden identity aliases from PREP marked hidden."
+  (let ((aliases (plist-get prep :hidden-aliases)))
+    (if (not aliases)
+        columns
+      (mapcar
+       (lambda (column)
+         (let ((name (plist-get column :name)))
+           (if (member name aliases)
+               (plist-put (copy-sequence column) :hidden t)
+             column)))
+       columns))))
 
 ;;;; Result display
 
@@ -443,6 +605,7 @@ Returns a string (with text properties)."
   (let* ((clutch--result-columns col-names)
          (clutch--result-column-defs column-defs)
          (clutch--result-source-table nil)
+         (clutch--row-identity nil)
          (clutch--pending-edits nil)
          (clutch--fk-info nil)
          (ncols (length col-names))
@@ -502,14 +665,25 @@ operate on that result set via an outer wrapper query."
     (clutch-db-build-paged-sql clutch-connection effective-base
                                page-num page-size order-by)))
 
-(defun clutch--update-page-state (columns rows elapsed page-num)
+(defun clutch--update-page-state (columns rows elapsed page-num
+                                          &optional row-identity-prep)
   "Update buffer-local state for a new page of results.
-COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the new page."
-  (let ((col-names (clutch--column-names columns)))
+COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the new page.
+ROW-IDENTITY-PREP describes any hidden row identity columns in COLUMNS."
+  (let* ((columns (clutch--apply-row-identity-column-metadata
+                   columns row-identity-prep))
+         (row-identity (clutch--finalize-row-identity
+                        row-identity-prep columns))
+         (col-names (clutch--column-names columns)))
     (setq-local clutch--result-columns col-names
                 clutch--result-column-defs columns
+                clutch--row-identity row-identity
                 clutch--result-rows rows
                 clutch--page-current page-num
+                clutch--cached-pk-indices
+                (and (eq (plist-get row-identity :kind) 'primary-key)
+                     (or (plist-get row-identity :source-indices)
+                         (plist-get row-identity :indices)))
                 clutch--pending-edits nil
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil
@@ -534,8 +708,11 @@ Signals an error if pagination is not available."
                    clutch--pending-inserts)
                (not (yes-or-no-p "Discard staged changes and change page? ")))
       (user-error "Page change cancelled"))
-    (let* ((paged-sql (clutch--build-paged-sql
-                       effective-sql page-num
+    (let* ((row-identity-prep
+            (clutch--prepare-row-identity-query clutch-connection effective-sql))
+           (identity-sql (plist-get row-identity-prep :sql))
+           (paged-sql (clutch--build-paged-sql
+                       identity-sql page-num
                        clutch-result-max-rows clutch--order-by))
            (start (float-time))
            (result (condition-case err
@@ -555,7 +732,8 @@ Signals an error if pagination is not available."
            (elapsed (- (float-time) start))
            (rows (clutch-db-result-rows result)))
       (clutch--update-page-state
-       (clutch-db-result-columns result) rows elapsed page-num)
+       (clutch-db-result-columns result) rows elapsed page-num
+       row-identity-prep)
       (clutch--refresh-display)
       (message "Page %d loaded (%s, %d row%s)"
                (1+ page-num)
@@ -596,12 +774,6 @@ Leading SQL comments are stripped before checking."
     (string-match-p "\\`\\(?:CREATE\\|ALTER\\|DROP\\|TRUNCATE\\|RENAME\\)\\b"
                     (upcase trimmed))))
 
-(defun clutch--sql-find-top-level-clause (sql pattern &optional start)
-  "Return the start position of PATTERN at parenthesis depth 0 in SQL.
-PATTERN is matched case-insensitively with word boundaries.  START
-defaults to 0.  Returns nil if not found."
-  (clutch-db-sql-find-top-level-clause sql pattern start))
-
 (defun clutch--sql-normalize-for-rewrite (sql)
   "Return SQL trimmed for rewrite operations."
   (string-trim-right
@@ -613,7 +785,7 @@ defaults to 0.  Returns nil if not found."
   (let* ((normalized (clutch--sql-normalize-for-rewrite sql))
          (candidates
           (cl-loop for kw in '("UPDATE" "DELETE" "SELECT" "INSERT" "REPLACE" "MERGE")
-                   for pos = (clutch--sql-find-top-level-clause normalized kw)
+                   for pos = (clutch-db-sql-find-top-level-clause normalized kw)
                    when pos collect (cons kw pos)))
          (first (car (sort candidates (lambda (a b) (< (cdr a) (cdr b)))))))
     (car-safe first)))
@@ -623,7 +795,7 @@ defaults to 0.  Returns nil if not found."
   (let ((normalized (clutch--sql-normalize-for-rewrite sql))
         (main-op (clutch--sql-main-op-keyword sql)))
     (and (member main-op '("UPDATE" "DELETE"))
-         (not (clutch--sql-find-top-level-clause normalized "WHERE")))))
+         (not (clutch-db-sql-find-top-level-clause normalized "WHERE")))))
 
 (defun clutch--require-risky-dml-confirmation (sql)
   "Require explicit typed confirmation for risky DML SQL."
@@ -642,17 +814,28 @@ Leading SQL comments are stripped before checking."
      "\\`\\(?:SELECT\\|WITH\\|DESCRIBE\\|DESC\\|SHOW\\|EXPLAIN\\)\\b"
      (upcase trimmed))))
 
-(defun clutch--init-result-state (conn sql columns rows elapsed)
+(defun clutch--init-result-state (conn sql columns rows elapsed
+                                       &optional row-identity-prep)
   "Initialize buffer-local state for a fresh query result.
 CONN is the connection, SQL the original query, COLUMNS and ROWS
-the result data, ELAPSED the query time.  Returns column names."
-  (let ((col-names (clutch--column-names columns)))
+the result data, ELAPSED the query time.  ROW-IDENTITY-PREP describes any
+hidden row identity columns in COLUMNS.  Returns column names."
+  (let* ((columns (clutch--apply-row-identity-column-metadata
+                   columns row-identity-prep))
+         (row-identity (clutch--finalize-row-identity
+                        row-identity-prep columns))
+         (col-names (clutch--column-names columns)))
     (setq-local clutch--last-query sql
                 clutch--base-query sql
                 clutch-connection conn
                 clutch--result-columns col-names
                 clutch--result-column-defs columns
                 clutch--result-rows rows
+                clutch--row-identity row-identity
+                clutch--cached-pk-indices
+                (and (eq (plist-get row-identity :kind) 'primary-key)
+                     (or (plist-get row-identity :source-indices)
+                         (plist-get row-identity :indices)))
                 clutch--pending-edits nil
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil
@@ -679,7 +862,10 @@ the result data, ELAPSED the query time.  Returns column names."
   "Execute a SELECT SQL query with pagination on CONNECTION.
 Returns the query result."
   (let* ((page-size clutch-result-max-rows)
-         (paged-sql (clutch-db-build-paged-sql connection sql 0 page-size))
+         (row-identity-prep
+          (clutch--prepare-row-identity-query connection sql))
+         (identity-sql (plist-get row-identity-prep :sql))
+         (paged-sql (clutch-db-build-paged-sql connection identity-sql 0 page-size))
          (start (float-time))
          (source-buffer
           (if (window-live-p clutch--source-window)
@@ -707,7 +893,8 @@ Returns the query result."
                       (throw 'clutch--execution-aborted nil)))))
          (elapsed (- (float-time) start))
          (buf (get-buffer-create (clutch--result-buffer-name)))
-         (columns (clutch-db-result-columns result))
+         (columns (clutch--apply-row-identity-column-metadata
+                   (clutch-db-result-columns result) row-identity-prep))
          (rows (clutch-db-result-rows result)))
     (when clutch-debug-mode
       (clutch--remember-debug-event
@@ -722,8 +909,8 @@ Returns the query result."
     (with-current-buffer buf
       (clutch-result-mode)
       (let ((col-names (clutch--init-result-state
-                        connection sql columns rows elapsed)))
-        (setq clutch--cached-pk-indices (clutch-result--detect-primary-key))
+                        connection sql columns rows elapsed
+                        row-identity-prep)))
         (clutch--load-fk-info)
         (when col-names
           (clutch--display-select-result col-names rows columns)))
