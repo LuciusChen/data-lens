@@ -7808,6 +7808,37 @@ This applies when the buffer owns the connection."
       (when (buffer-live-p existing)
         (kill-buffer existing)))))
 
+(ert-deftest clutch-test-query-console-loads-legacy-alias-file-when-param-file-missing ()
+  "Query console should migrate smoothly from alias-based persistence."
+  (let* ((name "alpha")
+         (dir (make-temp-file "clutch-console-" t))
+         (buffer-name (clutch--console-buffer-base-name name))
+         (params '(:backend mysql
+                   :host "db.internal"
+                   :port 3306
+                   :user "app"
+                   :database "prod"))
+         (clutch-console-directory dir)
+         (clutch-connection-alist `((,name . ,params))))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "alpha.sql" dir)
+            (insert "SELECT legacy;"))
+          (cl-letf (((symbol-function 'clutch--effective-sql-product)
+                     (lambda (_params) 'mysql))
+                    ((symbol-function 'clutch--build-conn)
+                     (lambda (_params) 'conn))
+                    ((symbol-function 'clutch--activate-current-buffer-connection)
+                     (lambda (_conn _params _product) nil))
+                    ((symbol-function 'clutch--update-console-buffer-name)
+                     (lambda () nil)))
+            (clutch-query-console name)
+            (should (equal (buffer-string) "SELECT legacy;"))
+            (should-not (equal clutch--console-storage-name name))))
+      (when-let* ((buf (get-buffer buffer-name)))
+        (kill-buffer buf))
+      (delete-directory dir t))))
+
 (ert-deftest clutch-test-connect-outside-console-still-uses-generic-read-flow ()
   "Non-console buffers should keep the generic interactive connect flow."
   (with-temp-buffer
@@ -9012,16 +9043,40 @@ This applies when the buffer owns the connection."
                  reported))))))
 
 (ert-deftest clutch-test-console-persistence-name-defaults-to-console-name ()
-  "Console persistence should default to the saved connection name."
-  (should (equal (clutch--console-persistence-name "prod" '(:backend mysql))
+  "Console persistence should fall back to the saved connection name without params."
+  (should (equal (clutch--console-persistence-name "prod" nil)
                  "prod")))
 
-(ert-deftest clutch-test-console-persistence-name-uses-explicit-console-id ()
-  "Console persistence should honor :clutch-console-id when configured."
-  (should (equal (clutch--console-persistence-name
-                  "prod-readonly"
-                  '(:backend mysql :clutch-console-id "prod-shared"))
-                 "prod-shared")))
+(ert-deftest clutch-test-console-persistence-name-uses-connection-params ()
+  "Console persistence should use stable connection params before alias names."
+  (let ((params '(:backend mysql
+                  :host "db.internal"
+                  :port 3306
+                  :user "app"
+                  :database "prod")))
+    (should (equal (clutch--console-persistence-name "old-name" params)
+                   (clutch--console-persistence-name "new-name" params)))
+    (should (equal (clutch--console-persistence-name "old-name" params)
+                   "backend=mysql|user=app|host=db.internal|port=3306|database=prod"))))
+
+(ert-deftest clutch-test-console-persistence-name-changes-with-endpoint ()
+  "Different connection endpoints should get different persistence names."
+  (should-not
+   (equal (clutch--console-persistence-name
+           "prod" '(:backend mysql :host "db-a" :port 3306 :database "app"))
+          (clutch--console-persistence-name
+           "prod" '(:backend mysql :host "db-b" :port 3306 :database "app")))))
+
+(ert-deftest clutch-test-console-persistence-name-redacts-url-passwords ()
+  "URL password parameters should not leak into console persistence names."
+  (let ((name (clutch--console-persistence-name
+               "prod"
+               '(:backend mysql
+                 :url "jdbc:mysql://db/prod?user=app&password=secret;pwd=other"))))
+    (should (string-match-p "password=REDACTED" name))
+    (should (string-match-p "pwd=REDACTED" name))
+    (should-not (string-match-p "secret" name))
+    (should-not (string-match-p "other" name))))
 
 (ert-deftest clutch-test-save-console-writes-buffer-to-file ()
   "Saving a named console should write its current contents to disk."

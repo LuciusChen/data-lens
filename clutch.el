@@ -1090,9 +1090,42 @@ Returns non-nil on success, nil on failure."
 
 ;;;; Console persistence
 
+(defun clutch--console-redacted-url (url)
+  "Return URL with obvious password parameters redacted."
+  (when url
+    (replace-regexp-in-string
+     "\\([?&;]\\(?:password\\|passwd\\|pwd\\)=\\)[^&;]+"
+     "\\1REDACTED"
+     url)))
+
+(defun clutch--console-identity-from-params (params)
+  "Return a stable query-console persistence identity from PARAMS."
+  (when params
+    (let* ((backend (or (plist-get params :backend)
+                        (plist-get params :driver)))
+           (url (clutch--console-redacted-url (plist-get params :url)))
+           (host (plist-get params :host))
+           (port (plist-get params :port))
+           (database (plist-get params :database))
+           (schema (plist-get params :schema))
+           (user (plist-get params :user))
+           (ssh-host (plist-get params :ssh-host))
+           (parts
+            (delq nil
+                  (list
+                   (and backend (format "backend=%s" backend))
+                   (and user (format "user=%s" user))
+                   (and host (format "host=%s" host))
+                   (and port (format "port=%s" port))
+                   (and database (format "database=%s" database))
+                   (and schema (format "schema=%s" schema))
+                   (and url (format "url=%s" url))
+                   (and ssh-host (format "ssh=%s" ssh-host))))))
+      (and parts (string-join parts "|")))))
+
 (defun clutch--console-persistence-name (name &optional params)
   "Return stable persistence name for console NAME and PARAMS."
-  (or (plist-get params :clutch-console-id)
+  (or (clutch--console-identity-from-params params)
       name))
 
 (defun clutch--console-file (name)

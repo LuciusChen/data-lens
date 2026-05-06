@@ -210,10 +210,15 @@ window rather than replacing the current window."
         (setq-local clutch--console-storage-name storage-name)
         (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
         (when is-new
-          (let ((coding-system-for-read 'utf-8)
-                (file (clutch--console-file storage-name)))
-            (when (file-readable-p file)
-              (insert-file-contents file))))
+          (let* ((coding-system-for-read 'utf-8)
+                 (file (clutch--console-file storage-name))
+                 (legacy-file (clutch--console-file name))
+                 (read-file (if (or (file-readable-p file)
+                                    (equal file legacy-file))
+                                file
+                              legacy-file)))
+            (when (file-readable-p read-file)
+              (insert-file-contents read-file))))
         (clutch--activate-current-buffer-connection conn params product)
         (clutch--update-console-buffer-name)))))
 
