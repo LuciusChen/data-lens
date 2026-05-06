@@ -30,6 +30,7 @@
 (require 'clutch-db-jdbc)
 
 (require 'clutch)
+(require 'clutch-ai)
 
 (defvar mysql-tls-verify-server)
 
@@ -8540,6 +8541,130 @@ This applies when the buffer owns the connection."
         (clutch-preview-execution-sql)
         (should (equal captured
                        "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"))))))
+
+(ert-deftest clutch-test-ai-extracts-fenced-sql-response ()
+  "AI responses should prefer fenced SQL over explanatory prose."
+  (should
+   (equal
+    (clutch-ai--response-sql
+     "Notes first\n```sql\nselect * from users where active = 1;\n```\nMore notes")
+    "select * from users where active = 1;")))
+
+(ert-deftest clutch-test-ai-provider-plist-response ()
+  "Function providers may return structured SQL and notes."
+  (let ((response '(:sql "select id from users;"
+                    :notes "- narrowed projection"
+                    :risk "- none known")))
+    (should (equal (clutch-ai--response-sql response)
+                   "select id from users;"))
+    (should (string-match-p "narrowed projection"
+                            (clutch-ai--response-notes response)))
+    (should (string-match-p "none known"
+                            (clutch-ai--response-notes response)))))
+
+(ert-deftest clutch-test-ai-review-accept-replaces-source-region ()
+  "Accepting an AI review should replace only the reviewed SQL range."
+  (let ((source (generate-new-buffer " *clutch-ai-source*"))
+        (review (generate-new-buffer " *clutch-ai-review*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (insert "select * from users;\nselect * from orders;"))
+          (with-current-buffer review
+            (clutch-ai-review-mode)
+            (setq-local clutch-ai--review-source-buffer source
+                        clutch-ai--review-source-beg 1
+                        clutch-ai--review-source-end 21
+                        clutch-ai--review-candidate-sql
+                        "select id, name from users;")
+            (cl-letf (((symbol-function 'quit-window) #'ignore))
+              (clutch-ai-review-accept)))
+          (with-current-buffer source
+            (should (equal (buffer-string)
+                           "select id, name from users;\nselect * from orders;"))))
+      (kill-buffer source)
+      (kill-buffer review))))
+
+(ert-deftest clutch-test-ai-schema-hints-missing-file-loads-nil ()
+  "Missing schema hints files should behave as empty hints."
+  (let ((clutch-ai-schema-hints-file
+         (expand-file-name "missing-schema-hints.el" temporary-file-directory)))
+    (when (file-exists-p clutch-ai-schema-hints-file)
+      (delete-file clutch-ai-schema-hints-file))
+    (should-not (clutch-ai--load-schema-hints))))
+
+(ert-deftest clutch-test-ai-schema-hints-key-prefers-stable-schema-id ()
+  "Schema hints key should prefer explicit :clutch-schema-id."
+  (let ((clutch--connection-params '(:backend mysql :clutch-schema-id "app-prod"))
+        (clutch--console-name "renamed-console")
+        (clutch-connection 'conn))
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "volatile-key")))
+      (should (equal (clutch-ai--schema-hints-key clutch-connection)
+                     "app-prod")))))
+
+(ert-deftest clutch-test-ai-put-logical-relationship-updates-duplicates ()
+  "Adding the same logical relationship should update rather than duplicate."
+  (let ((clutch-ai-schema-hints-file
+         (make-temp-file "clutch-schema-hints-" nil ".el"))
+        (first '((:table "orders" :column "user_id")
+                 (:table "users" :column "id")
+                 :confidence user-confirmed
+                 :note "first"))
+        (second '((:table "ORDERS" :column "USER_ID")
+                  (:table "users" :column "id")
+                  :confidence user-confirmed
+                  :note "second")))
+    (unwind-protect
+        (progn
+          (should-not (clutch-ai--put-logical-relationship "app-prod" first))
+          (should (clutch-ai--put-logical-relationship "app-prod" second))
+          (let ((relationships
+                 (plist-get (clutch-ai--schema-hints-for-key
+                             "app-prod"
+                             (clutch-ai--load-schema-hints))
+                            :relationships)))
+            (should (= 1 (length relationships)))
+            (should (equal (plist-get (nthcdr 2 (car relationships)) :note)
+                           "second"))))
+      (when (file-exists-p clutch-ai-schema-hints-file)
+        (delete-file clutch-ai-schema-hints-file)))))
+
+(ert-deftest clutch-test-ai-context-includes-only-confirmed-logical-relationships ()
+  "AI context should include user-confirmed logical relationships as facts."
+  (let ((clutch-ai-schema-hints-file
+         (make-temp-file "clutch-schema-hints-" nil ".el"))
+        (clutch-connection 'conn)
+        (clutch--connection-params '(:clutch-schema-id "app-prod"))
+        (clutch--conn-sql-product 'mysql))
+    (unwind-protect
+        (progn
+          (clutch-ai--save-schema-hints
+           '(("app-prod"
+              :relationships
+              (((:table "orders" :column "user_id")
+                (:table "users" :column "id")
+                :confidence user-confirmed
+                :note "logical FK")
+               ((:table "orders" :column "coupon_id")
+                (:table "coupons" :column "id")
+                :confidence ai-suggested
+                :note "not confirmed")))))
+          (with-temp-buffer
+            (insert "select * from orders join users on users.id = orders.user_id")
+            (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                      ((symbol-function 'clutch--connection-key)
+                       (lambda (_conn) "volatile-key"))
+                      ((symbol-function 'clutch--backend-key-from-conn)
+                       (lambda (_conn) 'mysql)))
+              (let ((context (clutch-ai--context
+                              (list :source-buffer (current-buffer)
+                                    :sql (buffer-string)))))
+                (should (string-match-p "orders.user_id -> users.id" context))
+                (should (string-match-p "logical FK" context))
+                (should-not (string-match-p "coupon_id" context))))))
+      (when (file-exists-p clutch-ai-schema-hints-file)
+        (delete-file clutch-ai-schema-hints-file)))))
 
 (ert-deftest clutch-test-execute-params-fallback-renders-sql-before-query ()
   "Fallback parameter execution should render SQL via escape helpers."

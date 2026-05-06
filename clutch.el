@@ -2366,6 +2366,7 @@ SQL keyword/function docs are shown even without a connection."
     (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
     (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
     (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
+    (define-key map (kbd "C-c C-v") #'clutch-ai-optimize-sql)
     (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
     (define-key map (kbd "C-c ?") #'clutch-dispatch)
     map)
@@ -2385,7 +2386,8 @@ Key bindings:
   \\[clutch-describe-dwim]	Describe object
   \\[clutch-act-dwim]	Object actions
   \\[clutch-switch-schema]	Switch schema/database
-  \\[clutch-preview-execution-sql]	Preview execution"
+  \\[clutch-preview-execution-sql]	Preview execution
+  \\[clutch-ai-optimize-sql]	AI optimize SQL"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
   (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
   (add-hook 'kill-buffer-hook #'clutch--disconnect-on-kill nil t)
@@ -2407,6 +2409,12 @@ Key bindings:
 (autoload 'clutch-execute "clutch" nil t)
 ;;;###autoload
 (autoload 'clutch-edit-indirect "clutch" nil t)
+;;;###autoload
+(autoload 'clutch-ai-optimize-sql "clutch-ai" nil t)
+;;;###autoload
+(autoload 'clutch-ai-add-logical-relationship "clutch-ai" nil t)
+;;;###autoload
+(autoload 'clutch-ai-edit-schema-hints "clutch-ai" nil t)
 
 ;;;; Cell navigation
 
@@ -4894,6 +4902,10 @@ Accumulates input until a semicolon is found, then executes."
     ("p" "Preview execution" clutch-preview-execution-sql)]
    ["Edit"
     ("'" "Indirect edit"  clutch-edit-indirect)]
+   ["AI"
+    ("v" "Optimize SQL" clutch-ai-optimize-sql)
+    ("F" "Add logical FK" clutch-ai-add-logical-relationship)
+    ("H" "Edit schema hints" clutch-ai-edit-schema-hints)]
    ["Objects"
     ("j" "Jump to object"     clutch-jump)
     ("D" "Describe object"    clutch-describe-dwim)
