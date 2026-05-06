@@ -178,6 +178,16 @@ backends.  See [[file:../README.org::*Password Management][Password Management]]
 - Oracle =DATE= columns include a time component; the agent always uses =getTimestamp()=
   to avoid silent data loss.
 
+** Staged Mutation Row Identity
+
+- JDBC result-buffer staged =UPDATE= / =DELETE= workflows use row identity
+  metadata in the same order as native backends: primary key first, then
+  non-null unique keys discovered from index metadata.  Oracle JDBC can also
+  fall back to =ROWID= for base tables without a logical key.  Other JDBC
+  backends require a primary key or non-null unique key for editable results.
+- Oracle =ROWID= is a physical row locator and can change after =UPDATE=;
+  stable result order after refresh still requires an explicit SQL =ORDER BY=.
+
 ** Transaction Control
 
 - Oracle JDBC connections use manual commit by default, matching DataGrip's

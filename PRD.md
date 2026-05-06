@@ -199,11 +199,12 @@ query is still running.
 | `clutch--result-column-defs` | Column definitions from query |
 | `clutch--column-widths` | Display width vector |
 | `clutch--row-start-positions` | Vector of row buffer positions (O(1) goto) |
-| `clutch--pending-edits` | Staged cell modifications (PK → col → value) |
-| `clutch--pending-deletes` | Staged row deletions (list of PK vectors) |
+| `clutch--pending-edits` | Staged cell modifications keyed by row identity vector + column |
+| `clutch--pending-deletes` | Staged row deletions (list of row identity vectors) |
 | `clutch--pending-inserts` | Staged new rows |
 | `clutch--marked-rows` | Dired-style marked row index set |
-| `clutch--cached-pk-indices` | Primary key column positions |
+| `clutch--row-identity` | Current result row identity metadata for UPDATE/DELETE |
+| `clutch--cached-pk-indices` | Visible primary-key column positions when PK identity is available |
 | `clutch--fk-info` | Foreign key metadata for result table |
 | `clutch--page-current` | Current row page (0-based) |
 | `clutch--page-total-rows` | Total row count (from COUNT(*)) |
@@ -770,15 +771,15 @@ Footer shows staging status: `E-2  D-1  I-3  commit:C-c C-c  discard:C-c C-k`
 #### Edit Cell
 
 1. `C-c '` on a cell → open a dedicated edit buffer
-2. Pending edit stored in `clutch--pending-edits` keyed by PK + column
+2. Pending edit stored in `clutch--pending-edits` keyed by row identity + column
 3. Cell shown with `clutch-modified-face` until committed
 4. Confirmation preview renders literal SQL text, but native MySQL/PostgreSQL/SQLite execute staged DML through parameter binding via `clutch-db-execute-params`
 
 #### Delete Row
 
 1. `d` on a row → row shown with strike-through + `D` marker in left column
-2. Stored by primary key in `clutch--pending-deletes`
-3. Commit generates: `DELETE FROM table WHERE pk = id`
+2. Stored by row identity in `clutch--pending-deletes`
+3. Commit generates a `DELETE FROM table WHERE ...` predicate from the selected row identity
 
 #### Insert Row
 
@@ -792,10 +793,12 @@ Footer shows staging status: `E-2  D-1  I-3  commit:C-c C-c  discard:C-c C-k`
 
 ### Mutation SQL Generation Rules
 
-- **UPDATE/DELETE**: always keyed by primary key (mutations disabled without PK)
+- **UPDATE/DELETE**: keyed by row identity. Candidate order is primary key, non-null unique key, then backend row locator when available.
 - **INSERT**: generated/default columns omitted from column list (let DB handle)
 - **Composite PKs**: supported; WHERE clause uses all PK columns
-- **NULL PK components**: WHERE templates keep `IS NULL` literals for null PK parts instead of binding `NULL = ?`
+- **Composite unique keys**: supported when all key columns are declared non-null
+- **NULL identity components**: WHERE templates keep `IS NULL` literals for null parts instead of binding `NULL = ?`
+- **Physical row locators**: PostgreSQL `ctid`, SQLite `rowid`, and Oracle JDBC `ROWID` are used only when stronger logical keys are absent; these locators may change after UPDATE, so display order after refresh still depends on the query's explicit `ORDER BY`
 
 ---
 
@@ -981,6 +984,7 @@ Current `clutch-db.el` generic surface, grouped by responsibility:
 | `clutch-db-complete-tables (conn prefix)` / `clutch-db-search-table-entries (conn prefix)` | Table completion and prefix search |
 | `clutch-db-table-comment (conn table)` / `clutch-db-column-details (conn table)` | Synchronous table comment / detailed column metadata |
 | `clutch-db-primary-key-columns (conn table)` / `clutch-db-foreign-keys (conn table)` / `clutch-db-referencing-objects (conn table)` | Relationship metadata |
+| `clutch-db-row-identity-candidates (conn table)` | Ordered UPDATE/DELETE row identity candidates: primary key, non-null unique key, backend row locator |
 
 ### Object introspection
 
@@ -1033,7 +1037,7 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | `search-columns` | Prefix search for columns |
 | `get-primary-keys` | List primary keys |
 | `get-foreign-keys` | List foreign keys |
-| `get-indexes` / `get-index-columns` | Index metadata |
+| `get-indexes` / `get-index-columns` | Index metadata, including unique indexes used for row identity |
 | `get-sequences` / `get-procedures` / `get-functions` / `get-triggers` | Non-table object discovery |
 | `get-procedure-params` / `get-function-params` | Routine parameter metadata |
 | `get-object-source` / `get-object-ddl` | Source or DDL text |
@@ -1078,7 +1082,7 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | Area | Limitation |
 |------|-----------|
 | **SQL rewriting** | ORDER BY/LIMIT/OFFSET injection uses top-level clause detection (regex); complex CTEs/UNIONs may rewrite incorrectly |
-| **Mutations without PK** | Edit and delete are disabled when the result table has no primary key |
+| **Physical row locators** | PostgreSQL `ctid`, SQLite `rowid`, and Oracle JDBC `ROWID` can identify rows without logical keys, but may change after UPDATE; explicit `ORDER BY` is still required for stable refresh ordering |
 | **MySQL query timeout** | `clutch-query-timeout-seconds` is not enforced for MySQL (applied for PostgreSQL and JDBC only) |
 | **Transaction control** | Native MySQL and PostgreSQL support `commit` / `rollback` / runtime auto-commit toggle; JDBC supports the same, with Oracle defaulting to manual-commit and `:manual-commit` remaining JDBC-only at connect time |
 | **Prepared statements** | DML mutations use parameterized execution for native MySQL/PostgreSQL/SQLite backends; JDBC still falls back to literal SQL rendering |
@@ -1088,6 +1092,9 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 
 ### Branch Features
 
+- Result mutations use row identity candidates, so tables without primary keys
+  can still be edited or deleted when a non-null unique key or backend row
+  locator is available.
 - Deferred metadata loading now keeps MySQL/PostgreSQL schema and object warmup
   off the initial UI hot path via idle-time cache preheat on the main thread.
 - Result buffers support per-table/per-column displayers through

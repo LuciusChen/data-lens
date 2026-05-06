@@ -67,9 +67,15 @@ Tip: =v= keeps a static snapshot of the current cell; =V= opens =*clutch-live-vi
 which follows point until you press =f= to freeze it or =q= to close it.
 Tip: the result-buffer status line uses compact staged-change tokens:
 =E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts.
-When a query result is not updateable because no primary key was detected,
-the same line shows =PK missing= and =E/D off=; =C-c '= also errors
+When a query result is not updateable because no row identity was detected,
+the same line shows =row identity missing= and =E/D off=; =C-c '= also errors
 immediately instead of opening an edit buffer that cannot be committed.
+Editable result buffers choose row identity in this order: primary key,
+non-null unique key, then backend row locator when available.  Row locator
+support is backend-specific: PostgreSQL tables can use =ctid=, SQLite rowid
+tables can use =rowid=, and Oracle JDBC tables can use =ROWID=.  Physical row
+locators may change after UPDATE, so refresh order is still controlled only by
+the SQL query; use an explicit =ORDER BY= when row order matters.
 Tip: SQL-backed result refreshes (=g=, =W=, sort, paging) keep the column
 header visible; busy state temporarily replaces the elapsed-time segment in the
 footer with a spinner instead of replacing the table header with the query-console

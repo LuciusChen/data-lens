@@ -279,6 +279,13 @@ Relevant variables:
 - clutch preview buffers still show fully rendered SQL text for readability
 - Native MySQL/PostgreSQL/SQLite staged `INSERT` / `UPDATE` / `DELETE` execute
   through backend parameter binding instead of literal SQL interpolation
+- Staged `UPDATE` / `DELETE` use row identity metadata rather than requiring a
+  primary key in every table: primary keys are preferred, non-null unique keys
+  are used next, PostgreSQL can fall back to `ctid`, and SQLite rowid tables
+  can fall back to `rowid`
+- Physical row locators such as PostgreSQL `ctid` and SQLite `rowid` identify
+  the current row version only.  They may change after `UPDATE`, and result
+  refresh ordering remains defined only by the query's explicit `ORDER BY`
 - JDBC currently keeps its literal-SQL fallback until the sidecar grows a
   prepared-execute operation
 

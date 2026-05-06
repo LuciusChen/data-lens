@@ -68,7 +68,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 ## Mutation Workflow Convergence
 
 - **One staged-mutation vocabulary everywhere**: Footer, transient labels, help text, and `README.org` must use the same staged-edit / staged-delete / staged-insert terminology.
-- **Identity must converge fully**: If pending state becomes PK-based, every lookup and render path must also become PK-based.
+- **Identity must converge fully**: If pending state becomes row-identity-based, every lookup and render path must use the same row identity model.
 - **Preview must show real execution payload**: A command named `Preview execution` must preview what would actually run.
 - **Nearby workflows should share helpers**: Insert and edit flows should reuse completion, temporal helpers, and validation rules when semantics match.
 - **UI symmetry must follow SQL semantics**: Do not copy insert-buffer metadata or controls into edit buffers unless update semantics truly match.
@@ -100,6 +100,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - Prefer bumping the agent version for released jar content changes. Replacing a GitHub release asset in place is an exceptional repair path, not normal workflow.
 - Any release-asset change affecting JDBC startup or installation must update `README.org` and, when the tradeoff is non-obvious, add or update a postmortem.
 - The `postmortem/` directory records design decisions and lessons learned. Read relevant records before significant changes.
+- Postmortems are historical decision records, not current product documentation. Do not rewrite old postmortems just to match current behavior; when a later design supersedes an older record, write a new postmortem and optionally add a short "Superseded by NNN" note at the top of the older file.
 - Write a postmortem when:
   - adding or changing a user-visible workflow
   - choosing between non-obvious architectural approaches

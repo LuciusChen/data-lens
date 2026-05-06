@@ -50,7 +50,7 @@ For backend-specific notes, see
 
 - Single-page result display with horizontal scrolling for wide tables
 - SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
-  - =mode-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, no-PK guidance, active filters, and cursor position (=R-N:column-N/M=) (with =nerd-icons=, Unicode fallback)
+  - =mode-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, row-identity guidance, active filters, and cursor position (=R-N:column-N/M=) (with =nerd-icons=, Unicode fallback)
   - =header-line=: column names with =│= borders and underlined labels
 - After execution, focus stays in the SQL buffer while results refresh below
 - Last successfully executed SQL is marked at the statement start gutter in the editor
@@ -58,7 +58,7 @@ For backend-specific notes, see
 - Right-aligned numeric columns
 - Record buffer for single-row detail view
 - Foreign key detection and navigation
-- Inline cell editing with staged UPDATE generation
+- Row-identity-backed inline cell editing with staged UPDATE generation; editable results use primary keys first, then non-null unique keys, then backend row locators when available
 - Staged INSERT (=i=), DELETE (=d=), and staged SQL preview/commit
 - WHERE filtering (=W=), client-side fuzzy filter (=/=), SQL =ORDER BY= sorting (=s=)
 - Column-aligned horizontal paging via =[= / =]=, plus column width adjustment via =-= / ===
@@ -425,17 +425,17 @@ behavior, and helper APIs, see [[file:docs/native-backends.md][docs/native-backe
 =test/clutch-test.el= — UI layer, covering value formatting and cell rendering,
 column width and single-page result layout, insert and edit buffer workflow
 (TAB navigation, local validation, JSON sub-editor, enum/temporal completion),
-staged-commit lifecycle (PK-vec based edit/insert/delete, discard, commit
+staged-commit lifecycle (row-identity based edit/insert/delete, discard, commit
 ordering), object workflow and schema refresh state, SQL keyword completion
 (CAPF), and REPL behavior.
 
-=test/clutch-db-test.el= — database backend layer, ~59 tests covering: JDBC
+=test/clutch-db-test.el= — database backend layer, 183 tests covering: JDBC
 connection and timeout mapping, query-timeout clamping, transaction
 (commit/rollback/autocommit toggle), schema refresh, cursor pagination, driver
 installation (Oracle, SQL Server, Redshift), agent JAR validation and lifecycle,
-=clutch-db-live-p= identity check, RPC timeout kill, native backend adapter
-mapping (mysql / pg / sqlite), and cross-backend value formatting and null
-handling.
+=clutch-db-live-p= identity check, row identity candidates, RPC timeout kill,
+native backend adapter mapping (mysql / pg / sqlite), and cross-backend value
+formatting and null handling.
 
 The pure protocol packages (=mysql= and =pg=) and the Org-Babel bridge
 (=ob-clutch=) now live in separate repositories and carry their own focused test
