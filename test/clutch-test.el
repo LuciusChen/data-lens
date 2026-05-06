@@ -8593,15 +8593,43 @@ This applies when the buffer owns the connection."
       (delete-file clutch-ai-schema-hints-file))
     (should-not (clutch-ai--load-schema-hints))))
 
-(ert-deftest clutch-test-ai-schema-hints-key-prefers-stable-schema-id ()
-  "Schema hints key should prefer explicit :clutch-schema-id."
-  (let ((clutch--connection-params '(:backend mysql :clutch-schema-id "app-prod"))
-        (clutch--console-name "renamed-console")
+(ert-deftest clutch-test-ai-schema-hints-key-uses-connection-params ()
+  "Schema hints key should use stable connection params before alias names."
+  (let ((clutch--connection-params '(:backend mysql
+                                     :host "db.internal"
+                                     :port 3306
+                                     :user "app"
+                                     :database "prod"))
         (clutch-connection 'conn))
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "volatile-key")))
-      (should (equal (clutch-ai--schema-hints-key clutch-connection)
-                     "app-prod")))))
+    (should (equal (clutch-ai--schema-hints-key clutch-connection)
+                   "backend=mysql|user=app|host=db.internal|port=3306|database=prod"))))
+
+(ert-deftest clutch-test-ai-schema-hints-key-changes-with-endpoint ()
+  "Different connection endpoints should get different schema hint keys."
+  (let ((clutch-connection 'conn)
+        (clutch--connection-params '(:backend mysql
+                                     :host "db-a"
+                                     :port 3306
+                                     :database "app")))
+    (should-not
+     (equal (clutch-ai--schema-hints-key clutch-connection)
+            (let ((clutch--connection-params '(:backend mysql
+                                               :host "db-b"
+                                               :port 3306
+                                               :database "app")))
+              (clutch-ai--schema-hints-key clutch-connection))))))
+
+(ert-deftest clutch-test-ai-schema-hints-key-redacts-url-passwords ()
+  "URL password parameters should not leak into schema hint keys."
+  (let* ((clutch-connection 'conn)
+         (clutch--connection-params
+          '(:backend mysql
+            :url "jdbc:mysql://db/prod?user=app&password=secret;pwd=other"))
+         (key (clutch-ai--schema-hints-key clutch-connection)))
+    (should (string-match-p "password=REDACTED" key))
+    (should (string-match-p "pwd=REDACTED" key))
+    (should-not (string-match-p "secret" key))
+    (should-not (string-match-p "other" key))))
 
 (ert-deftest clutch-test-ai-put-logical-relationship-updates-duplicates ()
   "Adding the same logical relationship should update rather than duplicate."
@@ -8635,12 +8663,16 @@ This applies when the buffer owns the connection."
   (let ((clutch-ai-schema-hints-file
          (make-temp-file "clutch-schema-hints-" nil ".el"))
         (clutch-connection 'conn)
-        (clutch--connection-params '(:clutch-schema-id "app-prod"))
+        (clutch--connection-params '(:backend mysql
+                                     :host "db.internal"
+                                     :port 3306
+                                     :user "app"
+                                     :database "prod"))
         (clutch--conn-sql-product 'mysql))
     (unwind-protect
         (progn
           (clutch-ai--save-schema-hints
-           '(("app-prod"
+           '(("backend=mysql|user=app|host=db.internal|port=3306|database=prod"
               :relationships
               (((:table "orders" :column "user_id")
                 (:table "users" :column "id")
@@ -8654,7 +8686,7 @@ This applies when the buffer owns the connection."
             (insert "select * from orders join users on users.id = orders.user_id")
             (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                       ((symbol-function 'clutch--connection-key)
-                       (lambda (_conn) "volatile-key"))
+                       (lambda (_conn) "display-key"))
                       ((symbol-function 'clutch--backend-key-from-conn)
                        (lambda (_conn) 'mysql)))
               (let ((context (clutch-ai--context

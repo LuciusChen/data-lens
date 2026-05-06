@@ -62,8 +62,8 @@ EXPLAIN ANALYZE from AI commands."
 (defcustom clutch-ai-schema-hints-file
   (expand-file-name "clutch/schema-hints.el" user-emacs-directory)
   "File storing clutch schema hints used by optional AI workflows.
-Hints are keyed by `:clutch-schema-id' when present in connection params,
-falling back to the saved console name and then the connection key."
+Hints are keyed by connection parameters, so saved connection renames keep the
+same schema hints."
   :type 'file
   :group 'clutch-ai)
 
@@ -76,7 +76,6 @@ falling back to the saved console name and then the connection key."
 (defvar clutch-connection)
 (defvar clutch--connection-params)
 (defvar clutch--conn-sql-product)
-(defvar clutch--console-name)
 (defvar clutch--last-query)
 
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
@@ -91,12 +90,11 @@ falling back to the saved console name and then the connection key."
   ";; -*- mode: emacs-lisp; lexical-binding: t; -*-
 ;; Clutch schema hints.
 ;;
-;; This file is data, not code.  Entries are keyed by :clutch-schema-id when
-;; configured on a saved connection, falling back to the console name or
-;; connection key.
+;; This file is data, not code.  Entries are keyed by connection parameters,
+;; so saved connection renames keep the same schema hints.
 ;;
 ;; Example:
-;; '((\"app-prod\"
+;; '((\"backend=mysql|user=app|host=db.internal|port=3306|database=prod\"
 ;;    :relationships
 ;;    (((:table \"orders\" :column \"user_id\")
 ;;      (:table \"users\" :column \"id\")
@@ -132,13 +130,44 @@ nil
     (insert ";; Clutch schema hints.  This file is data, not code.\n\n")
     (pp hints (current-buffer))))
 
+(defun clutch-ai--redacted-url (url)
+  "Return URL with obvious password parameters redacted."
+  (when url
+    (replace-regexp-in-string
+     "\\([?&;]\\(?:password\\|passwd\\|pwd\\)=\\)[^&;]+"
+     "\\1REDACTED"
+     url)))
+
+(defun clutch-ai--connection-params-key (params)
+  "Return a stable schema-hints key from connection PARAMS."
+  (when params
+    (let* ((backend (or (plist-get params :backend)
+                        (plist-get params :driver)))
+           (url (clutch-ai--redacted-url (plist-get params :url)))
+           (host (plist-get params :host))
+           (port (plist-get params :port))
+           (database (plist-get params :database))
+           (schema (plist-get params :schema))
+           (user (plist-get params :user))
+           (ssh-host (plist-get params :ssh-host))
+           (parts
+            (delq nil
+                  (list
+                   (and backend (format "backend=%s" backend))
+                   (and user (format "user=%s" user))
+                   (and host (format "host=%s" host))
+                   (and port (format "port=%s" port))
+                   (and database (format "database=%s" database))
+                   (and schema (format "schema=%s" schema))
+                   (and url (format "url=%s" url))
+                   (and ssh-host (format "ssh=%s" ssh-host))))))
+      (and parts (string-join parts "|")))))
+
 (defun clutch-ai--schema-hints-key (&optional conn)
   "Return the stable schema-hints key for CONN or current buffer."
-  (or (plist-get clutch--connection-params :clutch-schema-id)
-      clutch--console-name
-      (and (or conn clutch-connection)
-           (clutch--connection-key (or conn clutch-connection)))
-      (user-error "No connection available for schema hints")))
+  (ignore conn)
+  (or (clutch-ai--connection-params-key clutch--connection-params)
+      (user-error "No connection parameters available for schema hints")))
 
 (defun clutch-ai--schema-hints-for-key (key &optional hints)
   "Return schema hints plist for KEY from HINTS."

@@ -192,8 +192,7 @@ explicitly:
         ("prod-pg"    . (:backend pg
                           :host "pg.internal" :port 5432
                           :user "app" :database "appdb"
-                          :ssh-host "bastion-prod"
-                          :clutch-schema-id "app-prod"))
+                          :ssh-host "bastion-prod"))
         ("dev-sqlite" . (:backend sqlite
                           :database "/path/to/my.db"))))
 #+end_src
@@ -205,9 +204,8 @@ Use =":memory:"= for a transient in-memory database (data is lost when disconnec
 For networked backends, you can set =:connect-timeout= and
 =:read-idle-timeout= (seconds) per connection entry.  JDBC connections also
 accept =:query-timeout= and =:rpc-timeout=.
-Use =:clutch-schema-id= when multiple saved connections point at the same
-logical schema, or when you want schema-level metadata to survive saved
-connection renames.
+Schema-level AI hints are keyed by connection parameters rather than saved
+connection alias, so renaming a saved connection keeps the same hints.
 TLS can be enabled per entry with =:tls t= as a shorthand; clutch normalizes
 that convenience form to backend-native settings.  For MySQL, prefer
 =:ssl-mode disabled= when you want plaintext; =off= remains accepted as a
@@ -405,12 +403,12 @@ logical relationships.  It does not send row samples.  Set
 does not run =EXPLAIN ANALYZE= from AI commands.
 
 Logical relationships are stored in =clutch-ai-schema-hints-file=, defaulting to
-=~/.emacs.d/clutch/schema-hints.el=.  They are keyed by =:clutch-schema-id= when
-present, falling back to the saved query-console name and then the connection
-key.  Use =M-x clutch-ai-add-logical-relationship= to record a user-confirmed
-relationship such as =orders.user_id -> users.id= when the database has no
-declared foreign key.  Use =M-x clutch-ai-edit-schema-hints= to edit or version
-control the hints file directly.
+=~/.emacs.d/clutch/schema-hints.el=.  They are keyed by connection parameters,
+matching query-console persistence semantics.  Use =M-x
+clutch-ai-add-logical-relationship= to record a user-confirmed relationship such
+as =orders.user_id -> users.id= when the database has no declared foreign key.
+Use =M-x clutch-ai-edit-schema-hints= to edit or version control the hints file
+directly.
 
 ** Interactive Client Guide
 
