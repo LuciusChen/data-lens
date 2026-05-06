@@ -9011,6 +9011,18 @@ This applies when the buffer owns the connection."
                  "Failed to save console demo: disk full"
                  reported))))))
 
+(ert-deftest clutch-test-console-persistence-name-defaults-to-console-name ()
+  "Console persistence should default to the saved connection name."
+  (should (equal (clutch--console-persistence-name "prod" '(:backend mysql))
+                 "prod")))
+
+(ert-deftest clutch-test-console-persistence-name-uses-explicit-console-id ()
+  "Console persistence should honor :clutch-console-id when configured."
+  (should (equal (clutch--console-persistence-name
+                  "prod-readonly"
+                  '(:backend mysql :clutch-console-id "prod-shared"))
+                 "prod-shared")))
+
 (ert-deftest clutch-test-save-console-writes-buffer-to-file ()
   "Saving a named console should write its current contents to disk."
   (let ((dir (make-temp-file "clutch-console-" t)))
@@ -9025,6 +9037,20 @@ This applies when the buffer owns the connection."
               (with-temp-buffer
                 (insert-file-contents path)
                 (should (equal (buffer-string) "SELECT 1;\nSELECT 2;"))))))
+      (delete-directory dir t))))
+
+(ert-deftest clutch-test-save-console-uses-storage-name-when-present ()
+  "Saving a console should use its stable storage name when configured."
+  (let ((dir (make-temp-file "clutch-console-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((clutch-console-directory dir))
+            (setq-local clutch--console-name "prod-renamed")
+            (setq-local clutch--console-storage-name "prod-stable")
+            (insert "SELECT stable;")
+            (clutch--save-console)
+            (should (file-exists-p (expand-file-name "prod-stable.sql" dir)))
+            (should-not (file-exists-p (expand-file-name "prod-renamed.sql" dir)))))
       (delete-directory dir t))))
 
 (ert-deftest clutch-test-save-console-skips-unnamed-buffer ()

@@ -987,6 +987,10 @@ automatically when it drops.")
   "Connection name if this buffer is a query console, nil otherwise.
 Set by `clutch-query-console'; used to save/restore buffer content.")
 
+(defvar-local clutch--console-storage-name nil
+  "Stable persistence name for this query console, or nil.
+When nil, console persistence falls back to `clutch--console-name'.")
+
 (defun clutch--console-buffer-base-name (name)
   "Return canonical buffer name for console NAME."
   (format "*clutch: %s*" name))
@@ -1086,6 +1090,11 @@ Returns non-nil on success, nil on failure."
 
 ;;;; Console persistence
 
+(defun clutch--console-persistence-name (name &optional params)
+  "Return stable persistence name for console NAME and PARAMS."
+  (or (plist-get params :clutch-console-id)
+      name))
+
 (defun clutch--console-file (name)
   "Return the persistence file path for console NAME."
   (expand-file-name
@@ -1098,9 +1107,11 @@ Returns non-nil on success, nil on failure."
     (condition-case err
         (progn
           (make-directory clutch-console-directory t)
-          (let ((coding-system-for-write 'utf-8-unix))
+          (let ((coding-system-for-write 'utf-8-unix)
+                (storage-name (or clutch--console-storage-name
+                                  clutch--console-name)))
             (write-region (point-min) (point-max)
-                          (clutch--console-file clutch--console-name)
+                          (clutch--console-file storage-name)
                           nil 'silent)))
       (error
        (message "Failed to save console %s: %s"
